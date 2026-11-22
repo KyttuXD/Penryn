@@ -1,7 +1,6 @@
-//! Drawing with OpenGL 1.5 fixed function: one vertex buffer per 16x16x16 section (opaque and
-//! water apart), coloured faces with ambient occlusion instead of textures, fog, the block
-//! outline and a 2D layer for the HUD.
-
+//! Drawing with OpenGL 1.5 fixed function: the world's sections (meshed on worker threads by
+//! mesher.rs, kept on the card by terrain.rs, culled by occlusion.rs), fog, the sky pass, the
+//! block outline and cracks.
 use crate::blocks::Blocks;
 use crate::font;
 use crate::math;

@@ -31,6 +31,11 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   multipart, rotations, per-face UVs, cull faces, tints), your game's textures with mipmaps, ambient
   occlusion, water and lava, fog, day and night from the 26.3 world clocks. Chests are vanilla's
   chest model.
+- **Fast on old cards, the same picture**: vanilla's cave culling (each section's visibility set
+  and the walk from the camera through them), whole sections of faces turned away from the camera
+  never sent, sections packed into shared vertex buffers and drawn near to far with one call per
+  16384 quads, meshing on worker threads so loading chunks does not stall frames, clouds and stars
+  kept on the card, and vanilla's Cutout Leaves option (off: opaque leaves that hide each other).
 - **Vanilla's HUD and screens**, from your game's own sprites and font: hotbar, hearts, food,
   experience, crosshair, held item name, chat (with the game's translations), the F3 screen, the
   inventory with your character in it, chests, dispensers, crafting tables, furnaces, hoppers,
@@ -87,8 +92,12 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   itself (footsteps, digging, breaking and placing blocks, buttons) with vanilla's volumes, pitch,
   distance fade and stereo, and the game's music every 10 to 20 minutes. sounds.bin (about
   375 MB) is fetched from the relay once; without it the game plays silent. `PENRYN_PERF=1`
-  prints the frame rate and position each second, and what blocks the player when they walk
-  into something. `penryn selftest` also checks movement against gates, ladders, walls, low
+  prints the frame rate and position each second, where each frame's time goes (events,
+  network, sound, ticks, meshing, sky, world, entities, block entities, clouds, particles,
+  water, weather, hand, GUI, swap), the stage behind the slowest frame, and what blocks the
+  player when they walk into something; `PENRYN_PERF=2` finishes the GL queue after each
+  stage to charge it its GPU time, `PENRYN_PERF=gpu` measures each stage on the card with timer
+  queries, and `PENRYN_MESH_THREADS=0` meshes on the main thread. `penryn selftest` also checks movement against gates, ladders, walls, low
   ceilings, ice, soul sand, cobwebs, honey, slime and bamboo.
 
 ## Not done yet
@@ -195,7 +204,9 @@ E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
 | `src/client.rs` | the session: login, configuration, every play packet handled |
 | `src/conn.rs`, `net.rs`, `wire.rs`, `zlib.rs`, `crypto.rs`, `md5.rs`, `nbt.rs` | the protocol underneath |
 | `src/world.rs`, `blocks.rs` | chunks and the block table |
-| `src/render.rs` | meshing and drawing the world (OpenGL 1.5 fixed function) |
+| `src/render.rs` | drawing the world (OpenGL 1.5 fixed function): fog, sky, passes, outline |
+| `src/mesher.rs`, `terrain.rs`, `occlusion.rs` | meshing sections on worker threads, their vertex buffers and draw calls, cave culling |
+| `src/perf.rs` | the per-stage frame timer behind `PENRYN_PERF` |
 | `src/entities.rs` | entities and their models |
 | `src/skins.rs` | players' skins and capes: profile textures, PNG decoding, the download thread |
 | `src/weather.rs` | rain, snow, thunder and lightning |
