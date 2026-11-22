@@ -95,6 +95,9 @@ pub struct Game {
     pub particle_events: Vec<crate::particles::Effect>,
     /// Creative mode: the slots' components, the registries they name, the permission level.
     pub creative: crate::creative::Sync,
+    /// The synced variant registries (mob textures), and the tab list's player names.
+    pub variants: crate::mobs::Variants,
+    pub player_names: alloc::collections::BTreeMap<[u8; 16], String>,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -259,7 +262,8 @@ impl Game {
         // ---- configuration
         let mut biomes: Vec<String> = Vec::new();
         let mut creative = crate::creative::Sync::new();
-        configure(&mut c, view, &mut biomes, &mut creative.registries)?;
+        let mut variants = crate::mobs::Variants::default();
+        configure(&mut c, view, &mut biomes, &mut creative.registries, &mut variants)?;
         let block_bits = blocks.global_bits();
         let mut world = World::new(block_bits, crate::blocks::ceil_log2(biomes.len().max(1)));
         world.set_biomes(&biomes, &blocks);
@@ -306,6 +310,8 @@ impl Game {
             effects: crate::effects::Effects::new(),
             particle_events: Vec::new(),
             creative,
+            variants,
+            player_names: alloc::collections::BTreeMap::new(),
         })
     }
 
@@ -807,6 +813,30 @@ impl Game {
                 let id = r.varint().unwrap_or(0);
                 if let Some(e) = self.entities.get_mut(&id) {
                     entity_data(&mut r, e);
+                    e.version = e.version.wrapping_add(1);
+                }
+            }
+            crate::mobs::C_SET_EQUIPMENT => {
+                let id = r.varint().unwrap_or(0);
+                if let Some(e) = self.entities.get_mut(&id) {
+                    crate::mobs::equipment(&mut r, e, slot);
+                }
+            }
+            crate::mobs::C_PLAYER_INFO_UPDATE => {
+                crate::mobs::player_info(&mut r, &mut self.player_names);
+            }
+            crate::mobs::C_PLAYER_INFO_REMOVE => {
+                crate::mobs::player_info_remove(&mut r, &mut self.player_names);
+            }
+            crate::mobs::C_ENTITY_EVENT => {
+                // 3: LivingEntity.handleEntityEvent's death (health to 0, it falls over).
+                let id = r.i32().unwrap_or(0);
+                if r.u8() == Some(3) {
+                    if let Some(e) = self.entities.get_mut(&id) {
+                        if e.item.is_none() {
+                            e.health = Some(0.0);
+                        }
+                    }
                 }
             }
             play::C_SOUND | play::C_SOUND_ENTITY => {
@@ -895,7 +925,7 @@ impl Game {
             play::C_START_CONFIGURATION => {
                 self.conn.send(play::S_CONFIGURATION_ACKNOWLEDGED, &Out::new())?;
                 let mut b: Vec<String> = Vec::new();
-                configure(&mut self.conn, 8, &mut b, &mut self.creative.registries)?;
+                configure(&mut self.conn, 8, &mut b, &mut self.creative.registries, &mut self.variants)?;
                 if !b.is_empty() {
                     self.world.biome_bits = crate::blocks::ceil_log2(b.len());
                     self.world.set_biomes(&b, &self.blocks);
@@ -1078,7 +1108,13 @@ impl Game {
 }
 
 /// The configuration phase, until the server finishes it. Counts the biomes it sends.
-fn configure(c: &mut Conn, view: i8, biomes: &mut Vec<String>, regs: &mut Vec<(String, Vec<String>)>) -> Result<(), String> {
+fn configure(
+    c: &mut Conn,
+    view: i8,
+    biomes: &mut Vec<String>,
+    regs: &mut Vec<(String, Vec<String>)>,
+    variants: &mut crate::mobs::Variants,
+) -> Result<(), String> {
     c.send(config::S_CLIENT_INFORMATION, &crate::options::client_information(view))?;
     loop {
         let p = next(c)?;
@@ -1122,7 +1158,10 @@ fn configure(c: &mut Conn, view: i8, biomes: &mut Vec<String>, regs: &mut Vec<(S
                         }
                     }
                     regs.retain(|(k, _)| *k != id);
-                    regs.push((id, names));
+                    regs.push((id.clone(), names));
+                    let mut r2 = p.reader();
+                    let _ = r2.string();
+                    crate::mobs::registry_data(&id, &mut r2, variants);
                 } else if id == "minecraft:worldgen/biome" {
                     // The biome ids in the order the server numbers them.
                     biomes.clear();
@@ -1133,6 +1172,10 @@ fn configure(c: &mut Conn, view: i8, biomes: &mut Vec<String>, regs: &mut Vec<(S
                             break;
                         }
                     }
+                } else {
+                    let mut r2 = p.reader();
+                    let _ = r2.string();
+                    crate::mobs::registry_data(&id, &mut r2, variants);
                 }
             }
             config::C_RESOURCE_PACK_PUSH => {
@@ -1202,28 +1245,41 @@ fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option<()> {
         if index == 0xFF {
             return Some(());
         }
-        match r.varint()? {
+        let kind = r.varint()?;
+        match kind {
             0 | 8 => {
                 let b = r.u8()?;
                 e.data.insert(index, b as i64);
             }
-            1 | 12 | 14 | 15 | 19 | 20..=32 | 34..=38 => {
+            1 | 12 | 14 | 15 | 19 | 20..=32 | 34..=38 | 42 | 43 => {
                 let v = r.varint()?;
                 e.data.insert(index, v as i64);
+                // The synced variant registries' holders (cat, cow, wolf, frog, pig, chicken,
+                // zombie nautilus): not their sound variants.
+                if matches!(kind, 21 | 23 | 25 | 27 | 28 | 30 | 32) {
+                    e.variant = v;
+                }
             }
             2 => {
-                r.varlong()?;
+                let v = r.varlong()?;
+                e.data.insert(index, v);
             }
             3 => {
-                r.take(4)?;
+                let v = f32::from_bits(r.i32()? as u32);
+                // LivingEntity.DATA_HEALTH_ID.
+                if index == 9 && e.item.is_none() {
+                    e.health = Some(v);
+                }
             }
             4 => {
                 r.string()?;
             }
             5 => nbt::skip_root(r)?,
             6 => {
-                if r.bool()? {
-                    nbt::skip_root(r)?;
+                // Entity.DATA_CUSTOM_NAME.
+                let name = if r.bool()? { Some(nbt::text(r)) } else { None };
+                if index == 2 {
+                    e.custom_name = name;
                 }
             }
             7 => {
@@ -1250,12 +1306,27 @@ fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option<()> {
                 }
             }
             18 => {
-                r.varint()?;
-                r.varint()?;
-                r.varint()?;
+                // VillagerData: type, profession, level.
+                e.villager = [r.varint()?, r.varint()?, r.varint()?];
+            }
+            // A particle, a list of them (LivingEntity.DATA_EFFECT_PARTICLES).
+            16 => crate::mobs::skip_particle(r)?,
+            17 => {
+                for _ in 0..r.varint()?.max(0) {
+                    crate::mobs::skip_particle(r)?;
+                }
+            }
+            33 => {
+                if r.bool()? {
+                    r.string()?;
+                    r.take(8)?;
+                }
             }
             39 => {
                 r.take(12)?;
+            }
+            40 => {
+                r.take(16)?;
             }
             _ => return None,
         }

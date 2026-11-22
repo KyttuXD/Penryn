@@ -1280,8 +1280,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             return;
         };
         let eye = [self.mover.pos[0], self.mover.pos[1] + physics::EYE, self.mover.pos[2]];
-        let sizes = self.entities.as_ref().map_or(&[][..], |t| &t.sizes[..]);
-        if let Some(k) = pt.handle(g, self.gui.as_ref(), sizes, eye) {
+        // Each entity type's hitbox (EntityType.dimensions), for death poofs.
+        let sizes: Vec<(f32, f32)> = self.entities.as_ref().map_or(Vec::new(), |t| t.types.iter().map(|ty| ty.size).collect());
+        if let Some(k) = pt.handle(g, self.gui.as_ref(), &sizes, eye) {
             for a in 0..3 {
                 self.mover.vel[a] += k[a];
             }
@@ -1557,7 +1558,6 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         // Blindness and darkness: a near, dark fog and no sky.
         let fog = g.effects.fog((self.view as f32 + 1.0) * 16.0, partial as f32);
         let sky = g.effects.sky(sky, (self.view as f32 + 1.0) * 16.0, partial as f32);
-        let world_ref = &g.world;
         let ents = self.entities.as_ref();
         let gl = &self.v.gl;
         let own = g.entity_id;
@@ -1570,6 +1570,19 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let world_ref = &g.world;
         let gui_ref = self.gui.as_ref();
         let sky_ref = &self.sky;
+        let ent_cx = crate::entities::DrawCx {
+            variants: &g.variants,
+            names: &g.player_names,
+            game_time: g.game_time,
+            icons,
+            blocks: &g.blocks,
+            atlas,
+            atlas_size,
+            gui: gui_ref,
+            yaw: g.player.yaw,
+            pitch: g.player.pitch,
+            reach: if g.game_mode == 1 { 5.0 } else { 3.0 },
+        };
         let (day_time, game_time) = (g.day_time, g.game_time as f64 + partial);
         // Clouds reach further than the terrain (vanilla: the cloud range option, 128 by default).
         let radius = (((self.view as f64 + 1.0) * 16.0).max(128.0) * 1.5).min(self.menu.o.int(crate::options::O::CloudRange) as f64 * 16.0);
@@ -1588,7 +1601,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             &mut |view| {
                 *world_view_ref = *view;
                 if let Some(t) = ents {
-                    t.draw(gl, view, eye, entities, pf, own);
+                    t.draw(gl, view, eye, entities, pf, own, &ent_cx);
                     crate::skins::draw(gl, view, eye, entities, pf, own, t);
                 }
                 crate::entities::draw_items(gl, view, eye, entities, pf, icons, blocks_ref, atlas, atlas_size);

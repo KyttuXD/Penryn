@@ -34,8 +34,12 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
   vanilla's time for the tool in hand, with the cracks; placing, using items, opening containers
   and moving items (click, right click, shift-click, number keys, Q, drop outside).
 - **Mobs, players and dropped items** with their vanilla models and textures, walking animation,
-  heads turning, the red flash when hit, sheep wool in its colour. Left click attacks, right click
-  uses.
+  heads turning, the red flash when hit, falling over when they die. 26.x's baby models, every
+  variant (the server's cat, wolf, frog, pig, cow and chicken variants with their climate models,
+  horses, llamas, parrots, rabbits, foxes, axolotls, pandas, mooshrooms, tropical fish, villager
+  biomes, professions and levels), sheep wool, collars, horse markings, eyes and outer layers,
+  armour, saddles, horse and wolf armour, llama carpets, items in hands, and name tags over
+  players and named mobs. Left click attacks, right click uses.
 - **Players' own skins and capes**: the skin (classic or slim arms, old 64 x 32 skins converted as
   vanilla does) on their model, your first-person arm and the inventory, and capes swinging
   as vanilla's CapeLayer. textures.minecraft.net needs HTTPS, so the relay fetches them
@@ -85,7 +89,8 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
   placing one opens vanilla's sign editor; its sign pictures come from `signs.bin` (optional).
 - Particles vanilla's blocks make on their own (torches, campfires, leaves, drips) and rain
   splashes are not drawn yet.
-- Mobs show their default texture (no variants, no baby models, no armour or held items).
+- Mobs: no armour trims or dyed leather colours, no heads or pumpkins worn, no shields or other
+  specially drawn items in hands, no crouching or swimming player poses, no elytra.
 - Only menus listed above have their own screen; others show their slots as chest rows.
 - Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);
   no elytra, and Dinnerbone and Grumm stand the right way up.

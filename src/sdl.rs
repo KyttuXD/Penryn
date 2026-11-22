@@ -141,6 +141,8 @@ pub const TEXTURE_2D: u32 = 0x0DE1;
 pub const TEXTURE_COORD_ARRAY: u32 = 0x8078;
 pub const ALPHA_TEST: u32 = 0x0BC0;
 pub const GREATER: u32 = 0x0204;
+pub const LESS: u32 = 0x0201;
+pub const LEQUAL: u32 = 0x0203;
 pub const TEXTURE_MAG_FILTER: u32 = 0x2800;
 pub const TEXTURE_MIN_FILTER: u32 = 0x2801;
 pub const TEXTURE_MAX_LEVEL: u32 = 0x813D;
@@ -169,6 +171,7 @@ api! { Gl, "gl", "system",
     Fogi(u32, i32);
     BlendFunc(u32, u32);
     DepthMask(u8);
+    DepthFunc(u32);
     CullFace(u32);
     GetString(u32) -> *const u8;
     LineWidth(f32);

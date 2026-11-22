@@ -137,7 +137,7 @@ pub fn logout() {
 pub const BLOCKS_MAGIC: &[u8; 4] = b"PNB9";
 pub const ATLAS_MAGIC: &[u8; 4] = b"PNA1";
 pub const GUI_MAGIC: &[u8; 4] = b"PNG3";
-pub const ENTITIES_MAGIC: &[u8; 4] = b"PNE2";
+pub const ENTITIES_MAGIC: &[u8; 4] = b"PNE3";
 pub const SOUNDS_MAGIC: &[u8; 4] = b"PNS1";
 pub const WEATHER_MAGIC: &[u8; 4] = b"PNW1";
 pub const EFFECTS_MAGIC: &[u8; 4] = b"PNF1";
