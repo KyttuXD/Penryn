@@ -1186,7 +1186,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         // The weather greys the sky and fog, dims the daylight and pulls the fog in.
         let (rain, thunder) = if dim { (0.0, 0.0) } else { self.weather.levels(g) };
         let sky = if dim { sky } else { self.weather.sky_colour(sky, rain, thunder) };
-        let day = self.weather.daylight(day, rain, thunder);
+        // The weather dims the sky light (the rain columns' light); the clouds and stars have
+        // their own weather blends (sky.rs) on the clear day's values.
+        let rain_light = self.weather.daylight(day, rain, thunder);
         (self.sky.rain, self.sky.thunder) = (rain, thunder);
         self.r.rain_fog = if dim { 0.0 } else { self.weather.fog };
         let mut world_view = [0f32; 16];
@@ -1231,7 +1233,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             },
         );
         // Rain, snow and lightning, over the water (vanilla: after the translucent terrain).
-        self.weather.draw(&self.v.gl, &world_view, &g.world, &g.blocks, eye, pf, rain, 0.2 + 0.8 * day);
+        self.weather.draw(&self.v.gl, &world_view, &g.world, &g.blocks, eye, pf, rain, 0.2 + 0.8 * rain_light);
         let hit = if self.screen == Screen::Play { self.pick(g) } else { None };
         if let Some(hh) = hit {
             let s = g.world.get(hh.pos[0], hh.pos[1], hh.pos[2]);

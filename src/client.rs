@@ -509,8 +509,9 @@ impl Game {
                     // Start raining: from level 0 up; stop: from 1 down (the server sends the levels).
                     1 => self.rain_level = 0.0,
                     2 => self.rain_level = 1.0,
-                    7 => self.rain_level = v.clamp(0.0, 1.0),
-                    8 => self.thunder_level = v.clamp(0.0, 1.0),
+                    // A NaN level would stick in the rain fog's smoothing: taken as 0.
+                    7 => self.rain_level = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) },
+                    8 => self.thunder_level = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) },
                     _ => {}
                 }
             }

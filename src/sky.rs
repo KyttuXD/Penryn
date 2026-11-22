@@ -101,7 +101,8 @@ impl Sky {
         let phase_names = ["full_moon", "waning_gibbous", "third_quarter", "waning_crescent", "new_moon", "waxing_crescent", "first_quarter", "waxing_gibbous"];
         let phase = phase_names[(day_time.div_euclid(24000).rem_euclid(8)) as usize];
         let moon = gui.sprite_uv(&alloc::format!("sky/moon/{}", phase));
-        // SkyRenderState.rainBrightness; the weather sets the stars' brightness to 0.
+        // SkyRenderState.rainBrightness fades the sun and moon; the weather blends the stars'
+        // brightness to 0 (STAR_BRIGHTNESS, not times rainBrightness).
         let rain_b = (1.0 - self.rain).clamp(0.0, 1.0);
         let sm = [255, 255, 255, (rain_b * 255.0) as u8];
         if let Some(uv) = sun {
@@ -110,7 +111,7 @@ impl Sky {
         if let Some(uv) = moon {
             quad(&mut v, 20.0, -100.0, [uv[2], uv[3], uv[0], uv[1]], sm);
         }
-        let star_b = ((1.0 - daylight) * 0.5).clamp(0.0, 1.0) * (1.0 - (self.rain - self.thunder)) * (1.0 - self.thunder) * rain_b;
+        let star_b = ((1.0 - daylight) * 0.5).clamp(0.0, 1.0) * (1.0 - (self.rain - self.thunder)) * (1.0 - self.thunder);
         unsafe {
             (gl.MatrixMode)(MODELVIEW);
             (gl.LoadMatrixf)(view.as_ptr());

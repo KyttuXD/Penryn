@@ -735,7 +735,8 @@ impl Weather {
 }
 
 /// The MOTION_BLOCKING heightmap: one above the highest block that blocks motion or holds a
-/// fluid (the world's bottom where there is none, or the column is not loaded).
+/// fluid: water and lava themselves, or waterlogged blocks (the world's bottom where there is
+/// none, or the column is not loaded).
 pub fn height(world: &World, blocks: &Blocks, x: i32, z: i32) -> i32 {
     let Some(c) = world.columns.get(&(x >> 4, z >> 4)) else { return world.min_y };
     for si in (0..c.sections.len()).rev() {
@@ -745,7 +746,7 @@ pub fn height(world: &World, blocks: &Blocks, x: i32, z: i32) -> i32 {
         }
         for ly in (0..16).rev() {
             let st = s.states[((ly << 8) | ((z & 15) << 4) | (x & 15)) as usize];
-            if st != 0 && (blocks.collides(st) || blocks.has_fluid(st)) {
+            if st != 0 && (blocks.collides(st) || blocks.has_fluid(st) || matches!(blocks.kind(st), crate::blocks::WATER | crate::blocks::LAVA)) {
                 return world.min_y + si as i32 * 16 + ly + 1;
             }
         }
@@ -855,6 +856,12 @@ pub fn checks(data: Option<&[u8]>, blocks: Option<&Blocks>) -> Vec<(&'static str
         }
         world.biome_names = alloc::vec![String::from("minecraft:plains")];
         out.push(("weather: heightmap over the floor", format!("{}", height(&world, b, 5, 5)), "64"));
+        // Water counts (rain falls on the sea, not on its floor): a pool at (0, 64, 0).
+        if let Some(water) = (1..b.states.len() as u16).find(|&s| b.of_state(s).name == "water") {
+            world.set(0, 64, 0, water, &|s| s == 0);
+            out.push(("weather: heightmap over water", format!("{}", height(&world, b, 0, 0)), "65"));
+            world.set(0, 64, 0, 0, &|s| s == 0);
+        }
         w.time = 1000;
         let (rn, sn) = w.build(&world, b, [8.5, 70.0, 8.5], 0.0, 1.0, 1.0);
         // Within the 16x16 chunk loaded around (8, 8): the camera's own column has no quad.
