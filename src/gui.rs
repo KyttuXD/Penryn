@@ -135,6 +135,8 @@ pub struct Gui {
     pub clouds: Vec<bool>,
     pub clouds_side: usize,
     pub scale: f32,
+    /// The GUI Scale option (0: automatic).
+    pub fixed_scale: i32,
     pub width: f32,
     pub height: f32,
     segs: Vec<(Tex, Vec<V>)>,
@@ -290,6 +292,7 @@ impl Gui {
             clouds,
             clouds_side,
             scale: 2.0,
+            fixed_scale: 0,
             width: 0.0,
             height: 0.0,
             segs: Vec::new(),
@@ -299,7 +302,7 @@ impl Gui {
     /// Vanilla's automatic GUI scale: the largest that keeps at least 320 x 240 units.
     pub fn begin(&mut self, w: i32, h: i32) {
         let mut s = 1;
-        while s < 6 && w / (s + 1) >= 320 && h / (s + 1) >= 240 {
+        while s < 6 && s != self.fixed_scale && w / (s + 1) >= 320 && h / (s + 1) >= 240 {
             s += 1;
         }
         self.scale = s as f32;

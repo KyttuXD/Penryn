@@ -30,6 +30,7 @@ mod skins;
 mod signs;
 mod sky;
 mod net;
+mod options;
 mod sys;
 mod weather;
 mod wire;
@@ -250,6 +251,9 @@ fn selftest() -> Result<(), String> {
     let wdata = sys::read_file(&alloc::format!("{}/weather.bin", data_dir()));
     let wblocks = load_blocks().ok();
     for (what, got, want) in weather::checks(wdata.as_deref(), wblocks.as_ref()) {
+        check(what, got, want);
+    }
+    for (what, got, want) in options::selftest() {
         check(what, got, want);
     }
     if ok {

@@ -39,6 +39,12 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
   (`GET /skin?url=...`, cached in its data folder); without a relay, players keep the default
   skins. `PENRYN_TEST_SKIN` (a textures property value, or `@file`) gives players without
   textures that profile, for testing on offline servers.
+- **Vanilla's options screens** from the pause menu's Options...: FOV, Online, Skin
+  Customization, Music & Sounds (a volume slider per sound category), Video Settings (render
+  distance, max framerate, VSync, GUI scale, fullscreen, brightness, clouds...), Controls and Mouse
+  Settings (sensitivity, invert), Chat and Accessibility (view bobbing, FOV effects), laid out as
+  26.3 lays them out, Esc and Done going back a screen. They are saved in `options.txt` in the data
+  folder, with vanilla's key names; options Penryn has no use for yet are shown and kept.
 - **Sky as vanilla**: sun, moon phases, stars, fancy clouds, the sky and fog colours of each
   biome, and grass, leaves and water in their biome colours (blended).
 - **Weather as vanilla**: rain and snow falling around you where each biome rains or snows
@@ -56,8 +62,9 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 ## Not done yet
 
 - No creative inventory screen (creative players get the survival one), no recipe book.
-- No particles (no rain splashes); no ambient cave sounds or biome music (music.game everywhere).
-- No settings screen: volume is fixed.
+- No ambient cave sounds or biome music (music.game everywhere).
+- Options screens without anything behind them yet: key binds, language, resource packs,
+  telemetry, credits; brightness only lifts the night (Penryn has no light levels yet).
 - Block entities other than chests and signs (banners, heads, shulker boxes, bells) are drawn
   without their entity model. Signs show their text (front and back, colours, glow ink) and
   placing one opens vanilla's sign editor; its sign pictures come from `signs.bin` (optional).
@@ -135,7 +142,9 @@ From a terminal:
 ```
 
 `PENRYN_VIEW` (chunks, 2-16; 6 to 8 suit a Radeon HD 2600), `PENRYN_FULLSCREEN=1`, `PENRYN_DATA`
-(where the game files and the sign-in are; the program's folder in `Play.command`).
+(where the game files and the sign-in are; the program's folder in `Play.command`). Once the
+options screens have saved `options.txt` there, its render distance and fullscreen win over
+`PENRYN_VIEW` and `PENRYN_FULLSCREEN` (settings.txt's VIEW and FULLSCREEN).
 
 ## Controls
 

@@ -70,6 +70,8 @@ pub struct Renderer {
     pub atlas_alpha: Vec<u8>,
     /// The rain's fog (AtmosphericFogEnvironment.rainFogMultiplier, 0 to 1): pulls the fog in.
     pub rain_fog: f32,
+    /// The vertical field of view, degrees (the FOV option with its effects).
+    pub fov: f32,
 }
 
 /// Faces: normal, the four corners (0 min, 1 max per axis, counter-clockwise from outside),
@@ -109,6 +111,7 @@ impl Renderer {
             atlas_size: (1.0, 1.0),
             atlas_alpha: Vec::new(),
             rain_fog: 0.0,
+            fov: 70.0,
         }
     }
 
@@ -447,7 +450,7 @@ impl Renderer {
     /// Draws the world from `eye` looking along yaw/pitch (degrees, Minecraft's convention).
     pub fn draw_world(&mut self, gl: &Gl, world: &World, eye: [f64; 3], yaw: f32, pitch: f32, w: i32, h: i32, view_chunks: i32, sky: [f32; 3], before_water: &mut dyn FnMut(&[f32; 16]), sky_pass: &mut dyn FnMut(&[f32; 16])) {
         let far = (view_chunks as f32 + 1.0) * 16.0;
-        let proj = perspective(70.0, w as f32 / h as f32, 0.05, (far * 1.5).max(400.0));
+        let proj = perspective(self.fov, w as f32 / h as f32, 0.05, (far * 1.5).max(400.0));
         unsafe {
             (gl.Viewport)(0, 0, w, h);
             (gl.ClearColor)(sky[0], sky[1], sky[2], 1.0);

@@ -1032,9 +1032,7 @@ impl Game {
 
 /// The configuration phase, until the server finishes it. Counts the biomes it sends.
 fn configure(c: &mut Conn, view: i8, biomes: &mut Vec<String>) -> Result<(), String> {
-    let mut o = Out::new();
-    o.string("en_us").u8(view as u8).varint(0).bool(true).u8(0x7F).varint(1).bool(false).bool(true).varint(0);
-    c.send(config::S_CLIENT_INFORMATION, &o)?;
+    c.send(config::S_CLIENT_INFORMATION, &crate::options::client_information(view))?;
     loop {
         let p = next(c)?;
         let mut r = p.reader();

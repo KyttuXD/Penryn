@@ -24,6 +24,7 @@ impl Event {
 pub const INIT_VIDEO: u32 = 0x20;
 pub const WINDOW_OPENGL: u32 = 0x2;
 pub const WINDOW_RESIZABLE: u32 = 0x20;
+pub const WINDOW_FULLSCREEN: u32 = 0x1;
 pub const WINDOW_FULLSCREEN_DESKTOP: u32 = 0x1001;
 pub const WINDOWPOS_CENTERED: c_int = 0x2FFF_0000;
 pub const GL_DOUBLEBUFFER: c_int = 5;

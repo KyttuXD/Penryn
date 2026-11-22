@@ -277,27 +277,50 @@ pub struct Button {
     pub w: f32,
     pub h: f32,
     pub label: String,
+    /// Inactive buttons are greyed out and do nothing (vanilla's `active`).
+    pub active: bool,
 }
 
 impl Button {
     pub fn new(x: f32, y: f32, w: f32, label: String) -> Button {
-        Button { x, y, w, h: 20.0, label }
+        Button { x, y, w, h: 20.0, label, active: true }
+    }
+    pub fn off(mut self) -> Button {
+        self.active = false;
+        self
     }
     pub fn hit(&self, mx: f32, my: f32) -> bool {
-        mx >= self.x && mx < self.x + self.w && my >= self.y && my < self.y + self.h
+        self.active && mx >= self.x && mx < self.x + self.w && my >= self.y && my < self.y + self.h
     }
     pub fn draw(&self, gui: &mut Gui, mx: f32, my: f32) {
-        let sprite = if self.hit(mx, my) { "widget/button_highlighted" } else { "widget/button" };
+        let sprite = if !self.active {
+            "widget/button_disabled"
+        } else if self.hit(mx, my) {
+            "widget/button_highlighted"
+        } else {
+            "widget/button"
+        };
         gui.blit_nine(sprite, self.x, self.y, self.w, self.h);
-        gui.text_centered(&self.label, self.x + self.w / 2.0, self.y + (self.h - 8.0) / 2.0, WHITE);
+        let color = if self.active { WHITE } else { 0xFFA0_A0A0 };
+        gui.text_centered(&self.label, self.x + self.w / 2.0, self.y + (self.h - 8.0) / 2.0, color);
     }
 }
 
-/// PauseScreen's two buttons this client has: back to the game, and leave.
-pub fn pause_buttons(gui: &Gui) -> [Button; 2] {
-    let x = gui.width / 2.0 - 102.0;
-    let y = gui.height / 4.0 + 8.0;
-    [Button::new(x, y + 24.0 - 16.0, 204.0, lang::get("menu.returnToGame")), Button::new(x, y + 120.0 - 16.0, 204.0, lang::get("menu.disconnect"))]
+/// PauseScreen.createPauseMenu's grid (cells padded 4 left, top and right; the first row 50
+/// down), placed a quarter of the way down: 0 back to the game, 1 leave, 2 Options..., then
+/// what Penryn has no screen for yet (advancements, statistics, world options). The row of
+/// icon buttons (feedback, bugs, friends, reporting) keeps its place but is not drawn.
+pub fn pause_buttons(gui: &Gui) -> [Button; 6] {
+    let gx = ((gui.width - 212.0) / 2.0).floor() + 4.0;
+    let top = ((gui.height - 166.0) * 0.25).floor();
+    [
+        Button::new(gx, top + 50.0, 204.0, lang::get("menu.returnToGame")),
+        Button::new(gx, top + 146.0, 204.0, lang::get("menu.disconnect")),
+        Button::new(gx, top + 122.0, 98.0, lang::get("menu.options")),
+        Button::new(gx, top + 74.0, 98.0, lang::get("gui.advancements")).off(),
+        Button::new(gx + 106.0, top + 74.0, 98.0, lang::get("gui.stats")).off(),
+        Button::new(gx + 106.0, top + 122.0, 98.0, lang::get("options.worldOptions.button")).off(),
+    ]
 }
 
 pub fn draw_pause(gui: &mut Gui, mx: f32, my: f32) {

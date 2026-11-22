@@ -114,7 +114,9 @@ unsafe extern "C" fn callback(_ud: *mut c_void, stream: *mut u8, len: c_int) {
     let acc = &mut buf[..frames * 2];
     let master = mix.volumes[0];
     mix.voices.retain_mut(|v| {
-        let g = [v.gain[0] * master * mix.volumes[v.category], v.gain[1] * master * mix.volumes[v.category]];
+        // Options.getFinalSoundSourceVolume: master once for the master category itself.
+        let k = master * if v.category == 0 { 1.0 } else { mix.volumes[v.category] };
+        let g = [v.gain[0] * k, v.gain[1] * k];
         for f in 0..frames {
             let i = v.pos as usize;
             if i + 1 >= v.data.len() {
@@ -463,6 +465,14 @@ impl Audio {
                 mix.music = None;
             }
         }
+        unsafe { (self.unlock)(self.device) };
+    }
+
+    /// The options' volume per category (SoundSource order; master is applied to all).
+    pub fn set_volumes(&mut self, v: [f32; 11]) {
+        unsafe { (self.lock)(self.device) };
+        let mix = unsafe { &mut *MIX.load(Ordering::Acquire) };
+        mix.volumes = v;
         unsafe { (self.unlock)(self.device) };
     }
 

@@ -68,6 +68,8 @@ enum Screen {
     Dead,
     /// The sign editor the server opened (signs.rs).
     Sign,
+    /// The options screens (options.rs), from the pause menu.
+    Options,
 }
 
 /// Items used over time while the button is held (eaten, drunk, drawn, raised), and for how
@@ -207,6 +209,15 @@ pub struct App {
     last_held: (i32, Option<(i32, i32)>),
     /// The open inventory screen is a container the server opened.
     container_screen: bool,
+    /// options.txt and the options screens.
+    menu: crate::options::Menu,
+    /// GameRenderer's fovModifier (sprinting, flying), and last tick's.
+    fov_mod: f32,
+    prev_fov_mod: f32,
+    /// When the last frame was shown (the Max Framerate option).
+    frame_shown: u64,
+    /// Ticks since a test's screen opened (PENRYN_TEST_INPUT click=X:Y, one each half second).
+    test_ticks: usize,
 }
 
 impl App {
@@ -253,9 +264,21 @@ impl App {
 }
 
 pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks: Blocks) -> Result<(), String> {
-    let fullscreen = sys::env("PENRYN_FULLSCREEN").is_some();
+    // options.txt first; settings.txt's VIEW and FULLSCREEN (PENRYN_VIEW, PENRYN_FULLSCREEN)
+    // stand in for what it does not say yet.
+    let mut settings = crate::options::Settings::load();
+    use crate::options::O;
+    if !settings.given(O::RenderDistance) {
+        let v: i32 = sys::env("PENRYN_VIEW").and_then(|s| s.parse().ok()).unwrap_or(8).clamp(2, 16);
+        settings.set(O::RenderDistance, v as f64);
+    }
+    if !settings.given(O::Fullscreen) && sys::env("PENRYN_FULLSCREEN").is_some() {
+        settings.set(O::Fullscreen, 1.0);
+    }
+    let fullscreen = settings.on(O::Fullscreen);
     let v = Video::open("Penryn", 1280, 720, fullscreen)?;
-    let view: i32 = sys::env("PENRYN_VIEW").and_then(|s| s.parse().ok()).unwrap_or(8).clamp(2, 16);
+    unsafe { (v.sdl.SDL_GL_SetSwapInterval)(settings.on(O::Vsync) as i32) };
+    let view: i32 = settings.int(O::RenderDistance);
     say!("OpenGL: {} ({})", v.gl_string(sdl::RENDERER), v.gl_string(sdl::VERSION));
     let mut app = App {
         v,
@@ -314,6 +337,11 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
         held_ticks: 0,
         last_held: (-1, None),
         container_screen: false,
+        menu: crate::options::Menu::new(settings),
+        fov_mod: 1.0,
+        prev_fov_mod: 1.0,
+        frame_shown: 0,
+        test_ticks: 0,
     };
     let atlas = sys::read_file(&format!("{}/atlas.bin", crate::data_dir())).ok_or("cannot read atlas.bin (see README.md)")?;
     app.r.load_atlas(&app.v.gl, &atlas)?;
@@ -327,10 +355,16 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
             say!("weather.bin is of another version: no rain or snow");
         }
     }
+    if let Some(gui) = app.gui.as_mut() {
+        gui.fixed_scale = app.menu.o.gui_scale();
+    }
     // Sound is optional: without sounds.bin (or an audio device) the game plays silent.
     app.audio = crate::audio::Audio::open(&app.v.sdl, &format!("{}/sounds.bin", crate::data_dir()));
     if app.audio.is_none() {
         say!("no sound (sounds.bin or the audio device is missing)");
+    }
+    if let Some(a) = app.audio.as_mut() {
+        a.set_volumes(app.menu.o.volumes());
     }
     // Entity models are optional: without entities.bin the world still plays, without mobs drawn.
     if let Some(d) = sys::read_file(&format!("{}/entities.bin", crate::data_dir())) {
@@ -369,6 +403,9 @@ impl App {
             if quit {
                 return Ok(());
             }
+            if !self.menu.changed.is_empty() {
+                self.apply_options(g)?;
+            }
             // ---- network
             g.pump()?;
             // ---- sound
@@ -396,6 +433,15 @@ impl App {
             }
             let partial = 1.0 - ((next_tick - now) as f64 / 50.0).clamp(0.0, 1.0);
             self.draw(g, partial);
+            // The Max Framerate option (vanilla's FramerateLimitTracker), on top of vsync.
+            if let Some(fps) = self.menu.o.frame_limit() {
+                let due = self.frame_shown + 1000 / fps as u64;
+                let t = sys::now_ms();
+                if t < due {
+                    sys::sleep_ms((due - t) as u32);
+                }
+            }
+            self.frame_shown = sys::now_ms();
             if let Some(shot) = self.test_shot.as_ref() {
                 if now >= shot.1 {
                     let (w, h) = self.v.size();
@@ -517,9 +563,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
                 if self.screen == Screen::Play {
                     let (dx, dy) = (e.i32_at(28) as f32, e.i32_at(32) as f32);
-                    let sens = 0.15;
-                    g.player.yaw += dx * sens;
-                    g.player.pitch = (g.player.pitch + dy * sens).clamp(-90.0, 90.0);
+                    let (kx, ky) = self.menu.o.turn_per_pixel();
+                    g.player.yaw += dx * kx;
+                    g.player.pitch = (g.player.pitch + dy * ky).clamp(-90.0, 90.0);
+                } else if self.screen == Screen::Options {
+                    self.menu.drag_to(self.mouse.0);
                 }
             }
             sdl::EV_MOUSEDOWN | sdl::EV_MOUSEUP => {
@@ -528,6 +576,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if self.screen != Screen::Play {
                     if down {
                         return self.screen_click(g, button);
+                    }
+                    if self.screen == Screen::Options && button == 1 {
+                        if let crate::options::Ev::Click = self.menu.release() {
+                            self.ui_click();
+                        }
                     }
                     return Ok(false);
                 }
@@ -560,7 +613,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
             }
             sdl::EV_MOUSEWHEEL => {
-                if self.screen == Screen::Play {
+                if let (Screen::Options, Some(gui)) = (&self.screen, self.gui.as_ref()) {
+                    self.menu.wheel(gui.width, gui.height, e.i32_at(20));
+                } else if self.screen == Screen::Play {
                     let y = e.i32_at(20);
                     if y != 0 {
                         let s = (g.selected - y.signum()).rem_euclid(9);
@@ -586,6 +641,21 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 } else if b[1].hit(mx, my) {
                     self.ui_click();
                     return Ok(true);
+                } else if b[2].hit(mx, my) {
+                    self.ui_click();
+                    self.menu.open(crate::options::Page::Main);
+                    self.set_screen(Screen::Options);
+                }
+            }
+            Screen::Options if button == 1 => {
+                let shift = self.keys[K_LSHIFT] || self.keys[K_RSHIFT];
+                match self.menu.press(gui.width, gui.height, mx, my, shift) {
+                    crate::options::Ev::Click => self.ui_click(),
+                    crate::options::Ev::Close => {
+                        self.ui_click();
+                        self.set_screen(Screen::Pause);
+                    }
+                    crate::options::Ev::None => {}
                 }
             }
             Screen::Dead if button == 1 => {
@@ -631,6 +701,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
     }
 
     fn set_screen(&mut self, s: Screen) {
+        if self.screen == Screen::Options && s != Screen::Options {
+            self.menu.close();
+        }
         self.v.grab_mouse(s == Screen::Play);
         self.v.text_input(s == Screen::Chat || s == Screen::Sign);
         if s != Screen::Play {
@@ -660,6 +733,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             Screen::Sign => {
                 if crate::signs::key(g, sc)? {
                     self.set_screen(Screen::Play);
+                }
+            }
+            Screen::Options => {
+                if sc == K_ESC && self.menu.back() {
+                    self.set_screen(Screen::Pause);
                 }
             }
             Screen::Pause => match sc {
@@ -703,8 +781,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 K_E => self.set_screen(Screen::Inventory),
                 K_F3 => self.debug = !self.debug,
                 K_F11 => {
-                    self.fullscreen = !self.fullscreen;
-                    unsafe { (self.v.sdl.SDL_SetWindowFullscreen)(self.v.window, if self.fullscreen { sdl::WINDOW_FULLSCREEN_DESKTOP } else { 0 }) };
+                    let f = !self.fullscreen;
+                    self.menu.set(crate::options::O::Fullscreen, f as i32 as f64);
+                    self.menu.o.save();
                 }
                 K_SPACE => {
                     let now = sys::now_ms();
@@ -730,6 +809,53 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             },
         }
         Ok(false)
+    }
+
+    /// Puts changed options into effect (OptionInstance's value-update listeners).
+    fn apply_options(&mut self, g: &mut Game) -> Result<(), String> {
+        use crate::options::{O, VOLUMES};
+        let mut info = false;
+        for o in core::mem::take(&mut self.menu.changed) {
+            let opts = &self.menu.o;
+            match o {
+                O::RenderDistance => {
+                    self.view = opts.int(o);
+                    info = true;
+                }
+                O::Fullscreen | O::ExclusiveFullscreen => {
+                    self.fullscreen = opts.on(O::Fullscreen);
+                    let mode = if !self.fullscreen {
+                        0
+                    } else if opts.on(O::ExclusiveFullscreen) {
+                        sdl::WINDOW_FULLSCREEN
+                    } else {
+                        sdl::WINDOW_FULLSCREEN_DESKTOP
+                    };
+                    unsafe { (self.v.sdl.SDL_SetWindowFullscreen)(self.v.window, mode) };
+                }
+                O::Vsync => unsafe {
+                    (self.v.sdl.SDL_GL_SetSwapInterval)(opts.on(o) as i32);
+                },
+                O::GuiScale => {
+                    if let Some(gui) = self.gui.as_mut() {
+                        gui.fixed_scale = opts.gui_scale();
+                    }
+                }
+                O::Cape | O::Jacket | O::LeftSleeve | O::RightSleeve | O::LeftPants | O::RightPants | O::Hat | O::MainHand
+                | O::ChatVisibility | O::ChatColors | O::AllowServerListing | O::Particles => info = true,
+                _ if VOLUMES.contains(&o) => {
+                    let v = opts.volumes();
+                    if let Some(a) = self.audio.as_mut() {
+                        a.set_volumes(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if info {
+            g.conn.send(crate::ids::play::S_CLIENT_INFORMATION, &crate::options::client_information(self.view as i8))?;
+        }
+        Ok(())
     }
 
     fn fluid_at(&self, g: &Game) -> u8 {
@@ -819,6 +945,35 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.set_screen(Screen::Inventory);
             if let Some(gui) = self.gui.as_ref() {
                 self.mouse = (gui.width / 2.0 - 52.0, gui.height / 2.0 + 60.0);
+            }
+        }
+        // opt=PAGE (pause, main, sounds, video, ...): open that screen once the world is in.
+        if let Some(p) = self.test_keys.split(',').find_map(|t| t.strip_prefix("opt=")) {
+            if self.screen == Screen::Play && g.loaded_sent && self.test_ticks == 0 {
+                self.test_ticks = 1;
+                if let Some(page) = crate::options::Page::by_name(p) {
+                    self.menu.open(page);
+                    self.set_screen(Screen::Options);
+                } else if p == "pause" {
+                    self.set_screen(Screen::Pause);
+                }
+            }
+        }
+        // click=X:Y (GUI units): a left click on the open screen, one each half second.
+        if self.screen != Screen::Play && self.test_keys.contains("click=") {
+            self.test_ticks += 1;
+            if self.test_ticks % 10 == 1 {
+                let clicks: Vec<String> = self.test_keys.split(',').filter_map(|t| t.strip_prefix("click=")).map(String::from).collect();
+                if let Some((x, y)) = clicks.get(self.test_ticks / 10 - 1).and_then(|c| c.split_once(':')) {
+                    self.mouse = (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+                    say!("test click at {} {}", x, y);
+                    if self.screen_click(g, 1)? {
+                        return Err(String::from("left by a test click"));
+                    }
+                    if let crate::options::Ev::Click = self.menu.release() {
+                        self.ui_click();
+                    }
+                }
             }
         }
         if self.test_keys.contains('L') {
@@ -922,10 +1077,14 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if self.music_delay <= 0 {
                     let ev = if g.game_mode == 1 { "music.creative" } else { "music.game" };
                     a.play_named(ev, None, 1.0, 1.0, crate::audio::MUSIC);
-                    self.music_delay = 12000 + (sys::now_ms() % 12000) as i32;
+                    self.music_delay = self.menu.o.music_delay(sys::now_ms() as u32);
                 }
             }
         }
+        // GameRenderer.tickFov: halfway to the player's FOV modifier each tick.
+        self.prev_fov_mod = self.fov_mod;
+        let target = crate::options::fov_modifier(g.flying, g.move_speed, self.sprinting, self.menu.o.get(crate::options::O::FovEffect));
+        self.fov_mod = (self.fov_mod + (target - self.fov_mod) * 0.5).clamp(0.1, 1.5);
         self.prev_bob = self.bob;
         let target = if self.mover.on_ground && !g.flying { speed.min(0.1) } else { 0.0 };
         self.bob += (target - self.bob) * 0.4;
@@ -1220,6 +1379,17 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             lerp(self.prev_pos[2], self.mover.pos[2]),
         ];
         self.r.update(&self.v.gl, &mut g.world, &g.blocks, eye, 6);
+        // GameRenderer.getFov: the FOV option times the modifier, narrower under water.
+        {
+            use crate::options::O;
+            let o = &self.menu.o;
+            let m = self.prev_fov_mod + (self.fov_mod - self.prev_fov_mod) * partial as f32;
+            let in_water = g.blocks.kind(g.world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2]))) == blocks::WATER;
+            let water = if in_water { 1.0 + (6.0 / 7.0 - 1.0) * o.get(O::FovEffect) as f32 } else { 1.0 };
+            self.r.fov = o.int(O::Fov) as f32 * m * water;
+            self.menu.max_gui_scale = crate::options::auto_gui_scale(w, h);
+        }
+        let clouds_on = self.menu.o.int(crate::options::O::Clouds) != 0;
         // Daylight: the sun's height over the day (dayTime 0 = sunrise, 6000 noon).
         let t = (g.day_time.rem_euclid(24000)) as f64 / 24000.0;
         let sun = math::cos((t - 0.25) * 2.0 * math::PI);
@@ -1250,7 +1420,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let sky_ref = &self.sky;
         let (day_time, game_time) = (g.day_time, g.game_time as f64 + partial);
         // Clouds reach further than the terrain (vanilla: the cloud range option, 128 by default).
-        let radius = ((self.view as f64 + 1.0) * 16.0).max(128.0) * 1.5;
+        let radius = (((self.view as f64 + 1.0) * 16.0).max(128.0) * 1.5).min(self.menu.o.int(crate::options::O::CloudRange) as f64 * 16.0);
         crate::skins::frame(gl);
         self.r.draw_world(
             gl,
@@ -1272,7 +1442,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if let Some(gui) = gui_ref {
                     crate::signs::draw_world(gl, view, eye, block_entities, world_ref, blocks_ref, gui);
                 }
-                if let (Some(gui), false) = (gui_ref, dim) {
+                if let (Some(gui), false, true) = (gui_ref, dim, clouds_on) {
                     sky_ref.draw_clouds(gl, view, gui, eye, game_time, day, radius);
                 }
             },
@@ -1318,7 +1488,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 skin,
                 swing,
                 equip,
-                (-walk, bob),
+                if self.menu.o.on(crate::options::O::BobView) { (-walk, bob) } else { (0.0, 0.0) },
             );
         }
         // ---- 2D: vanilla's HUD and screens
@@ -1329,7 +1499,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         gui.begin(w, h);
         let (gw, gh) = (gui.width, gui.height);
         if !dim && day < 1.0 {
-            gui.fill(0.0, 0.0, gw, gh, ((((1.0 - day) * 140.0) as u32) << 24) | 0x00_0014);
+            let a = self.menu.o.night_alpha((1.0 - day) * 140.0);
+            gui.fill(0.0, 0.0, gw, gh, ((a as u32) << 24) | 0x00_0014);
         }
         let eye_block = g.blocks.kind(g.world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2])));
         if eye_block == blocks::WATER {
@@ -1378,6 +1549,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let (mx, my) = self.mouse;
         match self.screen {
             Screen::Pause => screens::draw_pause(&mut gui, mx, my),
+            Screen::Options => self.menu.draw(&mut gui, mx, my),
             Screen::Inventory => {
                 let win = screens::window(g);
                 screens::draw_window(&mut gui, g, &win, mx, my);
