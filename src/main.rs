@@ -14,12 +14,14 @@ mod hand;
 mod client;
 mod conn;
 mod crypto;
+mod effects;
 mod entities;
 mod http;
 mod ids;
 mod lang;
 mod math;
 mod md5;
+mod moving;
 mod nbt;
 mod physics;
 mod play;
@@ -236,7 +238,7 @@ fn selftest() -> Result<(), String> {
             for (what, got, want) in physics_checks(&b) {
                 check(what, got, want);
             }
-            for (what, got, want) in signs::selftest(Some(&b)) {
+            for (what, got, want) in signs::selftest(Some(&b)).into_iter().chain(effects::selftest(&b)).chain(moving::selftest(&b)) {
                 check(what, got, want);
             }
         }

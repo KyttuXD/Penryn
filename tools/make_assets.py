@@ -1411,6 +1411,7 @@ def main():
           % (len(sprites) - len(font_pages), len(glyphs), len(lang), gw, gh, len(item_icons),
              sum(1 for i in item_icons if i[0] == 1), sum(1 for i in item_icons if i[0] == 2)))
     make_signs(assets, names, out_dir)
+    make_effects(assets, out_dir, reg, facts)
     make_sounds(res, out_dir, sound_names)
     make_weather(res, assets, out_dir, reg)
     print("blocks.bin: %d states, %d blocks, %d quads; atlas %dx%d with %d textures%s"
@@ -1485,6 +1486,54 @@ def make_signs(assets, block_names, out_dir):
             nb = wood.encode()
             f.write(bytes([len(nb)]) + nb + struct.pack("<HHHH", sx, sy, hx, hy))
     print("signs.bin: %d woods" % len(rows))
+def make_effects(assets, out_dir, reg, facts):
+    """effects.bin, "PNF1": the status effect icons (textures/mob_effect), for the HUD and the
+    inventory, and how pistons treat each block state. Optional: without it the effects show
+    their backgrounds only and pistons guess.
+
+        u16 icons, u16 atlas width, u16 atlas height
+        per icon (mob_effect registry order): u8 name length, name (without "minecraft:"),
+            u16 x, u16 y, u8 width, u8 height (0 x 0: no texture)
+        then width x height RGBA
+        u32 states; per state: u8 piston push reaction (0 normal, 1 destroy, 2 block, 3 ignore,
+            4 push only), + 128 when it has a block entity"""
+    names = [k.split(":", 1)[-1] for k, _ in
+             sorted(reg["minecraft:mob_effect"]["entries"].items(), key=lambda kv: kv[1]["protocol_id"])]
+    imgs = []
+    for n in names:
+        img = png_decode(assets.read("textures/mob_effect/%s.png" % n) or b"")
+        imgs.append(img if img and img[0] <= 255 and img[1] <= 255 else None)
+    cols = 16
+    cell = max([18] + [max(i[0], i[1]) for i in imgs if i])
+    aw = 1
+    while aw < cols * cell:
+        aw *= 2
+    ah = 1
+    while ah < ((len(names) + cols - 1) // cols) * cell:
+        ah *= 2
+    atlas = bytearray(aw * ah * 4)
+    rows = []
+    for k, (n, img) in enumerate(zip(names, imgs)):
+        x0, y0 = (k % cols) * cell, (k // cols) * cell
+        if not img:
+            rows.append((n, 0, 0, 0, 0))
+            continue
+        w, h, px = img
+        for yy in range(h):
+            o = ((y0 + yy) * aw + x0) * 4
+            atlas[o:o + w * 4] = px[yy * w * 4:(yy + 1) * w * 4]
+        rows.append((n, x0, y0, w, h))
+    with open(os.path.join(out_dir, "effects.bin"), "wb") as f:
+        f.write(b"PNF1" + struct.pack("<HHH", len(rows), aw, ah))
+        for n, x0, y0, w, h in rows:
+            nb = n.encode()
+            f.write(bytes([len(nb)]) + nb + struct.pack("<HHBB", x0, y0, w, h))
+        f.write(bytes(atlas))
+        push = {"PUSH_PULL": 0, "NORMAL": 0, "POPPED": 1, "DESTROY": 1, "IMMOVEABLE": 2, "BLOCK": 2,
+                "IGNORE": 3, "PUSH": 4, "PUSH_ONLY": 4}
+        f.write(struct.pack("<I", len(facts)))
+        f.write(bytes(push.get(st.get("push"), 0) | (128 if st.get("block_entity") else 0) for st in facts))
+    print("effects.bin: %d effect icons, atlas %dx%d" % (sum(1 for r in rows if r[3]), aw, ah))
 
 
 def find_objects():

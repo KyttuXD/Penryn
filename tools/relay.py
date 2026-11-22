@@ -12,7 +12,7 @@ Penryn asks this relay, over plain HTTP on the local network, to do them:
     Edition, and hand Penryn the Minecraft token and profile;
   * refresh that sign-in later without asking again;
   * make the session-server "join" call an online-mode server checks;
-  * serve the game files Penryn draws with (blocks.bin, atlas.bin, gui.bin, entities.bin, signs.bin, and sounds.bin), made from your own copy
+  * serve the game files Penryn draws with (blocks.bin, atlas.bin, gui.bin, entities.bin, signs.bin, weather.bin, effects.bin and sounds.bin), made from your own copy
     of Minecraft 26.3: an existing install (Horizon's launcher, the official launcher, Prism),
     or the 26.3 client downloaded from Mojang for your signed-in account (as Horizon does).
 
@@ -338,6 +338,16 @@ def make_handler(relay):
         def do_GET(self):
             if not private(self.client_address[0]):
                 return self.reply(403, "local network only")
+            if self.path == "/assets/effects.bin":
+                # Optional (the status effect icons): 404 when the files were made without it.
+                try:
+                    path = os.path.join(relay.build_assets(), "effects.bin")
+                    if not os.path.isfile(path):
+                        return self.reply(404, "no effects.bin")
+                    with open(path, "rb") as f:
+                        return self.reply(200, f.read(), "application/octet-stream")
+                except Exception as e:  # noqa: BLE001 - reported to the client
+                    return self.reply(500, str(e))
             if self.path in ("/assets/blocks.bin", "/assets/atlas.bin", "/assets/gui.bin", "/assets/entities.bin",
                              "/assets/weather.bin", "/assets/signs.bin"):
                 try:

@@ -34,6 +34,8 @@ pub struct World {
     pub biome_colours: Vec<[u32; 4]>,
     /// The server's biome names, by registry id.
     pub biome_names: Vec<String>,
+    /// Blocks in motion: pistons' moving blocks, shulker box lids.
+    pub moving: crate::moving::Moving,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -103,6 +105,7 @@ impl World {
             epoch: 0,
             biome_colours: Vec::new(),
             biome_names: Vec::new(),
+            moving: crate::moving::Moving::new(),
         }
     }
 

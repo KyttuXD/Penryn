@@ -89,6 +89,8 @@ pub struct Game {
     pub thunder_level: f32,
     /// Block entities' data (signs' text) and the sign editor the server opened.
     pub block_entities: crate::signs::BlockEntities,
+    /// The player's status effects.
+    pub effects: crate::effects::Effects,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -296,6 +298,7 @@ impl Game {
             rain_level: 0.0,
             thunder_level: 0.0,
             block_entities: crate::signs::BlockEntities::new(),
+            effects: crate::effects::Effects::new(),
         })
     }
 
@@ -423,7 +426,7 @@ impl Game {
                 let (x, y, z) = ((v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32);
                 let blocks = &self.blocks;
                 let old = self.world.get(x, y, z);
-                self.world.set(x, y, z, s, &|s| blocks.kind(s) == crate::blocks::AIR);
+                crate::moving::set_block(&mut self.world, blocks, x, y, z, s);
                 self.block_entities.block_changed(blocks, old, x, y, z, s);
                 // The block this client placed: its place sound (BlockItem.place plays it).
                 if let Some((pp, at)) = self.placing {
@@ -452,7 +455,7 @@ impl Game {
                     let (x, z, y) = ((c >> 8 & 15) as i32, (c >> 4 & 15) as i32, (c & 15) as i32);
                     let blocks = &self.blocks;
                     let old = self.world.get(sx * 16 + x, sy * 16 + y, sz * 16 + z);
-                    self.world.set(sx * 16 + x, sy * 16 + y, sz * 16 + z, state, &|s| blocks.kind(s) == crate::blocks::AIR);
+                    crate::moving::set_block(&mut self.world, blocks, sx * 16 + x, sy * 16 + y, sz * 16 + z, state);
                     self.block_entities.block_changed(blocks, old, sx * 16 + x, sy * 16 + y, sz * 16 + z, state);
                 }
             }
@@ -467,6 +470,9 @@ impl Game {
                     let _ = self.block_entities.read_tag(x, y, z, &mut r);
                 }
             }
+            play::C_BLOCK_EVENT => crate::moving::on_block_event(&mut self.world, &self.blocks, &mut r),
+            play::C_UPDATE_MOB_EFFECT => self.effects.on_update(&mut r, self.entity_id),
+            play::C_REMOVE_MOB_EFFECT => self.effects.on_remove(&mut r, self.entity_id),
             play::C_PLAYER_ABILITIES => {
                 let f = r.u8().unwrap_or(0);
                 self.flying = f & 2 != 0;
@@ -861,6 +867,7 @@ impl Game {
     }
 
     fn spawn_info(&mut self, r: &mut In) {
+        self.effects.clear();
         let _dim_type = r.varint();
         let dim = r.string().unwrap_or_default();
         let _seed = r.i64();

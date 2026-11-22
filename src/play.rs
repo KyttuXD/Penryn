@@ -443,7 +443,8 @@ impl App {
             }
             self.frame_shown = sys::now_ms();
             if let Some(shot) = self.test_shot.as_ref() {
-                if now >= shot.1 {
+                // PENRYN_TEST_INPUT "m": wait for a piston in motion.
+                if now >= shot.1 && (!self.test_keys.contains('m') || g.world.moving.in_motion()) {
                     let (w, h) = self.v.size();
                     let png = sdl::screenshot_png(&self.v.gl, w, h);
                     sys::write_file_private(&shot.0, &png);
@@ -909,6 +910,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         if self.screen != Screen::Sign && g.block_entities.editor.is_some() {
             crate::signs::close(g)?;
         }
+        // PENRYN_TEST_INPUT "!": respawn from the death screen.
+        if self.test_keys.contains('!') && self.screen == Screen::Dead && !self.respawn_sent {
+            self.respawn_sent = true;
+            g.respawn()?;
+        }
         // The held item's name shows for 2 s when it changes.
         let held = (g.selected, g.held());
         if held != self.last_held {
@@ -1043,12 +1049,16 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         if g.world.loaded(math::ifloor(self.mover.pos[0]), math::ifloor(self.mover.pos[2])) && g.loaded_sent {
             let fluid = self.fluid_at(g);
+            self.mover.effects = g.effects.movement();
             self.mover.tick(&g.world, &g.blocks, &inp, g.player.yaw, g.flying, fluid);
             // LocalPlayer.aiStep: landing ends flight (except in spectator mode).
             if g.flying && self.mover.on_ground && g.game_mode != 3 {
                 g.set_flying(false)?;
             }
         }
+        // Block entities tick after the player: moving pistons and shulker lids push it.
+        crate::moving::tick(&mut g.world, &g.blocks, &mut self.mover, inp.sneak, g.flying);
+        g.effects.tick();
         g.player.x = self.mover.pos[0];
         g.player.y = self.mover.pos[1];
         g.player.z = self.mover.pos[2];
@@ -1406,6 +1416,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         self.r.rain_fog = if dim { 0.0 } else { self.weather.fog };
         let mut world_view = [0f32; 16];
         let world_view_ref = &mut world_view;
+        // Blindness and darkness: a near, dark fog and no sky.
+        let fog = g.effects.fog((self.view as f32 + 1.0) * 16.0, partial as f32);
+        let sky = g.effects.sky(sky, (self.view as f32 + 1.0) * 16.0, partial as f32);
+        let world_ref = &g.world;
         let ents = self.entities.as_ref();
         let gl = &self.v.gl;
         let own = g.entity_id;
@@ -1442,12 +1456,15 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if let Some(gui) = gui_ref {
                     crate::signs::draw_world(gl, view, eye, block_entities, world_ref, blocks_ref, gui);
                 }
-                if let (Some(gui), false, true) = (gui_ref, dim, clouds_on) {
+                crate::moving::draw(gl, view, eye, world_ref, blocks_ref, atlas, pf);
+                if let (Some(gui), false, true, None) = (gui_ref, dim, clouds_on, fog) {
                     sky_ref.draw_clouds(gl, view, gui, eye, game_time, day, radius);
                 }
             },
             &mut |view| {
-                if let (Some(gui), false) = (gui_ref, dim) {
+                if let Some(f) = fog.as_ref() {
+                    crate::effects::apply_fog(gl, f);
+                } else if let (Some(gui), false) = (gui_ref, dim) {
                     sky_ref.draw_celestial(gl, view, gui, day_time, day);
                 }
             },
@@ -1498,8 +1515,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         };
         gui.begin(w, h);
         let (gw, gh) = (gui.width, gui.height);
-        if !dim && day < 1.0 {
-            let a = self.menu.o.night_alpha((1.0 - day) * 140.0);
+        // Night darkens the view, unless night vision; brightness lifts it.
+        let night = (1.0 - day) * (1.0 - g.effects.night_vision(partial as f32));
+        if !dim && night > 0.0 {
+            let a = self.menu.o.night_alpha(night * 140.0);
             gui.fill(0.0, 0.0, gw, gh, ((a as u32) << 24) | 0x00_0014);
         }
         let eye_block = g.blocks.kind(g.world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2])));
@@ -1517,6 +1536,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             None
         };
         screens::hud(&mut gui, g, self.screen == Screen::Play && !self.debug, held_name);
+        g.effects.draw_hud(&self.v.gl, &mut gui, self.screen == Screen::Inventory && g.container.is_none());
         let now = sys::now_ms();
         if self.screen != Screen::Inventory && self.screen != Screen::Dead {
             screens::chat(&mut gui, g, self.screen == Screen::Chat, now, &self.chat_line, (now / 300) % 2 == 0);
@@ -1553,6 +1573,12 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             Screen::Inventory => {
                 let win = screens::window(g);
                 screens::draw_window(&mut gui, g, &win, mx, my);
+                if g.container.is_none() {
+                    let (left, top) = screens::window_origin(&gui, &win);
+                    if let Some(tip) = g.effects.draw_inventory(&self.v.gl, &mut gui, left, top, win.w, mx, my) {
+                        screens::tooltip(&mut gui, &tip, mx, my);
+                    }
+                }
             }
             Screen::Sign => crate::signs::draw_editor(&mut gui, &self.v.gl, w, h, g, mx, my),
             Screen::Dead => {
