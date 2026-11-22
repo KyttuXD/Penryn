@@ -8,6 +8,7 @@ extern crate alloc;
 mod account;
 mod audio;
 mod blocks;
+mod boat;
 mod font;
 mod gui;
 mod hand;
@@ -28,6 +29,7 @@ mod nbt;
 mod physics;
 mod play;
 mod render;
+mod riding;
 mod screens;
 mod sdl;
 mod skins;
@@ -242,6 +244,9 @@ fn selftest() -> Result<(), String> {
                 check(what, got, want);
             }
             let w = test_world(&b, &[]);
+            for (what, got, want) in riding::selftest(&b, &w) {
+                check(what, got, want);
+            }
             for (what, got, want) in signs::selftest(Some(&b)).into_iter().chain(effects::selftest(&b)).chain(moving::selftest(&b)).chain(particles::selftest(&b, &w)) {
                 check(what, got, want);
             }

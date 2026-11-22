@@ -224,11 +224,15 @@ pub struct App {
     test_ticks: usize,
     particles: Option<crate::particles::Particles>,
     creative: crate::creative::Screen,
+    /// The vehicle the player rides (riding.rs).
+    ride: crate::riding::Rider,
 }
 
 impl App {
     fn eye_height(&self) -> f64 {
-        if self.keys[K_LSHIFT] && self.screen == Screen::Play {
+        if let Some(e) = self.ride.eye(self.keys[K_LSHIFT] && self.screen == Screen::Play) {
+            e
+        } else if self.keys[K_LSHIFT] && self.screen == Screen::Play {
             physics::SNEAK_EYE
         } else {
             physics::EYE
@@ -350,6 +354,7 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
         test_ticks: 0,
         particles: None,
         creative: crate::creative::Screen::new(),
+        ride: crate::riding::Rider::new(),
     };
     let atlas = sys::read_file(&format!("{}/atlas.bin", crate::data_dir())).ok_or("cannot read atlas.bin (see README.md)")?;
     app.r.load_atlas(&app.v.gl, &atlas)?;
@@ -1140,7 +1145,14 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.last_input = flags;
             g.send_input(flags)?;
         }
-        if g.world.loaded(math::ifloor(self.mover.pos[0]), math::ifloor(self.mover.pos[2])) && g.loaded_sent {
+        let keys = crate::riding::Keys { forward: k(K_W), back: k(K_S), left: k(K_A), right: k(K_D), jump: k(K_SPACE), shift, sprint: self.sprinting };
+        let riding = match self.entities.as_ref() {
+            Some(t) => self.ride.tick(g, t, keys, &mut self.mover)?,
+            None => false,
+        };
+        if riding {
+            // A passenger does not move itself (Entity.rideTick).
+        } else if g.world.loaded(math::ifloor(self.mover.pos[0]), math::ifloor(self.mover.pos[2])) && g.loaded_sent {
             let fluid = self.fluid_at(g);
             self.mover.effects = g.effects.movement();
             self.mover.tick(&g.world, &g.blocks, &inp, g.player.yaw, g.flying, fluid);
@@ -1150,7 +1162,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             }
         }
         // Block entities tick after the player: moving pistons and shulker lids push it.
-        crate::moving::tick(&mut g.world, &g.blocks, &mut self.mover, inp.sneak, g.flying);
+        if !riding {
+            crate::moving::tick(&mut g.world, &g.blocks, &mut self.mover, inp.sneak, g.flying);
+        }
         g.effects.tick();
         g.player.x = self.mover.pos[0];
         g.player.y = self.mover.pos[1];
@@ -1270,7 +1284,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             }
         }
         self.particle_tick(g, play, hit);
-        g.tick()
+        g.tick()?;
+        if let Some(t) = self.entities.as_ref() {
+            self.ride.after_tick(g, t);
+        }
+        Ok(())
     }
 
     /// What the server sent for the particle engine (the explosion's push goes to the player).
@@ -1522,11 +1540,15 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
     fn draw(&mut self, g: &mut Game, partial: f64) {
         let (w, h) = self.v.size();
         let lerp = |a: f64, b: f64| a + (b - a) * partial;
-        let eye = [
+        let mut eye = [
             lerp(self.prev_pos[0], self.mover.pos[0]),
             lerp(self.prev_pos[1], self.mover.pos[1]) + self.eye_height(),
             lerp(self.prev_pos[2], self.mover.pos[2]),
         ];
+        // Riding: the camera sits on the seat as the vehicle is drawn.
+        if let Some(c) = self.entities.as_ref().and_then(|t| self.ride.camera(g, t, partial)) {
+            eye = [c[0], c[1] + self.eye_height(), c[2]];
+        }
         self.r.update(&self.v.gl, &mut g.world, &g.blocks, eye, 6);
         // GameRenderer.getFov: the FOV option times the modifier, narrower under water.
         {

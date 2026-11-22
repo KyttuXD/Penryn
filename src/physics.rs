@@ -239,6 +239,14 @@ pub struct Mover {
     moves: Vec<([f64; 3], [f64; 3], [f64; 3])>,
     /// The status effects that change movement (set before each tick).
     pub effects: crate::effects::MoveEffects,
+    /// Another box than the player's standing or crouching one (width, height): the swimming
+    /// pose's 0.6, a horse's, a boat's.
+    pub dims: Option<(f64, f64)>,
+    /// maxUpStep (the player's 0.6; a horse 1, a camel 1.5, a boat 0).
+    pub step: f64,
+    /// A mount steered by its rider: LivingEntity.getFlyingSpeed (its speed x 0.1) in the
+    /// air, and a mob's drift rule (each axis under 0.003 stops).
+    pub mount: Option<f64>,
 }
 
 pub struct Input {
@@ -293,7 +301,24 @@ impl Mover {
             no_blocks: false,
             moves: Vec::new(),
             effects: crate::effects::MoveEffects::default(),
+            dims: None,
+            step: STEP,
+            mount: None,
         }
+    }
+
+    /// The box at `p` with height `h` (the player's width, or `dims`').
+    pub fn bbox(&self, p: [f64; 3], h: f64) -> Aabb {
+        let r = self.dims.map_or(WIDTH, |d| d.0) / 2.0;
+        Aabb { lo: [p[0] - r, p[1], p[2] - r], hi: [p[0] + r, p[1] + h, p[2] + r] }
+    }
+
+    /// Entity.move(SELF) by `d` and the blocks passed through (applyEffectsFromBlocks), for
+    /// what moves itself without the player's travel (a boat, a glide).
+    pub fn move_entity(&mut self, world: &World, b: &Blocks, d: [f64; 3], inp: &Input) {
+        self.moves.clear();
+        self.do_move(world, b, d, inp, false);
+        self.after_travel(world, b, inp, false);
     }
 
     /// LivingEntity.getEffectiveGravity: slow falling falls at 0.01 while going down.
@@ -327,7 +352,9 @@ impl Mover {
     }
 
     fn height(&self, sneak: bool) -> f64 {
-        if sneak {
+        if let Some(d) = self.dims {
+            d.1
+        } else if sneak {
             SNEAK_HEIGHT
         } else {
             HEIGHT
@@ -401,8 +428,9 @@ impl Mover {
         let from = self.pos;
         let who = self.who(inp);
         let h = self.height(inp.sneak);
-        let bb = Aabb::player(self.pos[0], self.pos[1], self.pos[2], h);
+        let bb = self.bbox(self.pos, h);
         // Player.maybeBackOffFromEdge: holding sneak above the ground never walks off an edge.
+        let max_step = self.step;
         let can_fall = |dx: f64, dz: f64, fall: f64| -> bool {
             let probe = Aabb {
                 lo: [bb.lo[0] + 1e-7 + dx, bb.lo[1] - fall - 1e-7, bb.lo[2] + 1e-7 + dz],
@@ -410,22 +438,22 @@ impl Mover {
             };
             !boxes_for(world, b, &probe, Some(&who)).iter().any(|o| overlaps(o, &probe))
         };
-        let above_ground = self.on_ground || (self.fall_distance < STEP && !can_fall(0.0, 0.0, STEP - self.fall_distance));
+        let above_ground = self.on_ground || (self.fall_distance < self.step && !can_fall(0.0, 0.0, self.step - self.fall_distance));
         if inp.shift && !flying && d[1] <= 0.0 && above_ground {
             let step = 0.05;
             let less = |v: f64| if v.abs() <= step { 0.0 } else { v - step * v.signum() };
-            while d[0] != 0.0 && can_fall(d[0], 0.0, STEP) {
+            while d[0] != 0.0 && can_fall(d[0], 0.0, max_step) {
                 d[0] = less(d[0]);
             }
-            while d[2] != 0.0 && can_fall(0.0, d[2], STEP) {
+            while d[2] != 0.0 && can_fall(0.0, d[2], max_step) {
                 d[2] = less(d[2]);
             }
-            while d[0] != 0.0 && d[2] != 0.0 && can_fall(d[0], d[2], STEP) {
+            while d[0] != 0.0 && d[2] != 0.0 && can_fall(d[0], d[2], max_step) {
                 d[0] = less(d[0]);
                 d[2] = less(d[2]);
             }
         }
-        let area = bb.expand(d).expand([0.0, STEP, 0.0]).expand([0.0, -1e-5, 0.0]);
+        let area = bb.expand(d).expand([0.0, self.step, 0.0]).expand([0.0, -1e-5, 0.0]);
         let obstacles = boxes_for(world, b, &area, Some(&who));
         let mut m = collide_plain(&bb, d, &obstacles);
         let hit_x = m[0] != d[0];
@@ -433,9 +461,9 @@ impl Mover {
         let fell_onto = d[1] != m[1] && d[1] < 0.0;
         // Entity.collide's step-up (maxUpStep 0.6): the lowest candidate height that gets
         // further, from where the fall stopped.
-        if (self.on_ground || fell_onto) && (hit_x || hit_z) {
+        if self.step > 0.0 && (self.on_ground || fell_onto) && (hit_x || hit_z) {
             let base = if fell_onto { bb.offset([0.0, m[1], 0.0]) } else { bb };
-            let mut reach = base.expand([d[0], STEP, d[2]]);
+            let mut reach = base.expand([d[0], self.step, d[2]]);
             if !fell_onto {
                 reach = reach.expand([0.0, -1.0e-5f32 as f64, 0.0]);
             }
@@ -443,7 +471,7 @@ impl Mover {
             for o in obstacles.iter().filter(|o| overlaps(o, &reach)) {
                 for y in [o.lo[1], o.hi[1]] {
                     let hh = (y - base.lo[1]) as f32;
-                    if hh >= 0.0 && hh != m[1] as f32 && hh <= STEP as f32 && !hs.contains(&hh) {
+                    if hh >= 0.0 && hh != m[1] as f32 && hh <= self.step as f32 && !hs.contains(&hh) {
                         hs.push(hh);
                     }
                 }
@@ -464,7 +492,7 @@ impl Mover {
         self.on_ground = vertical && d[1] < 0.0;
         // Entity.checkSupportingBlock.
         if self.on_ground {
-            let nb = Aabb::player(self.pos[0], self.pos[1], self.pos[2], h);
+            let nb = self.bbox(self.pos, h);
             let probe = Aabb { lo: [nb.lo[0], nb.lo[1] - 1e-6, nb.lo[2]], hi: [nb.hi[0], nb.lo[1], nb.hi[2]] };
             let mut found = self.find_support(world, b, &probe, &who);
             if found.is_none() && !self.no_blocks {
@@ -546,8 +574,9 @@ impl Mover {
             moves.push((self.pos, self.pos, [0.0; 3]));
         }
         let mut visited: Vec<(i32, i32, i32)> = Vec::new();
+        let r = self.dims.map_or(WIDTH, |d| d.0) / 2.0;
         let deflate = |p: [f64; 3]| {
-            let a = Aabb::player(p[0], p[1], p[2], h);
+            let a = Aabb { lo: [p[0] - r, p[1], p[2] - r], hi: [p[0] + r, p[1] + h, p[2] + r] };
             Aabb { lo: [a.lo[0] + 1e-5, a.lo[1] + 1e-5, a.lo[2] + 1e-5], hi: [a.hi[0] - 1e-5, a.hi[1] - 1e-5, a.hi[2] - 1e-5] }
         };
         for (from, to, asked) in moves.iter() {
@@ -673,8 +702,14 @@ impl Mover {
         if !inp.jump || flying {
             self.jump_delay = 0;
         }
-        // A player's slow drift stops (horizontally as one).
-        if self.vel[0] * self.vel[0] + self.vel[2] * self.vel[2] < 9.0e-6 {
+        // A player's slow drift stops (horizontally as one); a mob's each axis on its own.
+        if self.mount.is_some() {
+            for a in [0, 2] {
+                if self.vel[a].abs() < 0.003 {
+                    self.vel[a] = 0.0;
+                }
+            }
+        } else if self.vel[0] * self.vel[0] + self.vel[2] * self.vel[2] < 9.0e-6 {
             self.vel[0] = 0.0;
             self.vel[2] = 0.0;
         }
@@ -715,16 +750,26 @@ impl Mover {
             let g = self.gravity();
             let d = self.vel;
             self.do_move(world, b, d, inp, false);
-            let drag = if in_water { 0.8 } else { 0.5 };
-            // travelInWater: dolphin's grace keeps 0.96 of the horizontal speed.
-            let hdrag = if in_water && self.effects.dolphins_grace { 0.96f32 as f64 } else { drag };
+            let drag = if in_water { 0.8f32 as f64 } else { 0.5 };
+            // travelInWater: sprinting (swimming) keeps 0.9 of the horizontal speed, dolphin's
+            // grace 0.96.
+            let hdrag = if in_water && self.effects.dolphins_grace {
+                0.96f32 as f64
+            } else if in_water && inp.sprint {
+                0.9f32 as f64
+            } else {
+                drag
+            };
             self.vel = [self.vel[0] * hdrag, self.vel[1] * drag, self.vel[2] * hdrag];
-            self.vel[1] -= g / 16.0;
+            // getFluidFallingAdjustedMovement: no sinking while sprinting in water.
+            if !(in_water && inp.sprint) {
+                self.vel[1] -= g / 16.0;
+            }
             // Climbing out at an edge: a hop, only when the player fits 0.6 higher and there
             // is no liquid there (travelInFluid's isFree).
             if self.horizontal_collision {
                 let h = self.height(inp.sneak);
-                let t = Aabb::player(self.pos[0], self.pos[1], self.pos[2], h)
+                let t = self.bbox(self.pos, h)
                     .offset([self.vel[0], self.vel[1] + 0.6 - self.pos[1] + oy, self.vel[2]]);
                 let blocked = boxes(world, b, &t).iter().any(|o| overlaps(o, &t));
                 let mut wet = false;
@@ -766,6 +811,8 @@ impl Mover {
             let walk = (if inp.sprint { inp.move_speed * 1.3 } else { inp.move_speed }) as f32;
             let bf = block_friction as f32;
             (walk * (0.21600002f32 / (bf * bf * bf))) as f64
+        } else if let Some(fly) = self.mount {
+            fly
         } else if inp.sprint {
             0.025999999f32 as f64
         } else {
