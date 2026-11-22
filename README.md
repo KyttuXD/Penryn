@@ -66,6 +66,16 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   Settings (sensitivity, invert), Chat and Accessibility (view bobbing, FOV effects), laid out as
   26.3 lays them out, Esc and Done going back a screen. They are saved in `options.txt` in the data
   folder, with vanilla's key names; options Penryn has no use for yet are shown and kept.
+- **Riding as vanilla's client**: passengers on their vehicles' seats (each type's passenger
+  attachments), the camera riding along, sneak to get off (where the vehicle lets you off).
+  Boats and rafts are rowed on your own client as AbstractBoat does (paddling, turning, water,
+  ice and land friction, floating up, the paddles' animation and sounds); saddled horses,
+  donkeys, mules and camels are steered with the jump bar (the camel's dash and cooldown),
+  pigs and striders with their stick (and its boost), the harnessed happy ghast flies along
+  your look; the vehicle's hearts take the food bar's place. Minecarts are the server's to
+  move. Swimming (sprint under water, the 0.6 box, steering up and down with the look),
+  crawling where nothing taller fits, elytra gliding with firework boosts, the riptide
+  trident's throw, and other players drawn sitting, crouching, swimming, gliding and sleeping.
 - **Status effects**: their icons at the top right and beside the inventory (names, times,
   blinking as they run out), jump boost, levitation, slow falling and dolphin's grace on
   movement, blindness and darkness closing the fog in, night vision lifting the night.
@@ -104,7 +114,9 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 - Particles vanilla's blocks make on their own (torches, campfires, leaves, drips) and rain
   splashes are not drawn yet.
 - Mobs: no armour trims or dyed leather colours, no heads or pumpkins worn, no shields or other
-  specially drawn items in hands, no crouching or swimming player poses, no elytra.
+  specially drawn items in hands, no elytra wings drawn on players.
+- Riding: striders do not walk on lava yet, no third-person view, a horse's rearing and
+  the camel's sitting transitions are not followed on the seat.
 - Only menus listed above have their own screen; others show their slots as chest rows.
 - Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);
   no elytra, and Dinnerbone and Grumm stand the right way up.
