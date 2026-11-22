@@ -114,12 +114,11 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   splashes are not drawn yet.
 - Mobs: no armour trims or dyed leather colours, no heads or pumpkins worn, no shields or other
   specially drawn items in hands, no crouching or swimming player poses, no elytra.
-- No enchanting book model, loom banner preview, smithing armour stand or mount model in their
-  screens; the stonecutter does not resolve recipe inputs given as tags; a held map is drawn
+- No enchanting book model, smithing armour stand or mount model in their screens; the stonecutter does not resolve recipe inputs given as tags; a held map is drawn
   without the arms holding it.
 - Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);
   no elytra, and Dinnerbone and Grumm stand the right way up.
-- Item stacks with unusual data components (potions, books, banners...) can hide the slots after
+- Item stacks with unusual data components (some potions and other rare ones) can hide the slots after
   them in a container until the server sends them again.
 
 ## Building (on Linux)

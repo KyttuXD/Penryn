@@ -471,5 +471,14 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     // title, no filtered title, author, generation 0, one page as the NBT string "Hi", resolved
     o.string("Tales").bool(false).string("Containers").varint(0).varint(1).u8(8).u16(2).bytes(b"Hi").bool(false).bool(true);
     v.push(("written book content", format!("{:?}", written_pages(&o.b)), "Some((\"Tales\", \"Containers\", [\"Hi\"]))"));
+    // A potion stack's potion_contents (a holder, no colour, one custom effect with a hidden
+    // one, no name) is read past, so a brewing stand's slots after it stay readable.
+    let mut o = Out::new();
+    o.varint(1).varint(900).varint(1).varint(0).varint(53).bool(true).varint(5).bool(false);
+    o.varint(1).varint(1).varint(0).varint(200).bool(false).bool(true).bool(true).bool(true).varint(0).varint(100).bool(false).bool(true).bool(true).bool(false).bool(false);
+    o.u8(0xAA);
+    let mut r = In::new(&o.b);
+    let got = crate::creative::read_stack(&mut r).map(|(item, ok, _)| format!("{:?} {} {:?}", item, ok, r.u8()));
+    v.push(("potion stack read past", got.unwrap_or_default(), "Some((900, 1)) true Some(170)"));
     v
 }

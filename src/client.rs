@@ -1389,6 +1389,21 @@ fn list(r: &mut In, f: fn(&mut In) -> Option<()>) -> Option<()> {
     Some(())
 }
 
+/// MobEffectInstance.Details: amplifier, duration, ambient, particles, icon, then the hidden
+/// effect's details (nested at most 16 deep here).
+fn effect_details(r: &mut In, depth: u32) -> Option<()> {
+    if depth > 16 {
+        return None;
+    }
+    r.varint()?;
+    r.varint()?;
+    r.take(3)?;
+    if r.bool()? {
+        effect_details(r, depth + 1)?;
+    }
+    Some(())
+}
+
 fn ident(r: &mut In) -> Option<()> {
     r.string().map(drop)
 }
@@ -1507,6 +1522,17 @@ pub(crate) fn skip_component(kind: i32, r: &mut In) -> Option<()> {
             r.varint().map(drop)
         }
         47 => r.take(4).map(drop),
+        // potion_contents (brewing stands, potions in chests): the potion, a custom colour,
+        // custom effects, a custom name
+        53 => {
+            opt(r, |r| r.varint().map(drop))?;
+            opt(r, |r| r.take(4).map(drop))?;
+            list(r, |r| {
+                r.varint()?;
+                effect_details(r, 0)
+            })?;
+            opt(r, ident)
+        }
         // banner_patterns: layers of a pattern holder (an id plus one, or 0 and its asset id
         // and translation key) and a DyeColor
         74 => list(r, |r| {
