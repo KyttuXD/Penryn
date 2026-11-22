@@ -226,6 +226,7 @@ pub struct Particles {
     id_happy: u16,
     id_explosion: u16,
     id_large_smoke: u16,
+    id_totem: u16,
 }
 
 fn rd16(d: &[u8], o: usize) -> u16 {
@@ -258,6 +259,7 @@ impl Particles {
             id_happy: 0xFFFF,
             id_explosion: 0xFFFF,
             id_large_smoke: 0xFFFF,
+            id_totem: 0xFFFF,
         };
         if let Some(d) = data {
             if p.parse(Some(gl), d).is_none() {
@@ -311,6 +313,7 @@ impl Particles {
                 "happy_villager" => self.id_happy = id,
                 "explosion" => self.id_explosion = id,
                 "large_smoke" => self.id_large_smoke = id,
+                "totem_of_undying" => self.id_totem = id,
                 _ => {}
             }
             let mut k = kind_of(&name);
@@ -1249,10 +1252,14 @@ impl Particles {
             12 if villager => (self.id_heart, 5, 1.0),
             13 if villager => (self.id_angry, 5, 1.0),
             14 if villager => (self.id_happy, 5, 1.0),
+            // LivingEntity.handleEntityEvent 35 (a totem of undying saved the entity): 30 totems
+            // over the body, flung faster than the poofs.
+            35 => (self.id_totem, 30, 0.0),
             _ => return,
         };
+        let speed = if ev == 35 { 0.25 } else { 0.02 };
         for _ in 0..n {
-            let v = [self.gauss() * 0.02, self.gauss() * 0.02, self.gauss() * 0.02];
+            let v = [self.gauss() * speed, self.gauss() * speed, self.gauss() * speed];
             let x = pos[0] + w * (2.0 * self.rd() - 1.0);
             let y = pos[1] + h * self.rd() + dy;
             let z = pos[2] + w * (2.0 * self.rd() - 1.0);
@@ -1797,6 +1804,7 @@ pub fn selftest(b: &Blocks, w: &World) -> Vec<(&'static str, String, &'static st
         id_happy: 0xFFFF,
         id_explosion: 0xFFFF,
         id_large_smoke: 0xFFFF,
+        id_totem: 0xFFFF,
     };
     let stone = (0..b.states.len() as u16).find(|&s| b.of_state(s).name == "stone").unwrap_or(1);
     p.destroy(w, b, [8, 64, 8], stone);

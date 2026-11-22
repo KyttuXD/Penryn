@@ -12,7 +12,7 @@ PREPARED_DIR/assets.
 Writes OUT_DIR/blocks.bin and OUT_DIR/atlas.bin. Nothing from Mojang is kept in this
 repository: these files are made on the player's machine and stay with their copy of the game.
 
-blocks.bin (little-endian), "PNB9":
+blocks.bin (little-endian), "PNBA":
     u32 states, u32 blocks, u32 boxes, u32 quads, u32 items, u32 collision boxes
     per state: u16 block, u16 hardness x100 (65535: unbreakable), u8 flags (1 needs the right
                tool, 2 full collision, 4 replaceable, 8 opaque full cube, 16 a bubble column
@@ -36,7 +36,7 @@ blocks.bin (little-endian), "PNB9":
     then: 4 x f32, the atlas rectangle of water_still, and 4 x f32 of lava_still
 kind: 0 air, 1 solid, 2 cutout, 3 plant (no collision), 4 water, 5 lava, 6 invisible solid
 
-atlas.bin: "PNA1", u16 width, u16 height, then width x height RGBA (16x16 tiles).
+atlas.bin: "PNA2", u16 width, u16 height, then width x height RGBA (16x16 tiles).
 """
 import json
 import math
@@ -491,13 +491,13 @@ def png_decode(data):
 
 
 def tile_of(img):
-    """The first frame of a texture, scaled to 16x16 (nearest)."""
+    """A texture, or its first animation frame (first_frame), scaled whole to 16x16 (nearest).
+    Whatever its shape: a still non-square texture is not cut to its top-left square (Horizon #19742)."""
     w, h, px = img
-    side = min(w, h)  # animated textures: frames stacked downwards
     out = bytearray(TILE * TILE * 4)
     for y in range(TILE):
         for x in range(TILE):
-            sx, sy = x * side // TILE, y * side // TILE
+            sx, sy = x * w // TILE, y * h // TILE
             o = (sy * w + sx) * 4
             out[(y * TILE + x) * 4:(y * TILE + x) * 4 + 4] = px[o:o + 4]
     return bytes(out)
@@ -1710,7 +1710,7 @@ def main():
         return struct.pack("<ffff", cx / width, cy / height, (cx + TILE) / width, (cy + TILE) / height)
 
     with open(os.path.join(out_dir, "blocks.bin"), "wb") as f:
-        f.write(b"PNB9" + struct.pack("<IIIIII", len(state_rows), len(blocks_out), len(boxes), len(quads), len(items),
+        f.write(b"PNBA" + struct.pack("<IIIIII", len(state_rows), len(blocks_out), len(boxes), len(quads), len(items),
                                       len(coll_boxes)))
         for blk, hard, flags, nbx, fbx, fq, nq, fc, nc, special, facing in state_rows:
             f.write(struct.pack("<HHBBHIHHIBBH", blk, hard, flags, nbx, fbx, fq, nq, facing, fc, nc, special, 0))
@@ -1738,7 +1738,7 @@ def main():
             nb = name.encode()
             f.write(bytes([len(nb)]) + nb + struct.pack("<4I", *cols))
     with open(os.path.join(out_dir, "atlas.bin"), "wb") as f:
-        f.write(b"PNA1" + struct.pack("<HH", width, height) + bytes(atlas))
+        f.write(b"PNA2" + struct.pack("<HH", width, height) + bytes(atlas))
     make_particles(assets, res, out_dir, particle_tiles, width, height)
 
     # ---- the GUI: vanilla's sprites, the font, the item icons
