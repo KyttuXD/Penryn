@@ -107,6 +107,7 @@ impl Page {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Slot {
     page: u16,
     at: u32,
@@ -129,9 +130,9 @@ struct Item {
 pub struct Terrain {
     /// Each region's pages (an emptied page is kept for reuse until the region goes).
     regions: BTreeMap<RKey, Vec<Page>>,
-    slots: BTreeMap<SKey, Slot>,
-    /// The sections in each region, so a region out of view is skipped whole.
-    members: BTreeMap<RKey, Vec<SKey>>,
+    /// The sections of each region with their slots, so a region out of view is skipped whole
+    /// and the others are read in one sweep.
+    members: BTreeMap<RKey, Vec<(SKey, Slot)>>,
     /// The shared quad index buffers (0 1 2, 2 3 0 per quad, as vanilla's): 16-bit for a page,
     /// 32-bit for the pages of oversized sections.
     index16: u32,
@@ -152,7 +153,6 @@ impl Terrain {
     pub fn new() -> Terrain {
         Terrain {
             regions: BTreeMap::new(),
-            slots: BTreeMap::new(),
             members: BTreeMap::new(),
             index16: 0,
             index32: 0,
@@ -174,14 +174,12 @@ impl Terrain {
                 unsafe { (gl.DeleteBuffers)(1, &p.vbo) };
             }
         }
-        self.slots.clear();
         self.members.clear();
     }
 
     pub fn remove(&mut self, gl: &Gl, k: SKey) {
-        let Some(s) = self.slots.remove(&k) else { return };
+        let Some(s) = self.take_slot(k) else { return };
         let rk = region_of(k);
-        self.unlist(k);
         let Some(pages) = self.regions.get_mut(&rk) else { return };
         if let Some(p) = pages.get_mut(s.page as usize) {
             p.give(s.at, s.cap);
@@ -204,7 +202,7 @@ impl Terrain {
         }
         let rk = region_of(k);
         // In place, when it fits its old slot.
-        if let Some(s) = self.slots.get_mut(&k) {
+        if let Some(s) = self.members.get_mut(&rk).and_then(|m| m.iter_mut().find(|e| e.0 == k)).map(|e| &mut e.1) {
             if quads <= s.cap {
                 if let Some(p) = self.regions.get(&rk).and_then(|pages| pages.get(s.page as usize)) {
                     upload(gl, p.vbo, s.at, &data);
@@ -213,7 +211,7 @@ impl Terrain {
                 }
             }
         }
-        if let Some(s) = self.slots.remove(&k) {
+        if let Some(s) = self.take_slot(k) {
             if let Some(p) = self.regions.get_mut(&rk).and_then(|pages| pages.get_mut(s.page as usize)) {
                 p.give(s.at, s.cap);
             }
@@ -245,22 +243,19 @@ impl Terrain {
             }
         };
         upload(gl, pages[pi].vbo, at, &data);
-        self.slots.insert(k, Slot { page: pi as u16, at, cap: need, first });
-        let m = self.members.entry(rk).or_insert_with(Vec::new);
-        if !m.contains(&k) {
-            m.push(k);
-        }
+        self.members.entry(rk).or_insert_with(Vec::new).push((k, Slot { page: pi as u16, at, cap: need, first }));
         self.ensure_index(gl, need);
     }
 
-    fn unlist(&mut self, k: SKey) {
+    fn take_slot(&mut self, k: SKey) -> Option<Slot> {
         let rk = region_of(k);
-        if let Some(m) = self.members.get_mut(&rk) {
-            m.retain(|x| *x != k);
-            if m.is_empty() {
-                self.members.remove(&rk);
-            }
+        let m = self.members.get_mut(&rk)?;
+        let i = m.iter().position(|e| e.0 == k)?;
+        let s = m.swap_remove(i).1;
+        if m.is_empty() {
+            self.members.remove(&rk);
         }
+        Some(s)
     }
 
     fn ensure_index(&mut self, gl: &Gl, quads: u32) {
@@ -307,8 +302,8 @@ impl Terrain {
             if !keep_box(lo, hi) {
                 continue;
             }
-            for &k in members.iter() {
-                let Some(s) = self.slots.get(&k) else { continue };
+            for (k, s) in members.iter() {
+                let k = *k;
                 let lo = [(k.0 * 16) as f64 - eye[0], (min_y + k.1 * 16) as f64 - eye[1], (k.2 * 16) as f64 - eye[2]];
                 if !keep(k, lo) {
                     continue;
