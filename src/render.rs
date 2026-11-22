@@ -483,9 +483,7 @@ impl Renderer {
             (gl.LoadMatrixf)(t.as_ptr());
             (gl.MatrixMode)(MODELVIEW);
         }
-        let (yr, pr) = (math::to_rad(yaw as f64), math::to_rad(pitch as f64));
-        let dir = [-math::sin(yr) * math::cos(pr), -math::sin(pr), math::cos(yr) * math::cos(pr)];
-        let view = look(dir);
+        let view = look_yp(yaw, pitch);
         {
             let mut vf = [0f32; 16];
             for i in 0..16 {
@@ -614,9 +612,7 @@ impl Renderer {
 
     /// The outline of the block being looked at.
     pub fn draw_outline(&mut self, gl: &Gl, eye: [f64; 3], yaw: f32, pitch: f32, pos: [i32; 3], boxes: &[[u8; 6]]) {
-        let (yr, pr) = (math::to_rad(yaw as f64), math::to_rad(pitch as f64));
-        let dir = [-math::sin(yr) * math::cos(pr), -math::sin(pr), math::cos(yr) * math::cos(pr)];
-        let m = translate(&look(dir), [pos[0] as f64 - eye[0], pos[1] as f64 - eye[1], pos[2] as f64 - eye[2]]);
+        let m = translate(&look_yp(yaw, pitch), [pos[0] as f64 - eye[0], pos[1] as f64 - eye[1], pos[2] as f64 - eye[2]]);
         let mut v: Vec<V> = Vec::new();
         let c = [0, 0, 0, 160];
         for bx in boxes {
@@ -642,9 +638,7 @@ impl Renderer {
     /// The breaking cracks on a block: its shape's faces with the stage's texture, multiplied
     /// into what is there (vanilla's crumbling render type: blend DST_COLOR, SRC_COLOR).
     pub fn draw_cracks(&mut self, gl: &Gl, eye: [f64; 3], yaw: f32, pitch: f32, pos: [i32; 3], boxes: &[[u8; 6]], uv: [f32; 4]) {
-        let (yr, pr) = (math::to_rad(yaw as f64), math::to_rad(pitch as f64));
-        let dir = [-math::sin(yr) * math::cos(pr), -math::sin(pr), math::cos(yr) * math::cos(pr)];
-        let m = translate(&look(dir), [pos[0] as f64 - eye[0], pos[1] as f64 - eye[1], pos[2] as f64 - eye[2]]);
+        let m = translate(&look_yp(yaw, pitch), [pos[0] as f64 - eye[0], pos[1] as f64 - eye[1], pos[2] as f64 - eye[2]]);
         let mut v: Vec<V> = Vec::new();
         let c = [255, 255, 255, 255];
         for bx in boxes {
@@ -753,6 +747,18 @@ fn perspective(fov_deg: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
         0.0, 0.0, (far + near) / (near - far), -1.0,
         0.0, 0.0, 2.0 * far * near / (near - far), 0.0,
     ]
+}
+
+/// The view matrix for yaw and pitch (degrees), from the origin, column-major. The right axis
+/// depends on yaw only, so it stays valid when looking straight up or down (a cross product
+/// with the world up collapses there, which rolled the view at 90 degrees).
+fn look_yp(yaw: f32, pitch: f32) -> [f64; 16] {
+    let (y, p) = (math::to_rad(yaw as f64), math::to_rad(pitch as f64));
+    let (sy, cy, sp, cp) = (math::sin(y), math::cos(y), math::sin(p), math::cos(p));
+    let f = [-sy * cp, -sp, cy * cp];
+    let s = [-cy, 0.0, -sy];
+    let u = [s[1] * f[2] - s[2] * f[1], s[2] * f[0] - s[0] * f[2], s[0] * f[1] - s[1] * f[0]];
+    [s[0], u[0], -f[0], 0.0, s[1], u[1], -f[1], 0.0, s[2], u[2], -f[2], 0.0, 0.0, 0.0, 0.0, 1.0]
 }
 
 /// A view matrix looking along `dir` from the origin (column-major).
