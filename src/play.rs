@@ -275,6 +275,29 @@ impl App {
         self.screen == Screen::Play && if self.menu.o.on(crate::options::O::ToggleCrouch) { self.sneak_toggle } else { self.held(B::Sneak) }
     }
 
+    /// The player's own model for third person: the server never sends the player itself, so
+    /// it is made here from the player's state (pose from the server's flags, the held item,
+    /// the walk swing), as LocalPlayer is drawn by vanilla.
+    fn own_model(&self, g: &Game, kind: i32) -> crate::entities::Entity {
+        let mut e = crate::entities::Entity::new(kind, g.uuid, self.mover.pos, g.player.yaw, g.player.pitch, g.player.yaw);
+        e.prev = self.prev_pos;
+        e.body_yaw = g.player.yaw;
+        e.on_ground = self.mover.on_ground;
+        e.limb_pos = self.walk_dist;
+        e.limb_speed = ((self.walk_dist - self.prev_walk_dist) * 4.0).clamp(0.0, 1.0);
+        // Entity flags: the server's word (gliding, swimming...), with the sneak and sprint keys.
+        let mut flags = g.riding.own_flags.unwrap_or(0) as i64;
+        if self.sneaking() {
+            flags |= 0x02;
+        }
+        if self.sprinting {
+            flags |= 0x08;
+        }
+        e.data.insert(0, flags);
+        e.equipment[0] = g.held();
+        e
+    }
+
     /// The camera (GameRenderer's camera setup): the player's eye and angles in first person.
     /// In third person it is 4 blocks back along the view (or in front, looking back at the
     /// player, for F5's second view), stopped short of a solid block.
@@ -2202,6 +2225,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         // Clouds reach further than the terrain (vanilla: the cloud range option, 128 by default).
         let radius = (((self.view as f64 + 1.0) * 16.0).max(128.0) * 1.5).min(self.menu.o.int(crate::options::O::CloudRange) as f64 * 16.0);
         crate::skins::frame(gl);
+        // Third person: the player's own model, drawn with the others (never in spectator mode).
+        let mut mine: alloc::collections::BTreeMap<i32, crate::entities::Entity> = alloc::collections::BTreeMap::new();
+        if let (Some(t), 1..=2, false, false) = (ents, self.perspective, g.game_mode == crate::gamemode::SPECTATOR, g.dead) {
+            mine.insert(g.entity_id, self.own_model(g, t.player_type));
+        }
         let mut parts = self.particles.as_mut();
         self.r.draw_world(
             gl,
@@ -2218,6 +2246,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if let Some(t) = ents {
                     t.draw(gl, view, eye, entities, pf, own, &ent_cx);
                     crate::skins::draw(gl, view, eye, entities, pf, own, t);
+                    if !mine.is_empty() {
+                        t.draw(gl, view, eye, &mine, pf, -1, &ent_cx);
+                        crate::skins::draw(gl, view, eye, &mine, pf, -1, t);
+                    }
                 }
                 crate::entities::draw_items(gl, view, eye, entities, pf, icons, blocks_ref, atlas, atlas_size);
                 crate::maps::draw_frames(gl, view, eye, entities, maps_ref, icons, blocks_ref, atlas, atlas_size);
