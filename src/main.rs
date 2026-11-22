@@ -33,6 +33,7 @@ mod signs;
 mod sky;
 mod net;
 mod options;
+mod particles;
 mod sys;
 mod weather;
 mod wire;
@@ -238,7 +239,8 @@ fn selftest() -> Result<(), String> {
             for (what, got, want) in physics_checks(&b) {
                 check(what, got, want);
             }
-            for (what, got, want) in signs::selftest(Some(&b)).into_iter().chain(effects::selftest(&b)).chain(moving::selftest(&b)) {
+            let w = test_world(&b, &[]);
+            for (what, got, want) in signs::selftest(Some(&b)).into_iter().chain(effects::selftest(&b)).chain(moving::selftest(&b)).chain(particles::selftest(&b, &w)) {
                 check(what, got, want);
             }
         }

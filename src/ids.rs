@@ -51,13 +51,16 @@ pub mod play {
     pub const C_DAMAGE_EVENT: i32 = 25;
     pub const C_DISCONNECT: i32 = 32;
     pub const C_DISGUISED_CHAT: i32 = 33;
+    pub const C_ENTITY_EVENT: i32 = 34;
     pub const C_ENTITY_POSITION_SYNC: i32 = 35;
+    pub const C_EXPLODE: i32 = 36;
     pub const C_FORGET_LEVEL_CHUNK: i32 = 38;
     pub const C_GAME_EVENT: i32 = 39;
     pub const C_HURT_ANIMATION: i32 = 43;
     pub const C_KEEP_ALIVE: i32 = 45;
     pub const C_LEVEL_CHUNK_WITH_LIGHT: i32 = 46;
     pub const C_LEVEL_EVENT: i32 = 47;
+    pub const C_LEVEL_PARTICLES: i32 = 48;
     pub const C_LOGIN: i32 = 50;
     pub const C_MOVE_ENTITY_POS: i32 = 54;
     pub const C_MOVE_ENTITY_POS_ROT: i32 = 55;

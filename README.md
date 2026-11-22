@@ -51,6 +51,11 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 - **Pistons and shulker boxes move**: pistons push and pull (slime and honey included) as
   vanilla's client runs them, the moving blocks drawn sliding, carrying and launching the
   player; an opening shulker box lifts what stands on it.
+- **Particles as vanilla's ParticleEngine**: blocks breaking into pieces of their texture (tinted
+  as the block is), the cracks flying off the face being dug, sprinting and eating crumbs, and
+  what the server sends (smoke, flames, hearts, crits, dust, portals, notes, splashes, campfire
+  smoke, explosions with their block debris, death poofs and the rest) with the game's own
+  sprites from `particles.bin`, each moving as its vanilla class does. At most 4000 at once.
 - **Sky as vanilla**: sun, moon phases, stars, fancy clouds, the sky and fog colours of each
   biome, and grass, leaves and water in their biome colours (blended).
 - **Weather as vanilla**: rain and snow falling around you where each biome rains or snows
@@ -74,6 +79,8 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 - Block entities other than chests and signs (banners, heads, shulker boxes, bells) are drawn
   without their entity model. Signs show their text (front and back, colours, glow ink) and
   placing one opens vanilla's sign editor; its sign pictures come from `signs.bin` (optional).
+- Particles vanilla's blocks make on their own (torches, campfires, leaves, drips) and rain
+  splashes are not drawn yet.
 - Mobs show their default texture (no variants, no baby models, no armour or held items).
 - Only menus listed above have their own screen; others show their slots as chest rows.
 - Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);
@@ -105,7 +112,7 @@ network and makes those calls for Penryn:
 PENRYN_MSA_CLIENT_ID=<your client id> python3 tools/relay.py      # port 25580
 ```
 
-It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`, `effects.bin`) from
+It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`, `effects.bin`, `weather.bin`, `signs.bin`, `particles.bin`) from
 your own copy of Minecraft: the 26.3 client jar from an existing install (Horizon's launcher, the
 official launcher, Prism), or downloaded from Mojang for a signed-in account that owns the game,
 plus the data Horizon's `horizon-prepare` writes (install a Horizon release with its launcher).
@@ -169,6 +176,7 @@ E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
 | `src/entities.rs` | entities and their models |
 | `src/skins.rs` | players' skins and capes: profile textures, PNG decoding, the download thread |
 | `src/weather.rs` | rain, snow, thunder and lightning |
+| `src/particles.rs` | particles (vanilla's ParticleEngine) |
 | `src/gui.rs`, `screens.rs`, `lang.rs` | vanilla's GUI |
 | `src/play.rs`, `physics.rs` | the game window, input, movement, digging |
 | `src/effects.rs`, `moving.rs` | status effects; pistons and shulker lids in motion |
