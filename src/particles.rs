@@ -18,6 +18,8 @@ use core::ffi::c_void;
 
 /// The most particles alive at once (vanilla: 16384 per group; a 2008 GPU wants fewer).
 const MAX: usize = 4000;
+/// minecraft:villager's entity type id (26.3 registries).
+const ENTITY_VILLAGER: i32 = 143;
 /// ClientExplosionTracker.MAX_PARTICLES_PER_TICK.
 const EXPLOSION_PER_TICK: i32 = 512;
 
@@ -206,6 +208,8 @@ pub struct Particles {
     /// Per particle type (registry id): its sprites, and its behaviour.
     sets: Vec<Vec<u16>>,
     kinds: Vec<K>,
+    /// ParticleType.getOverrideLimiter: shown however far from the camera.
+    always: Vec<bool>,
     names: Vec<String>,
     /// Per block: its particle texture's tile in the atlas (0xFFFF: none), when particles.bin
     /// was made with this atlas.
@@ -240,6 +244,7 @@ impl Particles {
             sprites: Vec::new(),
             sets: Vec::new(),
             kinds: Vec::new(),
+            always: Vec::new(),
             names: Vec::new(),
             block_tile: Vec::new(),
             atlas_size,
@@ -259,6 +264,7 @@ impl Particles {
                 crate::warn!("particles.bin is damaged: no particle sprites");
                 p.sets.clear();
                 p.kinds.clear();
+                p.always.clear();
                 p.block_tile.clear();
             }
         }
@@ -312,6 +318,7 @@ impl Particles {
                 k = K::None;
             }
             self.kinds.push(k);
+            self.always.push(override_limiter(&name));
             self.sets.push(set);
             self.names.push(name);
         }
@@ -616,6 +623,7 @@ impl Particles {
             return;
         }
         let (dx, dy, dz) = (x - eye[0], y - eye[1], z - eye[2]);
+        let force = force || self.always.get(ty as usize).copied().unwrap_or(false);
         if !force && dx * dx + dy * dy + dz * dz > 1024.0 {
             return;
         }
@@ -736,7 +744,8 @@ impl Particles {
                 p
             }
             K::Crit | K::Magic | K::Damage => {
-                let y = if kind == K::Damage { y + 1.0 } else { y };
+                // DamageIndicatorProvider: new CritParticle(x, y, z, xa, ya + 1, za).
+                let ya = if kind == K::Damage { ya + 1.0 } else { ya };
                 let mut p = self.base_v(x, y, z, 0.0, 0.0, 0.0, kind, ty);
                 p.friction = 0.7;
                 p.gravity = 0.5;
@@ -1111,7 +1120,10 @@ impl Particles {
         if crate::sys::env("PENRYN_DEBUG").is_some() {
             crate::say!("particles: {} x{} at {:.1} {:.1} {:.1} ({} alive)", self.names.get(ty as usize).map_or("?", |n| n.as_str()), count, x, y, z, self.list.len());
         }
-        let force = force || always;
+        // alwaysShow only matters under the "decreased" particles option, which is not here.
+        let _ = always;
+        // RandomizationType's ids, out of range read as DEFAULT (ByIdMap's ZERO strategy).
+        let random = if (0..=2).contains(&random) { random } else { 0 };
         if count == 0 {
             self.spawn(g, gui, eye, ty, opt, force, x, y, z, speed[0] * dist[0], speed[1] * dist[1], speed[2] * dist[2]);
             return Some(());
@@ -1222,12 +1234,16 @@ impl Particles {
     /// villagers' moods.
     fn entity_event(&mut self, g: &Game, gui: Option<&Gui>, eye: [f64; 3], sizes: &[(f32, f32)], ev: u8, pos: [f64; 3], kind: i32) {
         let (w, h) = sizes.get(kind.max(0) as usize).map_or((0.6, 1.8), |s| (s.0 as f64, s.1 as f64));
+        // Villager's own events (the minecraft:entity_type id of villager in 26.3).
+        let villager = kind == ENTITY_VILLAGER;
         let (ty, n, dy) = match ev {
             60 | 20 => (self.id_poof, 20, 0.0),
-            18 | 7 | 12 => (self.id_heart, 7, 0.5),
+            18 | 7 => (self.id_heart, 7, 0.5),
             6 => (self.id_smoke, 7, 0.5),
-            13 => (self.id_angry, 7, 0.5),
-            14 => (self.id_happy, 7, 0.5),
+            // Villager.addParticlesAroundSelf: 5, a block higher.
+            12 if villager => (self.id_heart, 5, 1.0),
+            13 if villager => (self.id_angry, 5, 1.0),
+            14 if villager => (self.id_happy, 5, 1.0),
             _ => return,
         };
         for _ in 0..n {
@@ -1332,7 +1348,7 @@ impl Particles {
             return;
         }
         let ex = core::mem::take(&mut self.explosions);
-        let total: i32 = ex.iter().map(|e| e.2).sum();
+        let total: i32 = ex.iter().fold(0i32, |t, e| t.saturating_add(e.2));
         for _ in 0..total.min(EXPLOSION_PER_TICK) {
             let mut pick = self.rint(total.max(1));
             let Some(e) = ex.iter().find(|e| {
@@ -1373,8 +1389,9 @@ impl Particles {
         p.prev = p.pos;
         match p.kind {
             K::Happy | K::Town => {
+                // if (lifetime-- <= 0) remove
                 p.life -= 1;
-                if p.life <= 0 {
+                if p.life < 0 {
                     return false;
                 }
                 p.pos = [p.pos[0] + p.vel[0], p.pos[1] + p.vel[1], p.pos[2] + p.vel[2]];
@@ -1383,7 +1400,7 @@ impl Particles {
             }
             K::Bubble => {
                 p.life -= 1;
-                if p.life <= 0 {
+                if p.life < 0 {
                     return false;
                 }
                 p.vel[1] += 0.002;
@@ -1691,6 +1708,19 @@ fn collide_axis(w: &World, b: &Blocks, lo: &[f64; 3], hi: &[f64; 3], axis: usize
     d
 }
 
+/// The types registered with overrideLimiter (ParticleTypes).
+fn override_limiter(name: &str) -> bool {
+    matches!(
+        name,
+        "block_marker" | "geyser" | "geyser_base" | "geyser_poof" | "geyser_plume" | "damage_indicator" | "elder_guardian"
+            | "explosion_emitter" | "explosion" | "gust" | "gust_emitter_large" | "gust_emitter_small" | "sonic_boom"
+            | "sculk_charge" | "sculk_charge_pop" | "vibration" | "poof" | "spit" | "squid_ink" | "sweep_attack"
+            | "campfire_cosy_smoke" | "campfire_signal_smoke" | "glow_squid_ink" | "glow" | "wax_on" | "wax_off"
+            | "electric_spark" | "scrape" | "trial_spawner_detection" | "trial_spawner_detection_ominous"
+            | "vault_connection" | "ominous_spawning"
+    )
+}
+
 fn rgb(c: u32) -> [f32; 3] {
     [(c >> 16 & 255) as f32 / 255.0, (c >> 8 & 255) as f32 / 255.0, (c & 255) as f32 / 255.0]
 }
@@ -1748,6 +1778,7 @@ pub fn selftest(b: &Blocks, w: &World) -> Vec<(&'static str, String, &'static st
         sprites: Vec::new(),
         sets: Vec::new(),
         kinds: Vec::new(),
+        always: Vec::new(),
         names: Vec::new(),
         block_tile: Vec::new(),
         atlas_size: (1024.0, 1024.0),
