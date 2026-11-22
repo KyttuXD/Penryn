@@ -118,7 +118,11 @@ pub fn pick(list: &[Entry], registry: &str, patch: &[u8]) -> Option<usize> {
             }
             find(list, &m)
         }
-        None => find(list, &format!("{}|{}", registry, cmd?)),
+        // No item_model: the item's own definition (vanilla's default), a case of it first.
+        None => match cmd {
+            Some(s) => find(list, &format!("{}|{}", registry, s)).or_else(|| find(list, registry)),
+            None => find(list, registry),
+        },
     }
 }
 
@@ -176,6 +180,8 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     out.push(("overlay with a case", format!("{:?}", pick(&entries, "minecraft:paper", &p.b)), "Some(1)"));
     out.push(("overlay without a case", format!("{:?}", pick(&entries[..1], "minecraft:paper", &p.b)), "Some(0)"));
     out.push(("overlay none", format!("{:?}", pick(&entries, "minecraft:paper", &[0, 0])), "None"));
+    // No item_model: the item's plain definition (the fallback of its selects, or a plain model).
+    out.push(("overlay default item", format!("{:?}", pick(&entries[..1], "ktfp:btn_back", &[0, 0])), "Some(0)"));
     out
 }
 

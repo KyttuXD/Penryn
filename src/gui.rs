@@ -681,10 +681,8 @@ impl Gui {
         if self.overlays.is_empty() {
             return self.item(b, item, count, x, y);
         }
-        let registry = match b.items.get(item as usize) {
-            Some(short) => alloc::format!("minecraft:{}", short),
-            None => return,
-        };
+        let Some(short) = b.items.get(item as usize) else { return self.item(b, item, count, x, y) };
+        let registry = alloc::format!("minecraft:{}", short);
         match crate::itemmodels::pick(&self.overlays, &registry, patch) {
             Some(i) => {
                 let icon = self.overlays[i].1.clone();

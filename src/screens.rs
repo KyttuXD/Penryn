@@ -381,13 +381,13 @@ pub fn hud(gui: &mut Gui, g: &Game, crosshair: bool, held_name: Option<(String, 
     let y = h - 22.0;
     if let Some((item, count)) = g.inventory[45] {
         gui.blit("hud/hotbar_offhand_left", x - 29.0, h - 23.0);
-        gui.item_patch(&g.blocks, item, &g.creative.patches[45], count, x - 26.0, h - 19.0);
+        gui.item_patch(&g.blocks, item, g.creative.patches.get(45).map_or(&[][..], |p| &p[..]), count, x - 26.0, h - 19.0);
     }
     gui.blit("hud/hotbar", x, y);
     gui.blit("hud/hotbar_selection", x - 1.0 + g.selected as f32 * 20.0, y - 1.0);
     for i in 0..9 {
         if let Some((item, count)) = g.inventory[36 + i] {
-            gui.item_patch(&g.blocks, item, &g.creative.patches[36 + i], count, cx - 90.0 + i as f32 * 20.0 + 2.0, h - 16.0 - 3.0);
+            gui.item_patch(&g.blocks, item, g.creative.patches.get(36 + i).map_or(&[][..], |p| &p[..]), count, cx - 90.0 + i as f32 * 20.0 + 2.0, h - 16.0 - 3.0);
         }
     }
     let survival = g.game_mode == 0 || g.game_mode == 2;
