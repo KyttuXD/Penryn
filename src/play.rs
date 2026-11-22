@@ -394,14 +394,40 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
             return Err(e);
         }
     };
-    app.v.grab_mouse(true);
-    let result = app.main_loop(&mut g);
-    if let Err(e) = &result {
-        app.v.grab_mouse(false);
-        let reason = g.disconnected.clone().unwrap_or_else(|| e.clone());
-        app.wait_on(&["Disconnected", &reason, "", "Esc to quit"]);
+    loop {
+        app.v.grab_mouse(true);
+        let result = app.main_loop(&mut g);
+        // ClientboundTransferPacket: connect to the new server, keeping the cookies.
+        if let Some((h, p)) = g.ui.common.transfer.take() {
+            let target = format!("Joining {}:{} ...", h, p);
+            app.message(&[&target]);
+            app.set_screen(Screen::Play);
+            app.container_screen = false;
+            app.mining = None;
+            app.respawn_sent = false;
+            let epoch = g.world.epoch;
+            // Connection.disconnect: the old server sees us leave before the new one sees us come.
+            let Game { blocks, ui, conn, .. } = g;
+            drop(conn);
+            g = match Game::join_with(&h, p, name, account, blocks, view as i8, ui.common, true) {
+                Ok(g) => g,
+                Err(e) => {
+                    app.v.grab_mouse(false);
+                    app.wait_on(&["Could not join the server", &e, "", "Esc to quit"]);
+                    return Err(e);
+                }
+            };
+            // A new world: the old one's meshes go.
+            g.world.epoch = epoch.wrapping_add(1);
+            continue;
+        }
+        if let Err(e) = &result {
+            app.v.grab_mouse(false);
+            let reason = g.disconnected.clone().unwrap_or_else(|| e.clone());
+            app.wait_on(&["Disconnected", &reason, "", "Esc to quit"]);
+        }
+        return result;
     }
-    result
 }
 
 impl App {
