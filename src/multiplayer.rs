@@ -432,8 +432,9 @@ impl Mp {
         }
         // Favicons to textures (and back to the unknown server picture when one goes away).
         for i in 0..self.entries.len() {
-            let want = self.list.servers[i].icon.clone();
-            if self.entries[i].icon_of != want {
+            // Compared in place: the PNG is only copied when it changed (not every tick).
+            if self.entries[i].icon_of.as_deref() != self.list.servers[i].icon.as_deref() {
+                let want = self.list.servers[i].icon.clone();
                 let img = want.as_deref().and_then(crate::skins::png).filter(|(w, h, _)| *w == 64 && *h == 64);
                 match img {
                     Some((w, h, px)) => {

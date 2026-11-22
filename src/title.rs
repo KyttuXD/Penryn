@@ -953,18 +953,9 @@ impl Front {
                 let act = self.mp.as_mut()?.key(sc, ctrl, shift, || v.clipboard());
                 return self.mp_act(ui, act);
             }
-            Scr::Connect { back_to_list, .. } => {
-                if sc == 41 {
-                    let back = *back_to_list;
-                    self.scr = if back { Scr::Multiplayer } else { Scr::Title };
-                }
-            }
-            Scr::Disconnected { to_list, .. } => {
-                if sc == 41 {
-                    let to = *to_list;
-                    self.scr = if to { Scr::Multiplayer } else { Scr::Title };
-                }
-            }
+            // ConnectScreen and DisconnectedScreen: shouldCloseOnEsc is false (only their
+            // buttons leave them).
+            Scr::Connect { .. } | Scr::Disconnected { .. } => {}
             Scr::SignIn(_) => {
                 if sc == 41 {
                     self.scr = Scr::Title;
@@ -1146,7 +1137,7 @@ impl Front {
             Scr::Disconnected { title, reason, to_list } => {
                 menu_background(gl, gui, w, h, speed, blur);
                 let (top, lines, b) = Self::disconnected_layout(gui, reason, *to_list);
-                gui.text_centered(title, cx, top, 0xFFAA_AAAA);
+                gui.text_centered(title, cx, top, WHITE);
                 for (i, l) in lines.iter().enumerate() {
                     gui.text_centered(l, cx, top + 29.0 + i as f32 * 9.0, WHITE);
                 }
