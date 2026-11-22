@@ -93,6 +93,9 @@ extern "C" {
     pub fn poll(fds: *mut PollFd, n: usize, timeout_ms: c_int) -> c_int;
     pub fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
     pub fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+    /// The skin download thread (skins.rs). pthread_t is 8 bytes on both systems.
+    pub fn pthread_create(t: *mut usize, attr: *const c_void, f: extern "C" fn(*mut c_void) -> *mut c_void, arg: *mut c_void) -> c_int;
+    pub fn pthread_detach(t: usize) -> c_int;
 }
 
 // The prebuilt `alloc` was compiled with unwinding; with panic = "abort" nothing ever unwinds,

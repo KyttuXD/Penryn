@@ -53,6 +53,8 @@ enum Tex {
     Gui,
     Blocks,
     Invert,
+    /// A texture of its own (a player's downloaded skin or cape).
+    Own(u32),
 }
 
 pub struct Part {
@@ -585,8 +587,19 @@ impl Gui {
     /// Draws an entity model with a skin sprite: feet at (x, y), `scale` GUI units a block,
     /// turned by `body_yaw` (degrees), the head by `head_yaw` and `head_pitch` more.
     pub fn entity(&mut self, model: &str, skin: &str, x: f32, y: f32, scale: f32, body_yaw: f32, head_yaw: f32, head_pitch: f32) {
-        let Some(mi) = self.models.iter().position(|m| m.name == model) else { return };
         let Some(sp) = self.sprites.get(skin).copied() else { return };
+        let r = [sp.x as f32 / self.aw, sp.y as f32 / self.ah, sp.w as f32 / self.aw, sp.h as f32 / self.ah];
+        self.entity_uv(model, Tex::Gui, r, x, y, scale, body_yaw, head_yaw, head_pitch);
+    }
+
+    /// `entity` with a texture of its own (uvs 0..1 over it): a player's downloaded skin or cape.
+    pub fn entity_tex(&mut self, model: &str, tex: u32, x: f32, y: f32, scale: f32, body_yaw: f32, head_yaw: f32, head_pitch: f32) {
+        self.entity_uv(model, Tex::Own(tex), [0.0, 0.0, 1.0, 1.0], x, y, scale, body_yaw, head_yaw, head_pitch);
+    }
+
+    /// `r`: the skin's rectangle in uvs (u, v, width, height).
+    fn entity_uv(&mut self, model: &str, tex: Tex, r: [f32; 4], x: f32, y: f32, scale: f32, body_yaw: f32, head_yaw: f32, head_pitch: f32) {
+        let Some(mi) = self.models.iter().position(|m| m.name == model) else { return };
         type M = [[f64; 4]; 3];
         fn mul(a: &M, b: &M) -> M {
             let mut r = [[0.0; 4]; 3];
@@ -623,7 +636,6 @@ impl Gui {
             m = mul(&m, &[[q[6] as f64, 0.0, 0.0, 0.0], [0.0, q[7] as f64, 0.0, 0.0], [0.0, 0.0, q[8] as f64, 0.0]]);
             mats.push(m);
         }
-        let (aw, ah) = (self.aw, self.ah);
         let k = scale / 16.0;
         let mut faces: Vec<(f64, [V; 4])> = Vec::new();
         for (pi, p) in parts.iter().enumerate() {
@@ -647,7 +659,7 @@ impl Gui {
                     depth += pz;
                     vs[i] = V {
                         p: [x + px as f32 * k, y + (py as f32 - 24.0) * k, 0.0],
-                        uv: [(sp.x as f32 + v[3] * sp.w as f32) / aw, (sp.y as f32 + v[4] * sp.h as f32) / ah],
+                        uv: [r[0] + v[3] * r[2], r[1] + v[4] * r[3]],
                         c: col,
                     };
                 }
@@ -655,7 +667,7 @@ impl Gui {
             }
         }
         faces.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
-        let s = self.seg(Tex::Gui);
+        let s = self.seg(tex);
         for (_, vs) in faces {
             s.extend_from_slice(&vs);
         }
@@ -708,6 +720,10 @@ impl Gui {
                     Tex::Blocks => {
                         (gl.Enable)(TEXTURE_2D);
                         (gl.BindTexture)(TEXTURE_2D, self.blocks_tex);
+                    }
+                    Tex::Own(t) => {
+                        (gl.Enable)(TEXTURE_2D);
+                        (gl.BindTexture)(TEXTURE_2D, *t);
                     }
                 }
                 if *t == Tex::Invert {

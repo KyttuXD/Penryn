@@ -33,6 +33,12 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 - **Mobs, players and dropped items** with their vanilla models and textures, walking animation,
   heads turning, the red flash when hit, sheep wool in its colour. Left click attacks, right click
   uses.
+- **Players' own skins and capes**: the skin (classic or slim arms, old 64 x 32 skins converted as
+  vanilla does) on their model, your first-person arm and the inventory, and capes swinging
+  as vanilla's CapeLayer. textures.minecraft.net needs HTTPS, so the relay fetches them
+  (`GET /skin?url=...`, cached in its data folder); without a relay, players keep the default
+  skins. `PENRYN_TEST_SKIN` (a textures property value, or `@file`) gives players without
+  textures that profile, for testing on offline servers.
 - **Sky as vanilla**: sun, moon phases, stars, fancy clouds, the sky and fog colours of each
   biome, and grass, leaves and water in their biome colours (blended).
 - **Sound and music from your game**: every sound the server plays, plus the ones vanilla plays
@@ -52,7 +58,8 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
   without their entity model.
 - Mobs show their default texture (no variants, no baby models, no armour or held items).
 - Only menus listed above have their own screen; others show their slots as chest rows.
-- Players use the default skins (custom skins need the relay to fetch them).
+- Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);
+  no elytra, and Dinnerbone and Grumm stand the right way up.
 - Item stacks with unusual data components (potions, books, banners...) can hide the slots after
   them in a container until the server sends them again.
 
@@ -140,6 +147,7 @@ E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
 | `src/world.rs`, `blocks.rs` | chunks and the block table |
 | `src/render.rs` | meshing and drawing the world (OpenGL 1.5 fixed function) |
 | `src/entities.rs` | entities and their models |
+| `src/skins.rs` | players' skins and capes: profile textures, PNG decoding, the download thread |
 | `src/gui.rs`, `screens.rs`, `lang.rs` | vanilla's GUI |
 | `src/play.rs`, `physics.rs` | the game window, input, movement, digging |
 | `src/sys.rs`, `sdl.rs`, `math.rs` | the C library, SDL2 and OpenGL, float maths (no libm) |

@@ -26,6 +26,7 @@ mod play;
 mod render;
 mod screens;
 mod sdl;
+mod skins;
 mod sky;
 mod net;
 mod sys;
@@ -174,6 +175,7 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             let fetch_from = relay.clone().or_else(|| acc.as_ref().map(|a| a.relay.clone()));
             account::ensure_game_files(fetch_from.as_ref())?;
+            skins::set_relay(fetch_from.clone());
             let name = name.unwrap_or_else(|| String::from("Player"));
             play::run(&h, p, &name, acc.as_ref(), load_blocks()?)
         }
@@ -222,6 +224,9 @@ fn selftest() -> Result<(), String> {
     let data: Vec<u8> = (0..70000u32).map(|i| (i * 7 % 251) as u8).collect();
     let z = zlib::store(&data);
     check("zlib stored round trip", alloc::format!("{}", zlib::inflate(&z, data.len()) == Some(data.clone())), "true");
+    for (what, got, want) in skins::selftest() {
+        check(what, got, want);
+    }
     // Movement against vanilla's collision, in a made-up world (needs blocks.bin).
     match load_blocks() {
         Ok(b) => {

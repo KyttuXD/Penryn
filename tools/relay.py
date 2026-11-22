@@ -23,13 +23,15 @@ client flows allowed), approved by Mojang for the Minecraft API: see README.md. 
 another application's client id.
 
 Tokens cross your local network unencrypted between the Mac and the relay: run it only on a
-network you trust. The relay keeps nothing on disk but the game files.
+network you trust. The relay keeps nothing on disk but the game files and the skins and capes
+it fetched for Penryn (GET /skin?url=..., only from textures.minecraft.net, cached in DATA/skins).
 """
 import hashlib
 import http.server
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socketserver
 import subprocess
@@ -272,6 +274,34 @@ class Relay:
         return out
 
 
+TEXTURE_URL = re.compile(r"^https?://textures\.minecraft\.net/texture/([0-9a-f]{16,128})$")
+
+
+def skin_texture(data_dir, url):
+    """A player's skin or cape (the textures property of their profile) as PNG bytes: fetched
+    once over HTTPS from textures.minecraft.net, which Mac OS X 10.6 cannot reach, and kept in
+    DATA/skins by its hash. Any other host is refused."""
+    m = TEXTURE_URL.match(url)
+    if not m:
+        raise ValueError("only textures.minecraft.net textures")
+    h = m.group(1)
+    cache = os.path.join(data_dir, "skins")
+    path = os.path.join(cache, h + ".png")
+    if os.path.isfile(path):
+        with open(path, "rb") as f:
+            return f.read()
+    req = urllib.request.Request("https://textures.minecraft.net/texture/" + h, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        body = r.read(1 << 21)
+    if not body.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("not a PNG")
+    os.makedirs(cache, exist_ok=True)
+    with open(path + ".part", "wb") as f:
+        f.write(body)
+    os.replace(path + ".part", path)
+    return body
+
+
 def private(addr):
     try:
         ip = ipaddress.ip_address(addr)
@@ -335,6 +365,16 @@ def make_handler(relay):
                     return
                 except Exception as e:  # noqa: BLE001 - reported to the client
                     return self.reply(500, str(e))
+            if self.path.startswith("/skin?"):
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                try:
+                    return self.reply(200, skin_texture(relay.data_dir, q.get("url", [""])[0]), "image/png")
+                except ValueError as e:
+                    return self.reply(400, str(e))
+                except urllib.error.HTTPError as e:
+                    return self.reply(404 if e.code == 404 else 502, "textures.minecraft.net: %d" % e.code)
+                except Exception as e:  # noqa: BLE001 - reported to the client
+                    return self.reply(502, str(e))
             if self.path == "/":
                 return self.reply(200, "penryn-relay for Minecraft %s\n" % VERSION)
             self.reply(404, "no such thing")

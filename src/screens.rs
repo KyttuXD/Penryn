@@ -222,7 +222,7 @@ pub fn draw_window(gui: &mut Gui, g: &Game, win: &Window, mx: f32, my: f32) {
         let gg = crate::math::atan(((cy - my) / 40.0) as f64) as f32;
         // Vanilla: body 180 + f*20, head 180 + f*40, pitch -g*20 (degrees from radians x 20).
         let (model, skin) = skin_of(&g.uuid);
-        gui.entity(model, &skin, cx, y2 - 5.0, 30.0, -f * 20.0, -f * 20.0, -gg * 20.0);
+        crate::skins::gui_entity(gui, &g.uuid, model, &skin, cx, y2 - 5.0, 30.0, -f * 20.0, -f * 20.0, -gg * 20.0);
         for (i, icon) in ["container/slot/helmet", "container/slot/chestplate", "container/slot/leggings", "container/slot/boots"].iter().enumerate() {
             if g.inventory[5 + i].is_none() {
                 gui.blit(icon, left + 8.0, top + 8.0 + i as f32 * 18.0);

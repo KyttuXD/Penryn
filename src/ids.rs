@@ -64,6 +64,8 @@ pub mod play {
     pub const C_PING: i32 = 62;
     pub const C_PLAYER_ABILITIES: i32 = 65;
     pub const C_PLAYER_CHAT: i32 = 66;
+    pub const C_PLAYER_INFO_REMOVE: i32 = 70;
+    pub const C_PLAYER_INFO_UPDATE: i32 = 71;
     pub const C_PLAYER_POSITION: i32 = 73;
     pub const C_REMOVE_ENTITIES: i32 = 78;
     pub const C_RESPAWN: i32 = 84;

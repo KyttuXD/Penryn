@@ -740,6 +740,8 @@ impl Game {
                     e.hurt = 10;
                 }
             }
+            play::C_PLAYER_INFO_UPDATE => crate::skins::player_info(&mut r, self.uuid),
+            play::C_PLAYER_INFO_REMOVE => crate::skins::player_remove(&mut r),
             play::C_SET_ENTITY_DATA => {
                 let id = r.varint().unwrap_or(0);
                 if let Some(e) = self.entities.get_mut(&id) {
@@ -850,6 +852,7 @@ impl Game {
     pub fn tick(&mut self) -> Result<(), String> {
         self.day_time += self.clock_rate as i64;
         self.game_time += 1;
+        crate::skins::tick(&self.entities);
         for e in self.entities.values_mut() {
             e.tick();
         }

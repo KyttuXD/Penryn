@@ -197,12 +197,14 @@ impl Hand {
             None => {
                 // renderPlayerArm: the right arm (and sleeve) of the player model, with the skin.
                 let Some(t) = ents else { return };
-                let mi = t.player_models[if skin < 9 { 0 } else { 1 }];
-                if mi < 0 || skin >= t.skins.len() {
+                // Our own downloaded skin (skins.rs), or the default one by the UUID.
+                let own = crate::skins::local_skin();
+                let mi = t.player_models[if own.map_or(skin < 9, |o| o.1) { 0 } else { 1 }];
+                if mi < 0 || (own.is_none() && skin >= t.skins.len()) {
                     return;
                 }
                 let model = &t.models[mi as usize];
-                let rect = t.skins[skin];
+                let rect = if own.is_some() { [0, 0, 1, 1] } else { t.skins[skin] };
                 let (h_, j, k) = (-0.3 * math::sin(sq * math::PI), 0.4 * math::sin(sq * math::PI * 2.0), -0.4 * math::sin(sw * math::PI));
                 let l = math::sin(sw * sw * math::PI);
                 let m2 = math::sin(sq * math::PI);
@@ -217,8 +219,8 @@ impl Hand {
                     .r(1, -135.0)
                     .t(5.6, 0.0, 0.0);
                 let Some(arm) = model.parts.iter().position(|p| p.name == "right_arm") else { return };
-                let (aw, ah) = t.atlas_size();
-                tex = t.texture();
+                let (aw, ah) = if own.is_some() { (1.0, 1.0) } else { t.atlas_size() };
+                tex = own.map_or(t.texture(), |o| o.0);
                 tex_size = (aw, ah);
                 let mut stack = alloc::vec![(arm, m)];
                 while let Some((pi, pm)) = stack.pop() {

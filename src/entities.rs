@@ -200,6 +200,9 @@ impl EntityTable {
                 continue;
             }
             let Some(&(mut mi, mut rect)) = self.types.get(e.kind as usize) else { continue };
+            if e.kind == self.player_type && crate::skins::custom(&e.uuid) {
+                continue; // drawn by skins.rs with its own skin or cape
+            }
             if e.kind == self.player_type && self.skins.len() == 18 {
                 // DefaultPlayerSkin by the UUID's hash: slim skins first, then wide.
                 let msb = u64::from_be_bytes(e.uuid[..8].try_into().unwrap());
@@ -341,6 +344,18 @@ impl EntityTable {
 }
 
 impl EntityTable {
+    /// The player model (slim or wide) of `e` at `at` (relative to the eye) for skins.rs:
+    /// corners with uvs 0..1 over the whole skin, and their colour.
+    pub fn player_quads(&self, e: &Entity, at: [f64; 3], partial: f32, slim: bool) -> Vec<([f32; 3], [f32; 2], [u8; 4])> {
+        let mut v: Vec<V> = Vec::new();
+        let mi = self.player_models[if slim { 0 } else { 1 }];
+        if mi >= 0 {
+            // A rectangle the size of the atlas maps the model's uvs onto themselves.
+            self.model(&mut v, &self.models[mi as usize], [0, 0, self.aw as u16, self.ah as u16], at, e, partial, [255; 3]);
+        }
+        v.iter().map(|q| (q.p, q.uv, q.c)).collect()
+    }
+
     /// The nearest entity the ray from `eye` along `dir` hits within `reach`, with the
     /// distance and where on it (relative to its position).
     pub fn pick(&self, ents: &BTreeMap<i32, Entity>, eye: [f64; 3], dir: [f64; 3], reach: f64, skip: i32) -> Option<(i32, f64, [f64; 3])> {
