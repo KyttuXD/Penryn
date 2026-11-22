@@ -255,7 +255,7 @@ impl Particles {
             id_large_smoke: 0xFFFF,
         };
         if let Some(d) = data {
-            if p.parse(gl, d).is_none() {
+            if p.parse(Some(gl), d).is_none() {
                 crate::warn!("particles.bin is damaged: no particle sprites");
                 p.sets.clear();
                 p.kinds.clear();
@@ -265,7 +265,7 @@ impl Particles {
         p
     }
 
-    fn parse(&mut self, gl: &Gl, d: &[u8]) -> Option<()> {
+    fn parse(&mut self, gl: Option<&Gl>, d: &[u8]) -> Option<()> {
         if d.get(..4)? != crate::account::PARTICLES_MAGIC {
             return None;
         }
@@ -323,6 +323,7 @@ impl Particles {
         } else {
             crate::warn!("particles.bin was made with another atlas.bin: block particles use the model's texture");
         }
+        let Some(gl) = gl else { return Some(()) };
         unsafe {
             (gl.GenTextures)(1, &mut self.sheet);
             (gl.BindTexture)(TEXTURE_2D, self.sheet);
@@ -1088,17 +1089,28 @@ impl Particles {
         push
     }
 
-    /// ClientPacketListener.handleParticleEvent.
-    fn level_particles(&mut self, g: &Game, gui: Option<&Gui>, eye: [f64; 3], body: &[u8]) -> Option<()> {
+    /// ClientboundLevelParticlesPacket: the particle, overrideLimiter, alwaysShow, the place,
+    /// the spread and the speeds (each axis), the count (a VarInt) and the randomization.
+    #[allow(clippy::type_complexity)]
+    fn read_level_particles(&self, body: &[u8]) -> Option<(u16, Opt, bool, bool, [f64; 3], [f64; 3], [f64; 3], i32, i32)> {
         let mut r = In::new(body);
         let (ty, opt) = self.read_options(&mut r)?;
         let force = r.bool()?;
         let always = r.bool()?;
-        let (x, y, z) = (r.f64()?, r.f64()?, r.f64()?);
+        let pos = [r.f64()?, r.f64()?, r.f64()?];
         let dist = [r.f32()? as f64, r.f32()? as f64, r.f32()? as f64];
         let speed = [r.f32()? as f64, r.f32()? as f64, r.f32()? as f64];
-        let count = r.i32()?;
+        let count = r.varint()?;
         let random = r.varint().unwrap_or(0);
+        Some((ty, opt, force, always, pos, dist, speed, count, random))
+    }
+
+    /// ClientPacketListener.handleParticleEvent.
+    fn level_particles(&mut self, g: &Game, gui: Option<&Gui>, eye: [f64; 3], body: &[u8]) -> Option<()> {
+        let (ty, opt, force, always, [x, y, z], dist, speed, count, random) = self.read_level_particles(body)?;
+        if crate::sys::env("PENRYN_DEBUG").is_some() {
+            crate::say!("particles: {} x{} at {:.1} {:.1} {:.1} ({} alive)", self.names.get(ty as usize).map_or("?", |n| n.as_str()), count, x, y, z, self.list.len());
+        }
         let force = force || always;
         if count == 0 {
             self.spawn(g, gui, eye, ty, opt, force, x, y, z, speed[0] * dist[0], speed[1] * dist[1], speed[2] * dist[2]);
@@ -1151,6 +1163,9 @@ impl Particles {
             infos.push((pty, popt, scaling, speed, weight.max(0)));
         }
         let play_sound = r.bool().unwrap_or(true);
+        if crate::sys::env("PENRYN_DEBUG").is_some() {
+            crate::say!("particles: explosion at {:.1} {:.1} {:.1}, radius {}, {} blocks, {} block particle kinds", c[0], c[1], c[2], radius, count, infos.len());
+        }
         if play_sound {
             let pitch = (1.0 + (self.r() - self.r()) * 0.2) * 0.7;
             g.sounds.push(crate::client::Sound { sound, pos: Some(c), volume: 4.0, pitch, source: 4 });
@@ -1776,6 +1791,17 @@ pub fn selftest(b: &Blocks, w: &World) -> Vec<(&'static str, String, &'static st
     if let Some(d) = crate::sys::read_file(&alloc::format!("{}/particles.bin", crate::data_dir())) {
         let ok = d.get(..4) == Some(&crate::account::PARTICLES_MAGIC[..]);
         out.push(("particles.bin magic", yes(ok), "yes"));
+        // A flame packet as a 26.3 server sends it (the count is a VarInt).
+        if p.parse(None, &d).is_some() {
+            let body: [u8; 53] = [
+                39, 1, 0, 192, 144, 62, 0, 0, 0, 0, 0, 64, 89, 64, 0, 0, 0, 0, 0, 64, 18, 0, 0, 0, 0, 0, 0, 62, 76, 204, 205, 62, 76,
+                204, 205, 62, 76, 204, 205, 60, 35, 215, 10, 60, 35, 215, 10, 60, 35, 215, 10, 50, 0,
+            ];
+            let got = p.read_level_particles(&body).map(|(ty, _, f, _, pos, _, _, n, _)| {
+                alloc::format!("{} {} {} {} {}", p.names[ty as usize], f, pos[0], pos[1], n)
+            });
+            out.push(("level particles packet", got.unwrap_or_default(), "flame true -1039.5 101 50"));
+        }
         out.push(("ln and cbrt", alloc::format!("{:.4} {:.4}", ln(10.0), cbrt(27.0)), "2.3026 3.0000"));
     }
     out

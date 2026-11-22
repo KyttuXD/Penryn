@@ -731,6 +731,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 self.set_screen(Screen::Play);
             }
         }
+        // Tests: X respawns straight away.
+        if g.dead && self.test_keys.contains('X') && !self.respawn_sent {
+            self.respawn_sent = true;
+            g.respawn()?;
+        }
         if g.dead && self.screen != Screen::Dead {
             self.respawn_sent = false;
             self.set_screen(Screen::Dead);

@@ -33,6 +33,11 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 - **Mobs, players and dropped items** with their vanilla models and textures, walking animation,
   heads turning, the red flash when hit, sheep wool in its colour. Left click attacks, right click
   uses.
+- **Particles as vanilla's ParticleEngine**: blocks breaking into pieces of their texture (tinted
+  as the block is), the cracks flying off the face being dug, sprinting and eating crumbs, and
+  what the server sends (smoke, flames, hearts, crits, dust, portals, notes, splashes, campfire
+  smoke, explosions with their block debris, death poofs and the rest) with the game's own
+  sprites from `particles.bin`, each moving as its vanilla class does. At most 4000 at once.
 - **Sky as vanilla**: sun, moon phases, stars, fancy clouds, the sky and fog colours of each
   biome, and grass, leaves and water in their biome colours (blended).
 - **Sound and music from your game**: every sound the server plays, plus the ones vanilla plays
@@ -46,7 +51,8 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 ## Not done yet
 
 - No creative inventory screen (creative players get the survival one), no recipe book.
-- No weather or particles; no ambient cave sounds or biome music (music.game everywhere).
+- No weather; no ambient cave sounds or biome music (music.game everywhere). Particles vanilla's
+  blocks make on their own (torches, campfires, leaves, drips) are not drawn yet.
 - No settings screen: volume is fixed.
 - Block entities other than chests (signs' text, banners, heads, shulker boxes, bells) are drawn
   without their entity model.
@@ -80,7 +86,7 @@ network and makes those calls for Penryn:
 PENRYN_MSA_CLIENT_ID=<your client id> python3 tools/relay.py      # port 25580
 ```
 
-It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`) from
+It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`, `particles.bin`) from
 your own copy of Minecraft: the 26.3 client jar from an existing install (Horizon's launcher, the
 official launcher, Prism), or downloaded from Mojang for a signed-in account that owns the game,
 plus the data Horizon's `horizon-prepare` writes (install a Horizon release with its launcher).
@@ -140,6 +146,7 @@ E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
 | `src/world.rs`, `blocks.rs` | chunks and the block table |
 | `src/render.rs` | meshing and drawing the world (OpenGL 1.5 fixed function) |
 | `src/entities.rs` | entities and their models |
+| `src/particles.rs` | particles (vanilla's ParticleEngine) |
 | `src/gui.rs`, `screens.rs`, `lang.rs` | vanilla's GUI |
 | `src/play.rs`, `physics.rs` | the game window, input, movement, digging |
 | `src/sys.rs`, `sdl.rs`, `math.rs` | the C library, SDL2 and OpenGL, float maths (no libm) |
