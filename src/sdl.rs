@@ -78,6 +78,7 @@ api! { Sdl, "", "C",
     SDL_StartTextInput();
     SDL_StopTextInput();
     SDL_GetClipboardText() -> *mut c_char;
+    SDL_SetClipboardText(*const c_char) -> c_int;
     SDL_free(*mut c_void);
     SDL_Delay(u32);
     SDL_InitSubSystem(u32) -> c_int;
@@ -304,6 +305,11 @@ impl Video {
                 (self.sdl.SDL_StopTextInput)()
             }
         }
+    }
+
+    pub fn set_clipboard(&self, text: &str) {
+        let c = sys::cstr(text);
+        unsafe { (self.sdl.SDL_SetClipboardText)(c.as_ptr() as *const c_char) };
     }
 
     pub fn clipboard(&self) -> String {

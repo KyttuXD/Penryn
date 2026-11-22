@@ -145,6 +145,8 @@ pub struct Gui {
     pub height: f32,
     /// Every quad's alpha is scaled by this (the title screen's fade-in), 255 normally.
     pub fade: u8,
+    /// Text drawn bigger (vanilla's pose scale: titles 4x, subtitles 2x); normally 1.
+    pub text_scale: f32,
     segs: Vec<(Tex, Vec<V>)>,
 }
 
@@ -303,6 +305,7 @@ impl Gui {
             width: 0.0,
             height: 0.0,
             fade: 255,
+            text_scale: 1.0,
             segs: Vec::new(),
         })
     }
@@ -448,23 +451,47 @@ impl Gui {
 
     pub fn text_width(&self, s: &str) -> f32 {
         let mut w = 0.0;
+        let mut bold = false;
         let mut it = s.chars().peekable();
         while let Some(c) = it.next() {
             if c == '\u{a7}' {
-                if it.next() == Some('#') {
-                    for _ in 0..6 {
-                        it.next();
+                match it.next() {
+                    Some('#') => {
+                        for _ in 0..6 {
+                            it.next();
+                        }
+                        bold = false;
                     }
+                    Some('l') | Some('L') => bold = true,
+                    Some(d) if d.is_ascii_hexdigit() || d == 'r' || d == 'R' => bold = false,
+                    _ => {}
                 }
                 continue;
             }
-            w += self.glyphs.get(&(c as u32)).map_or(6, |g| g.adv) as f32;
+            w += self.glyphs.get(&(c as u32)).map_or(6, |g| g.adv) as f32 + bold as i32 as f32;
         }
         w
     }
 
-    /// Draws text; "§x" formatting codes change the colour (0-f vanilla's sixteen, "§#RRGGBB"
-    /// any, r back to `c`), and `shadow` draws each colour at a quarter (vanilla's drop shadow).
+    /// A glyph's quad, slanted for italics (vanilla moves the top right and the bottom left).
+    fn glyph_quad_at(&mut self, g: Glyph, x: f32, y: f32, italic: bool, c: [u8; 4]) {
+        let (aw, ah, k) = (self.aw, self.ah, self.text_scale);
+        let scale = g.height as f32 / g.ch as f32;
+        let (w, h) = (g.cw as f32 * scale * k, g.height as f32 * k);
+        let gy = y + g.yoff as f32 * k;
+        let (u0, v0, u1, v1) = (g.x as f32 / aw, g.y as f32 / ah, (g.x as f32 + g.cw as f32) / aw, (g.y as f32 + g.ch as f32) / ah);
+        let (st, sb) = if italic { ((1.0 - 0.25 * g.yoff as f32) * k, (1.0 - 0.25 * (g.yoff as f32 + g.height as f32)) * k) } else { (0.0, 0.0) };
+        let s = self.seg(Tex::Gui);
+        s.push(V { p: [x + st, gy, 0.0], uv: [u0, v0], c });
+        s.push(V { p: [x + sb, gy + h, 0.0], uv: [u0, v1], c });
+        s.push(V { p: [x + w + sb, gy + h, 0.0], uv: [u1, v1], c });
+        s.push(V { p: [x + w + st, gy, 0.0], uv: [u1, v0], c });
+    }
+
+    /// Draws text; "§x" formatting codes as vanilla's StringDecomposer reads them: a colour
+    /// (0-f vanilla's sixteen, "§#RRGGBB" any) clears the formats, k obfuscated, l bold,
+    /// m strikethrough, n underlined, o italic, r back to `base`. `shadow` draws each colour
+    /// at a quarter (vanilla's drop shadow).
     fn glyphs_at(&mut self, s: &str, x: f32, y: f32, base: [u8; 4], shadow: bool) -> f32 {
         const CODES: [u32; 16] = [
             0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xFFAA00, 0xAAAAAA, 0x555555, 0x5555FF, 0x55FF55,
@@ -476,48 +503,70 @@ impl Gui {
         };
         let mut c = base;
         let mut cx = x;
-        let (aw, ah) = (self.aw, self.ah);
+        let k = self.text_scale;
+        // bold, italic, underlined, strikethrough, obfuscated
+        let (mut bold, mut italic, mut under, mut strike, mut obf) = (false, false, false, false, false);
         let mut it = s.chars().peekable();
         while let Some(ch) = it.next() {
             if ch == '\u{a7}' {
+                let mut colour = |v: [u8; 4]| {
+                    c = v;
+                    (bold, italic, under, strike, obf) = (false, false, false, false, false);
+                };
                 match it.next() {
                     Some('#') => {
                         let hex: String = (0..6).filter_map(|_| it.next()).collect();
                         if let Ok(v) = u32::from_str_radix(&hex, 16) {
-                            c = tint(v);
+                            colour(tint(v));
                         }
                     }
-                    Some(d) if d.is_ascii_hexdigit() => c = tint(CODES[d.to_digit(16).unwrap() as usize]),
-                    Some('r') => c = base,
+                    Some(d) if d.is_ascii_hexdigit() => colour(tint(CODES[d.to_digit(16).unwrap() as usize])),
+                    Some('r') | Some('R') => colour(base),
+                    Some('k') | Some('K') => obf = true,
+                    Some('l') | Some('L') => bold = true,
+                    Some('m') | Some('M') => strike = true,
+                    Some('n') | Some('N') => under = true,
+                    Some('o') | Some('O') => italic = true,
                     _ => {}
                 }
                 continue;
             }
-            let g = match self.glyphs.get(&(ch as u32)).copied() {
+            let mut g = match self.glyphs.get(&(ch as u32)).copied() {
                 Some(g) => g,
                 None => match self.glyphs.get(&('?' as u32)).copied() {
                     Some(g) => g,
                     None => continue,
                 },
             };
-            if g.cw > 0 {
-                let scale = g.height as f32 / g.ch as f32;
-                let (w, h) = (g.cw as f32 * scale, g.height as f32);
-                let gy = y + g.yoff as f32;
-                self.quad(
-                    Tex::Gui,
-                    cx,
-                    gy,
-                    cx + w,
-                    gy + h,
-                    g.x as f32 / aw,
-                    g.y as f32 / ah,
-                    (g.x as f32 + g.cw as f32) / aw,
-                    (g.y as f32 + g.ch as f32) / ah,
-                    c,
-                );
+            if obf && ch != ' ' {
+                // FontSet.getRandomGlyph: another glyph of the same width.
+                let seed = (crate::sys::now_ms() / 50) as u32 ^ (cx as u32).wrapping_mul(2654435761);
+                let mut r = seed;
+                for _ in 0..24 {
+                    r = r.wrapping_mul(1103515245).wrapping_add(12345);
+                    let cand = 33 + (r >> 16) % 94;
+                    if let Some(o) = self.glyphs.get(&cand).copied() {
+                        if o.adv == g.adv {
+                            g = o;
+                            break;
+                        }
+                    }
+                }
             }
-            cx += g.adv as f32;
+            let adv = (g.adv as f32 + bold as i32 as f32) * k;
+            if g.cw > 0 {
+                self.glyph_quad_at(g, cx, y, italic, c);
+                if bold {
+                    self.glyph_quad_at(g, cx + k, y, italic, c);
+                }
+            }
+            if under {
+                self.quad(Tex::None, cx - k, y + 8.0 * k, cx + adv, y + 9.0 * k, 0.0, 0.0, 0.0, 0.0, c);
+            }
+            if strike {
+                self.quad(Tex::None, cx - k, y + 3.5 * k, cx + adv, y + 4.5 * k, 0.0, 0.0, 0.0, 0.0, c);
+            }
+            cx += adv;
         }
         cx - x
     }
@@ -551,7 +600,8 @@ impl Gui {
     pub fn text(&mut self, s: &str, x: f32, y: f32, color: u32) -> f32 {
         let c = argb(color);
         let sh = [c[0] / 4, c[1] / 4, c[2] / 4, c[3]];
-        self.glyphs_at(s, x + 1.0, y + 1.0, sh, true);
+        let k = self.text_scale;
+        self.glyphs_at(s, x + k, y + k, sh, true);
         self.glyphs_at(s, x, y, c, false)
     }
 

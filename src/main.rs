@@ -11,7 +11,9 @@ mod blocks;
 mod font;
 mod gui;
 mod hand;
+mod chatui;
 mod client;
+mod commands;
 mod conn;
 mod creative;
 mod crypto;
@@ -43,6 +45,8 @@ mod particles;
 mod sys;
 mod task;
 mod title;
+mod talk;
+mod text;
 mod weather;
 mod wire;
 mod world;
@@ -209,7 +213,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 Some(h) => Some(servers::address(&h).ok_or(USAGE)?),
                 None => None,
             };
-            let acc = match (&name, &server) {
+            let mut acc = match (&name, &server) {
                 (Some(_), _) => None,
                 (None, Some(_)) => account::load_refreshed()?,
                 // The title screen starts even when the relay cannot renew the sign-in.
@@ -218,6 +222,10 @@ fn run(args: &[String]) -> Result<(), String> {
                     None
                 }),
             };
+            // --relay names the relay for this run's session calls too (join, chat keys).
+            if let (Some(r), Some(a)) = (relay.as_ref(), acc.as_mut()) {
+                a.relay = r.clone();
+            }
             if let Some(a) = &acc {
                 say!("signed in as {}", a.name);
             }
@@ -269,6 +277,9 @@ fn selftest() -> Result<(), String> {
     let data: Vec<u8> = (0..70000u32).map(|i| (i * 7 % 251) as u8).collect();
     let z = zlib::store(&data);
     check("zlib stored round trip", alloc::format!("{}", zlib::inflate(&z, data.len()) == Some(data.clone())), "true");
+    for (what, got, want) in talk::selftest().into_iter().chain(text::selftest()).chain(commands::selftest()).chain(chatui::selftest()) {
+        check(what, got, want);
+    }
     for (what, got, want) in skins::selftest() {
         check(what, got, want);
     }

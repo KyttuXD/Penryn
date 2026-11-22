@@ -27,9 +27,7 @@ const K_T: usize = 23;
 const K_W: usize = 26;
 const K_X: usize = 27;
 const K_1: usize = 30;
-const K_RETURN: usize = 40;
 const K_ESC: usize = 41;
-const K_BACKSPACE: usize = 42;
 const K_SPACE: usize = 44;
 const K_SLASH: usize = 56;
 const K_F3: usize = 60;
@@ -149,7 +147,8 @@ pub struct App {
     r: Renderer,
     keys: [bool; 512],
     screen: Screen,
-    chat_line: String,
+    /// The chat screen: input, suggestions, clicks (chatui.rs).
+    chat_ui: crate::chatui::ChatUi,
     /// The key that opened the chat also arrives as text: drop it.
     skip_text: Option<(char, u64)>,
     debug: bool,
@@ -263,7 +262,7 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
         r: Renderer::new(),
         keys: [false; 512],
         screen: Screen::Play,
-        chat_line: String::new(),
+        chat_ui: crate::chatui::ChatUi::new(),
         skip_text: None,
         debug: false,
         fullscreen,
@@ -453,7 +452,7 @@ impl App {
         self.r.forget_world(&self.v.gl);
         self.set_screen(Screen::Play);
         self.keys = [false; 512];
-        self.chat_line.clear();
+        self.chat_ui = crate::chatui::ChatUi::new();
         self.mover = Mover::new([0.0; 3]);
         self.prev_pos = [0.0; 3];
         self.sprinting = false;
@@ -630,8 +629,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if down && !repeat {
                     return self.key(g, sc);
                 }
-                if down && repeat && self.screen == Screen::Chat && sc == K_BACKSPACE {
-                    self.chat_line.pop();
+                if down && repeat && self.screen == Screen::Chat {
+                    if let crate::chatui::Act::Close = self.chat_ui.key(g, sc, &self.keys, &self.v)? {
+                        self.set_screen(Screen::Play);
+                    }
                 }
                 if down && repeat && self.screen == Screen::Sign && sc != K_ESC {
                     crate::signs::key(g, sc)?;
@@ -653,9 +654,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                             return Ok(false);
                         }
                     }
-                    if self.chat_line.chars().count() + s.chars().count() <= 256 {
-                        self.chat_line.push_str(&s);
-                    }
+                    self.chat_ui.type_text(g, &s);
                 }
             }
             sdl::EV_MOUSEMOTION => {
@@ -714,7 +713,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
             }
             sdl::EV_MOUSEWHEEL => {
-                if let (Screen::Options, Some(gui)) = (&self.screen, self.gui.as_ref()) {
+                if self.screen == Screen::Chat {
+                    let shift = self.keys[K_LSHIFT] || self.keys[K_RSHIFT];
+                    self.chat_ui.wheel(g, e.i32_at(20), shift);
+                } else if let (Screen::Options, Some(gui)) = (&self.screen, self.gui.as_ref()) {
                     self.menu.wheel(gui.width, gui.height, e.i32_at(20));
                 } else if self.screen == Screen::Play {
                     let y = e.i32_at(20);
@@ -734,6 +736,12 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let Some(gui) = self.gui.as_ref() else { return Ok(false) };
         let (mx, my) = self.mouse;
         match self.screen {
+            Screen::Chat => {
+                let shift = self.keys[K_LSHIFT] || self.keys[K_RSHIFT];
+                if let crate::chatui::Act::Close = self.chat_ui.click(g, gui, mx, my, button, shift, &self.v)? {
+                    self.set_screen(Screen::Play);
+                }
+            }
             Screen::Pause if button == 1 => {
                 let b = screens::pause_buttons(gui);
                 if b[0].hit(mx, my) {
@@ -883,21 +891,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
 
     fn key(&mut self, g: &mut Game, sc: usize) -> Result<bool, String> {
         match self.screen {
-            Screen::Chat => match sc {
-                K_ESC => self.set_screen(Screen::Play),
-                K_RETURN => {
-                    let line = core::mem::take(&mut self.chat_line);
-                    let line = String::from(line.trim());
-                    if !line.is_empty() {
-                        g.say(&line)?;
-                    }
+            Screen::Chat => {
+                if let crate::chatui::Act::Close = self.chat_ui.key(g, sc, &self.keys, &self.v)? {
                     self.set_screen(Screen::Play);
                 }
-                K_BACKSPACE => {
-                    self.chat_line.pop();
-                }
-                _ => {}
-            },
+            }
             Screen::Sign => {
                 if crate::signs::key(g, sc)? {
                     self.set_screen(Screen::Play);
@@ -939,12 +937,13 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             Screen::Play => match sc {
                 K_ESC => self.set_screen(Screen::Pause),
                 K_T => {
+                    self.chat_ui.open(g, "");
                     self.set_screen(Screen::Chat);
                     self.skip_text = Some(('t', sys::now_ms()));
                 }
                 K_SLASH => {
+                    self.chat_ui.open(g, "/");
                     self.set_screen(Screen::Chat);
-                    self.chat_line = String::from("/");
                     self.skip_text = Some(('/', sys::now_ms()));
                 }
                 K_E => self.open_inventory(g, 'e'),
@@ -1118,6 +1117,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         if self.test_keys.contains('3') {
             self.debug = true;
+        }
+        // PENRYN_TEST_SAY, PENRYN_TEST_CHAT: the chat screen and chat lines (chatui.rs).
+        if self.chat_ui.test(g, &mut self.mouse, self.gui.as_ref(), &self.v)? && self.screen == Screen::Play {
+            self.set_screen(Screen::Chat);
         }
         if self.test_keys.contains('A') && g.loaded_sent && sys::now_ms() / 50 % 10 == 0 {
             if let Some((id, d, _)) = self.pick_entity(g) {
@@ -1799,10 +1802,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         };
         screens::hud(&mut gui, g, self.screen == Screen::Play && !self.debug, held_name);
         g.effects.draw_hud(&self.v.gl, &mut gui, self.screen == Screen::Inventory && g.container.is_none());
-        let now = sys::now_ms();
-        if self.screen != Screen::Inventory && self.screen != Screen::Creative && self.screen != Screen::Dead {
-            screens::chat(&mut gui, g, self.screen == Screen::Chat, now, &self.chat_line, (now / 300) % 2 == 0);
-        }
+        let show_chat = self.screen != Screen::Inventory && self.screen != Screen::Creative && self.screen != Screen::Dead;
+        crate::chatui::draw(&mut gui, g, &mut self.chat_ui, self.screen == Screen::Chat, show_chat, partial as f32, self.mouse.0, self.mouse.1);
         if self.debug {
             let p = self.mover.pos;
             let facing = ["south (Towards positive Z)", "west (Towards negative X)", "north (Towards negative Z)", "east (Towards positive X)"]

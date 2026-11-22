@@ -1777,6 +1777,8 @@ def main():
                 rel = full[len("assets/minecraft/textures/"):-4]
                 add_sprite(rel[len("gui/sprites/"):], rel)
     add_sprite("container/inventory", "gui/container/inventory", crop=(176, 166))
+    # The chat's "Modified" message tag icon (GuiMessageTag.Icon.CHAT_MODIFIED).
+    add_sprite("icon/chat_modified", "gui/sprites/icon/chat_modified")
     for name in ("tab_items", "tab_item_search", "tab_inventory"):
         add_sprite("container/creative_inventory/" + name, "gui/container/creative_inventory/" + name, crop=(195, 136))
     # The sky: sun, the eight moon phases (MoonPhase order), clouds.

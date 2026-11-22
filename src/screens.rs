@@ -430,6 +430,34 @@ fn libm_ceil(v: f32) -> i32 {
     }
 }
 
+/// The F3 screen's left column: grey text over dark bands.
+pub fn debug(gui: &mut Gui, lines: &[String]) {
+    for (i, l) in lines.iter().enumerate() {
+        if l.is_empty() {
+            continue;
+        }
+        let y = 2.0 + 9.0 * i as f32;
+        let w = gui.text_width(l);
+        gui.fill(1.0, y - 1.0, 2.0 + w + 1.0, y + 8.0, 0x9050_5050);
+        gui.text_plain(l, 2.0, y, 0xFFE0_E0E0);
+    }
+}
+
+/// DefaultPlayerSkin: one of the 18 default skins (9 slim, then 9 wide), by the UUID's hash.
+pub fn skin_of(uuid: &[u8; 16]) -> (&'static str, String) {
+    const NAMES: [&str; 9] = ["alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri"];
+    let msb = u64::from_be_bytes(uuid[..8].try_into().unwrap());
+    let lsb = u64::from_be_bytes(uuid[8..].try_into().unwrap());
+    let hilo = msb ^ lsb;
+    let hash = ((hilo >> 32) as i32) ^ (hilo as i32);
+    let i = hash.rem_euclid(18) as usize;
+    if i < 9 {
+        ("minecraft:player_slim#main", format!("skin/slim/{}", NAMES[i]))
+    } else {
+        ("minecraft:player#main", format!("skin/wide/{}", NAMES[i - 9]))
+    }
+}
+
 /// Splits `s` into lines no wider than `width` (at spaces when it can).
 pub fn wrap(gui: &Gui, s: &str, width: f32) -> Vec<String> {
     let mut out = Vec::new();
@@ -480,72 +508,4 @@ pub fn wrap(gui: &Gui, s: &str, width: f32) -> Vec<String> {
         }
     }
     out
-}
-
-/// ChatComponent: the last messages for 10 s (all of the last 100 while the chat is open),
-/// lines 9 units apart, 320 units wide, over a translucent black band.
-pub fn chat(gui: &mut Gui, g: &Game, open: bool, now: u64, input: &str, blink: bool) {
-    let width = 320.0f32.min(gui.width - 8.0);
-    let bottom = gui.height - 40.0;
-    let mut lines: Vec<(String, f32)> = Vec::new();
-    for (msg, at) in g.chat.iter().rev() {
-        let age = (now.saturating_sub(*at)) as f32 / 50.0; // ticks
-        if !open && age >= 200.0 {
-            continue;
-        }
-        let mut o = if open { 1.0 } else { ((1.0 - age / 200.0) * 10.0).clamp(0.0, 1.0) };
-        o *= o;
-        for l in wrap(gui, msg, width).into_iter().rev() {
-            lines.push((l, o));
-        }
-        if lines.len() >= if open { 20 } else { 10 } {
-            break;
-        }
-    }
-    for (i, (l, o)) in lines.iter().enumerate() {
-        let y = bottom - (i + 1) as f32 * 9.0;
-        if y < 0.0 {
-            break;
-        }
-        let bg = ((0x80 as f32 * o) as u32) << 24;
-        gui.fill(0.0, y, width + 8.0, y + 9.0, bg);
-        gui.text(l, 2.0, y + 1.0, ((255.0 * o) as u32) << 24 | 0xFFFFFF);
-    }
-    if open {
-        let h = gui.height;
-        gui.fill(2.0, h - 14.0, gui.width - 2.0, h - 2.0, 0x8000_0000);
-        let mut t = String::from(input);
-        if blink {
-            t.push('_');
-        }
-        gui.text(&t, 4.0, h - 12.0, 0xFFE0_E0E0);
-    }
-}
-
-/// The F3 screen's left column: grey text over dark bands.
-pub fn debug(gui: &mut Gui, lines: &[String]) {
-    for (i, l) in lines.iter().enumerate() {
-        if l.is_empty() {
-            continue;
-        }
-        let y = 2.0 + 9.0 * i as f32;
-        let w = gui.text_width(l);
-        gui.fill(1.0, y - 1.0, 2.0 + w + 1.0, y + 8.0, 0x9050_5050);
-        gui.text_plain(l, 2.0, y, 0xFFE0_E0E0);
-    }
-}
-
-/// DefaultPlayerSkin: one of the 18 default skins (9 slim, then 9 wide), by the UUID's hash.
-pub fn skin_of(uuid: &[u8; 16]) -> (&'static str, String) {
-    const NAMES: [&str; 9] = ["alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri"];
-    let msb = u64::from_be_bytes(uuid[..8].try_into().unwrap());
-    let lsb = u64::from_be_bytes(uuid[8..].try_into().unwrap());
-    let hilo = msb ^ lsb;
-    let hash = ((hilo >> 32) as i32) ^ (hilo as i32);
-    let i = hash.rem_euclid(18) as usize;
-    if i < 9 {
-        ("minecraft:player_slim#main", format!("skin/slim/{}", NAMES[i]))
-    } else {
-        ("minecraft:player#main", format!("skin/wide/{}", NAMES[i - 9]))
-    }
 }

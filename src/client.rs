@@ -110,6 +110,8 @@ pub struct Game {
     pub packs: crate::packs::Packs,
     /// The server started a configuration phase: the window runs it (reconfigure).
     pub reconfigure: bool,
+    /// Chat: the log, secure chat, the command tree, titles (talk.rs).
+    pub talk: crate::talk::Talk,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -136,7 +138,7 @@ pub struct Container {
     pub state: i32,
 }
 
-fn uuid_bytes(hex: &str) -> [u8; 16] {
+pub fn uuid_bytes(hex: &str) -> [u8; 16] {
     let mut u = [0u8; 16];
     let h: Vec<u8> = hex.bytes().filter(|c| *c != b'-').collect();
     for i in 0..16 {
@@ -204,6 +206,7 @@ pub struct Login {
 impl Game {
     /// Connects and logs in (the connect screen's stages). Runs on the join's thread.
     pub fn login(host: &str, port: u16, name: &str, account: Option<&Account>) -> Result<Login, String> {
+        crate::talk::set_account(account);
         let mut c = Conn::open(host, port)?;
         handshake(&mut c, host, port, 2)?;
         let (name, uuid) = match account {
@@ -347,6 +350,7 @@ impl Game {
             player_names: alloc::collections::BTreeMap::new(),
             packs,
             reconfigure: false,
+            talk: crate::talk::Talk::new(),
         })
     }
 
@@ -399,6 +403,9 @@ impl Game {
     }
 
     fn handle(&mut self, p: Packet) -> Result<(), String> {
+        if self.talk_packet(&p)? {
+            return Ok(());
+        }
         let mut r = p.reader();
         match p.id {
             play::C_KEEP_ALIVE => {
@@ -617,24 +624,6 @@ impl Game {
                     7 => self.rain_level = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) },
                     8 => self.thunder_level = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) },
                     _ => {}
-                }
-            }
-            play::C_SYSTEM_CHAT => {
-                let t = nbt::text(&mut r);
-                let overlay = r.bool().unwrap_or(false);
-                if !overlay && !t.is_empty() {
-                    self.add_chat(t);
-                }
-            }
-            play::C_DISGUISED_CHAT => {
-                let msg = nbt::text(&mut r);
-                let _ty = r.varint();
-                let who = nbt::text(&mut r);
-                self.add_chat(format!("<{}> {}", who, msg));
-            }
-            play::C_PLAYER_CHAT => {
-                if let Some(line) = player_chat(&mut r) {
-                    self.add_chat(line);
                 }
             }
             play::C_CONTAINER_SET_CONTENT => {
@@ -1014,6 +1003,7 @@ impl Game {
 
     pub fn add_chat(&mut self, line: String) {
         crate::say!("[chat] {}", line);
+        self.talk.push(crate::text::Rich::from_legacy(&line), crate::talk::Tag::SystemSinglePlayer, None);
         self.chat.push((line, crate::sys::now_ms()));
         if self.chat.len() > 100 {
             self.chat.remove(0);
@@ -1029,6 +1019,7 @@ impl Game {
 
     /// The 20 Hz bookkeeping: position, tick end, and "loaded" once the world is around us.
     pub fn tick(&mut self) -> Result<(), String> {
+        self.talk_tick()?;
         self.day_time += self.clock_rate as i64;
         self.game_time += 1;
         crate::skins::tick(&self.entities);
@@ -1058,15 +1049,9 @@ impl Game {
         self.conn.send(play::S_CLIENT_COMMAND, &o)
     }
 
+    /// A line from the chat box: a command (signed if it has message arguments) or chat.
     pub fn say(&mut self, text: &str) -> Result<(), String> {
-        let mut o = Out::new();
-        if let Some(cmd) = text.strip_prefix('/') {
-            o.string(cmd);
-            return self.conn.send(play::S_CHAT_COMMAND, &o);
-        }
-        let ts = (crate::sys::now() * 1000.0) as i64;
-        o.string(text).i64(ts).i64(ts ^ 0x5DEECE66D).bool(false).varint(0).bytes(&[0, 0, 0]).u8(0);
-        self.conn.send(play::S_CHAT, &o)
+        self.send_line(text)
     }
 
     fn pos_long(x: i32, y: i32, z: i32) -> i64 {
@@ -1223,6 +1208,7 @@ fn configure(
                 c.send(config::S_SELECT_KNOWN_PACKS, &o)?;
             }
             config::C_REGISTRY_DATA => {
+                crate::talk::registry(&p);
                 let id = r.string().unwrap_or_default();
                 let n = r.varint().unwrap_or(0).max(0) as usize;
                 if crate::creative::REGISTRIES.contains(&id.as_str()) {
@@ -1552,36 +1538,6 @@ fn slot(r: &mut In) -> Option<(Option<(i32, i32)>, bool)> {
         r.varint()?;
     }
     Some((Some((item, count)), true))
-}
-
-/// `ClientboundPlayerChatPacket`: "<sender> message".
-fn player_chat(r: &mut In) -> Option<String> {
-    let _global = r.varint()?;
-    let _sender = r.uuid()?;
-    let _index = r.varint()?;
-    if r.bool()? {
-        r.take(256)?;
-    }
-    let msg = r.string()?;
-    let _ts = r.i64()?;
-    let _salt = r.i64()?;
-    let n = r.varint()?;
-    for _ in 0..n {
-        if r.varint()? == 0 {
-            r.take(256)?;
-        }
-    }
-    let unsigned = if r.bool()? { Some(nbt::text(r)) } else { None };
-    if r.varint()? == 2 {
-        let n = r.varint()?;
-        r.take(8 * n.max(0) as usize)?;
-    }
-    let ty = r.varint()?;
-    if ty == 0 {
-        return Some(unsigned.unwrap_or(msg));
-    }
-    let who = nbt::text(r);
-    Some(format!("<{}> {}", who, unsigned.unwrap_or(msg)))
 }
 
 /// The text of a JSON chat component (login disconnects are JSON), roughly.
