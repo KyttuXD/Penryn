@@ -9,7 +9,8 @@
 //!
 //! Inside a region each section has a slot with some room to grow; a rebuilt section is
 //! written in place with glBufferSubData when it fits, else at the end, and the region is
-//! packed again (from the copy kept here) when it runs out of room.
+//! packed again into a bigger buffer when it runs out of room (read back from the card: no
+//! copy of the meshes is kept in memory).
 //!
 //! A section's quads come in runs (render.rs): seven by facing (down, up, north, south,
 //! west, east, any) for the solid and cut-out quads, then the translucent ones.
@@ -74,7 +75,6 @@ struct Slot {
     cap: u32,
     /// Where each run starts within the slot, in quads; first[RUNS] is the total.
     first: [u32; RUNS + 1],
-    data: Vec<CV>,
 }
 
 /// A section to draw: its region, slot, runs and the runs facing the camera.
@@ -152,7 +152,6 @@ impl Terrain {
             if quads <= s.cap {
                 upload(gl, r.vbo, s.at, &data);
                 s.first = first;
-                s.data = data;
                 return;
             }
         }
@@ -164,36 +163,53 @@ impl Terrain {
             let at = r.top;
             r.top += need;
             upload(gl, r.vbo, at, &data);
-            self.slots.insert(k, Slot { at, cap: need, first, data });
+            self.slots.insert(k, Slot { at, cap: need, first });
             return;
         }
-        // Out of room: pack the region again in a bigger buffer.
-        self.slots.insert(k, Slot { at: 0, cap: need, first, data });
+        // Out of room: pack the region again in a bigger buffer, the other sections read back
+        // from the old one (rare: the room grows by half each time).
+        self.slots.remove(&k);
         let r = self.regions.get_mut(&rk).unwrap();
         let cap = (r.live * 3 / 2).max(4096).next_power_of_two();
+        let old = r.vbo;
+        let mut vbo = 0u32;
         unsafe {
-            if r.vbo == 0 {
-                (gl.GenBuffers)(1, &mut r.vbo);
-            }
-            (gl.BindBuffer)(ARRAY_BUFFER, r.vbo);
+            (gl.GenBuffers)(1, &mut vbo);
+            (gl.BindBuffer)(ARRAY_BUFFER, vbo);
             (gl.BufferData)(ARRAY_BUFFER, cap as isize * 4 * CSTRIDE as isize, core::ptr::null(), STATIC_DRAW);
         }
+        r.vbo = vbo;
         r.cap = cap;
         let mut top = 0;
         let lo = (rk.0 * RX, rk.1 * RY, rk.2 * RX);
         let hi = (lo.0 + RX - 1, lo.1 + RY - 1, lo.2 + RX - 1);
+        let mut tmp: Vec<CV> = Vec::new();
         for (sk, s) in self.slots.range_mut(lo..=hi) {
             if region_of(*sk) != rk {
                 continue;
             }
+            let n = s.first[RUNS] as usize * 4;
+            tmp.clear();
+            tmp.reserve(n);
+            unsafe {
+                tmp.set_len(n);
+                (gl.BindBuffer)(ARRAY_BUFFER, old);
+                (gl.GetBufferSubData)(ARRAY_BUFFER, s.at as isize * 4 * CSTRIDE as isize, (n * CSTRIDE as usize) as isize, tmp.as_mut_ptr() as *mut c_void);
+                (gl.BindBuffer)(ARRAY_BUFFER, vbo);
+                (gl.BufferSubData)(ARRAY_BUFFER, top as isize * 4 * CSTRIDE as isize, (n * CSTRIDE as usize) as isize, tmp.as_ptr() as *const c_void);
+            }
             s.at = top;
             top += s.cap;
-            unsafe {
-                (gl.BufferSubData)(ARRAY_BUFFER, s.at as isize * 4 * CSTRIDE as isize, (s.data.len() * CSTRIDE as usize) as isize, s.data.as_ptr() as *const c_void);
+        }
+        unsafe {
+            (gl.BufferSubData)(ARRAY_BUFFER, top as isize * 4 * CSTRIDE as isize, (data.len() * CSTRIDE as usize) as isize, data.as_ptr() as *const c_void);
+            (gl.BindBuffer)(ARRAY_BUFFER, 0);
+            if old != 0 {
+                (gl.DeleteBuffers)(1, &old);
             }
         }
-        r.top = top;
-        unsafe { (gl.BindBuffer)(ARRAY_BUFFER, 0) };
+        self.slots.insert(k, Slot { at: top, cap: need, first });
+        r.top = top + need;
         self.ensure_index(gl, cap);
     }
 

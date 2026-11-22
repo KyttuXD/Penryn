@@ -17,7 +17,13 @@ use core::ffi::{c_char, c_void};
 
 #[derive(Clone, Copy)]
 pub enum S {
-    /// Events, network packets, sound, game ticks.
+    /// Window events (input).
+    Events,
+    /// Network packets.
+    Net,
+    /// Sound: starting sounds, feeding the music.
+    Sound,
+    /// Game ticks (20 a second) and everything else between frames.
     Logic,
     /// Meshing dirty sections and uploading them.
     Mesh,
@@ -45,8 +51,8 @@ pub enum S {
     Sleep,
 }
 
-const N: usize = 14;
-const NAMES: [&str; N] = ["logic", "mesh", "sky", "world", "entities", "blockent", "clouds", "particles", "water", "weather", "hand", "gui", "swap", "sleep"];
+const N: usize = 17;
+const NAMES: [&str; N] = ["events", "net", "sound", "logic", "mesh", "sky", "world", "entities", "blockent", "clouds", "particles", "water", "weather", "hand", "gui", "swap", "sleep"];
 
 static mut MODE: u8 = 0;
 static mut LAST: f64 = 0.0;

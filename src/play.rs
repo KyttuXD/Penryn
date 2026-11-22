@@ -422,9 +422,11 @@ impl App {
             if !self.menu.changed.is_empty() {
                 self.apply_options(g)?;
             }
+            crate::perf::lap(crate::perf::S::Events);
             // ---- network
             g.pump()?;
             self.particle_effects(g);
+            crate::perf::lap(crate::perf::S::Net);
             // ---- sound
             if let Some(a) = self.audio.as_mut() {
                 let eye = [self.mover.pos[0], self.mover.pos[1] + 1.62, self.mover.pos[2]];
@@ -439,6 +441,7 @@ impl App {
             } else {
                 g.sounds.clear();
             }
+            crate::perf::lap(crate::perf::S::Sound);
             // ---- ticks
             let now = sys::now_ms();
             if now > next_tick + 1000 {
