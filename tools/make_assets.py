@@ -1022,11 +1022,21 @@ def main():
     quads = []        # bytes
     quad_lists = {}   # tuple of quad bytes -> first index
 
+    blockstate_cache = {}
+    baked_cache = {}
+
     def bake_state(short, props, kind):
-        bs = assets.json("blockstates/" + short + ".json")
+        bs = blockstate_cache.get(short)
+        if bs is None:
+            bs = blockstate_cache[short] = assets.json("blockstates/" + short + ".json")
         out = []
         for ap in applied_models(bs, props):
-            out.extend(bake_model(ap))
+            # The same model at the same rotation bakes to the same quads (many states share).
+            key = json.dumps(ap, sort_keys=True)
+            q = baked_cache.get(key)
+            if q is None:
+                q = baked_cache[key] = bake_model(ap)
+            out.extend(q)
         return out
 
     def bake_model(ap):
