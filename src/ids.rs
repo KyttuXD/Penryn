@@ -41,6 +41,7 @@ pub mod config {
 pub mod play {
     pub const C_ADD_ENTITY: i32 = 1;
     pub const C_BLOCK_CHANGED_ACK: i32 = 4;
+    pub const C_BLOCK_EVENT: i32 = 7;
     pub const C_BLOCK_UPDATE: i32 = 8;
     pub const C_CHUNK_BATCH_FINISHED: i32 = 11;
     pub const C_CONTAINER_CLOSE: i32 = 17;
@@ -66,6 +67,7 @@ pub mod play {
     pub const C_PLAYER_CHAT: i32 = 66;
     pub const C_PLAYER_POSITION: i32 = 73;
     pub const C_REMOVE_ENTITIES: i32 = 78;
+    pub const C_REMOVE_MOB_EFFECT: i32 = 79;
     pub const C_RESPAWN: i32 = 84;
     pub const C_ROTATE_HEAD: i32 = 85;
     pub const C_SECTION_BLOCKS_UPDATE: i32 = 86;
@@ -82,6 +84,7 @@ pub mod play {
     pub const C_SYSTEM_CHAT: i32 = 124;
     pub const C_TAKE_ITEM_ENTITY: i32 = 127;
     pub const C_UPDATE_ATTRIBUTES: i32 = 134;
+    pub const C_UPDATE_MOB_EFFECT: i32 = 135;
     pub const C_TELEPORT_ENTITY: i32 = 128;
 
     pub const S_ACCEPT_TELEPORTATION: i32 = 0;

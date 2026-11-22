@@ -84,6 +84,8 @@ pub struct Game {
     pub move_speed: f64,
     pub jump_strength: f64,
     pub fly_speed: f32,
+    /// The player's status effects.
+    pub effects: crate::effects::Effects,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -288,6 +290,7 @@ impl Game {
             move_speed: 0.1f32 as f64,
             jump_strength: 0.42f32 as f64,
             fly_speed: 0.05,
+            effects: crate::effects::Effects::new(),
         })
     }
 
@@ -409,7 +412,7 @@ impl Game {
                 let s = r.varint().unwrap_or(0) as u16;
                 let (x, y, z) = ((v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32);
                 let blocks = &self.blocks;
-                self.world.set(x, y, z, s, &|s| blocks.kind(s) == crate::blocks::AIR);
+                crate::moving::set_block(&mut self.world, blocks, x, y, z, s);
                 // The block this client placed: its place sound (BlockItem.place plays it).
                 if let Some((pp, at)) = self.placing {
                     if pp == [x, y, z] && crate::sys::now_ms() < at + 1500 && blocks.kind(s) != crate::blocks::AIR {
@@ -435,10 +438,12 @@ impl Game {
                     let c = r.varlong().unwrap_or(0);
                     let state = (c >> 12) as u16;
                     let (x, z, y) = ((c >> 8 & 15) as i32, (c >> 4 & 15) as i32, (c & 15) as i32);
-                    let blocks = &self.blocks;
-                    self.world.set(sx * 16 + x, sy * 16 + y, sz * 16 + z, state, &|s| blocks.kind(s) == crate::blocks::AIR);
+                    crate::moving::set_block(&mut self.world, &self.blocks, sx * 16 + x, sy * 16 + y, sz * 16 + z, state);
                 }
             }
+            play::C_BLOCK_EVENT => crate::moving::on_block_event(&mut self.world, &self.blocks, &mut r),
+            play::C_UPDATE_MOB_EFFECT => self.effects.on_update(&mut r, self.entity_id),
+            play::C_REMOVE_MOB_EFFECT => self.effects.on_remove(&mut r, self.entity_id),
             play::C_PLAYER_ABILITIES => {
                 let f = r.u8().unwrap_or(0);
                 self.flying = f & 2 != 0;
@@ -824,6 +829,7 @@ impl Game {
     }
 
     fn spawn_info(&mut self, r: &mut In) {
+        self.effects.clear();
         let _dim_type = r.varint();
         let dim = r.string().unwrap_or_default();
         let _seed = r.i64();

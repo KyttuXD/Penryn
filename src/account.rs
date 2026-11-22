@@ -139,6 +139,7 @@ pub const ATLAS_MAGIC: &[u8; 4] = b"PNA1";
 pub const GUI_MAGIC: &[u8; 4] = b"PNG2";
 pub const ENTITIES_MAGIC: &[u8; 4] = b"PNE2";
 pub const SOUNDS_MAGIC: &[u8; 4] = b"PNS1";
+pub const EFFECTS_MAGIC: &[u8; 4] = b"PNF1";
 
 /// Fetches the game files from the relay when they are missing or from another version.
 pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
@@ -146,7 +147,7 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
     const FILES: [(&str, &[u8; 4]); 4] =
         [("blocks.bin", BLOCKS_MAGIC), ("atlas.bin", ATLAS_MAGIC), ("gui.bin", GUI_MAGIC), ("entities.bin", ENTITIES_MAGIC)];
     let have = |n: &str, magic: &[u8; 4]| sys::read_head(&format!("{}/{}", dir, n), 4).map_or(false, |d| d == magic);
-    if FILES.iter().all(|(n, m)| have(n, m)) && (have("sounds.bin", SOUNDS_MAGIC) || relay.is_none()) {
+    if FILES.iter().all(|(n, m)| have(n, m)) && ((have("sounds.bin", SOUNDS_MAGIC) && have("effects.bin", EFFECTS_MAGIC)) || relay.is_none()) {
         return Ok(());
     }
     let Some(relay) = relay else {
@@ -169,6 +170,17 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
         }
         if !sys::write_file_private(&format!("{}/{}", dir, n), &r.body) {
             return Err(format!("cannot write {}/{}", dir, n));
+        }
+    }
+    // The status effect icons are optional: without them effects show their backgrounds only.
+    if !have("effects.bin", EFFECTS_MAGIC) {
+        match http::get(&relay.0, relay.1, "/assets/effects.bin", 600000) {
+            Ok(r) if r.status == 200 && r.body.get(..4) == Some(&EFFECTS_MAGIC[..]) => {
+                if !sys::write_file_private(&format!("{}/effects.bin", dir), &r.body) {
+                    crate::warn!("cannot write {}/effects.bin", dir);
+                }
+            }
+            _ => crate::warn!("the relay has no effects.bin: status effects show without their icons"),
         }
     }
     // The sounds are optional: without them the game plays silent.

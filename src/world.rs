@@ -32,6 +32,8 @@ pub struct World {
     pub epoch: u32,
     /// Per biome registry id: grass, foliage, water and sky colours.
     pub biome_colours: Vec<[u32; 4]>,
+    /// Blocks in motion: pistons' moving blocks, shulker box lids.
+    pub moving: crate::moving::Moving,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -100,6 +102,7 @@ impl World {
             dirty: BTreeSet::new(),
             epoch: 0,
             biome_colours: Vec::new(),
+            moving: crate::moving::Moving::new(),
         }
     }
 

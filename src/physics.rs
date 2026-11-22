@@ -108,6 +108,10 @@ pub fn boxes_for(world: &World, b: &Blocks, area: &Aabb, who: Option<&Who>) -> V
 /// The collision boxes of the one block at x, y, z.
 fn cell_boxes(world: &World, b: &Blocks, x: i32, y: i32, z: i32, who: Option<&Who>, out: &mut Vec<Aabb>) {
     use crate::blocks::{C_BAMBOO, C_OFFSET_OUTLINE, C_OUTLINE, C_POWDER_SNOW, C_SCAFFOLDING};
+    // Pistons' moving blocks and opening shulker boxes (crate::moving) have their own shape.
+    if world.moving.active() && world.moving.boxes_at(b, x, y, z, out) {
+        return;
+    }
     let s = world.get(x, y, z);
     if s == 0 || !b.collides(s) {
         return;
@@ -233,6 +237,8 @@ pub struct Mover {
     no_blocks: bool,
     /// This tick's moves (from, to, asked), for the blocks passed through.
     moves: Vec<([f64; 3], [f64; 3], [f64; 3])>,
+    /// The status effects that change movement (set before each tick).
+    pub effects: crate::effects::MoveEffects,
 }
 
 pub struct Input {
@@ -286,7 +292,29 @@ impl Mover {
             support: None,
             no_blocks: false,
             moves: Vec::new(),
+            effects: crate::effects::MoveEffects::default(),
         }
+    }
+
+    /// LivingEntity.getEffectiveGravity: slow falling falls at 0.01 while going down.
+    fn gravity(&self) -> f64 {
+        if self.vel[1] <= 0.0 && self.effects.slow_falling {
+            GRAVITY.min(0.01)
+        } else {
+            GRAVITY
+        }
+    }
+
+    /// Entity.move with MoverType.PISTON or SHULKER_BOX: pushed by `d` (no edge back-off and no
+    /// stuck slowdown; the move is not one the blocks passed through see).
+    pub fn push(&mut self, world: &World, b: &Blocks, d: [f64; 3], sneak: bool, flying: bool) {
+        if self.stuck[0] * self.stuck[0] + self.stuck[1] * self.stuck[1] + self.stuck[2] * self.stuck[2] > 1e-7 {
+            self.stuck = [0.0; 3];
+            self.vel = [0.0; 3];
+        }
+        let inp = Input { sneak, ..Input::idle() };
+        self.do_move(world, b, d, &inp, flying);
+        self.moves.pop();
     }
 
     /// A teleport: the ground and supporting block are forgotten.
@@ -473,9 +501,10 @@ impl Mover {
                 _ => 0.0,
             };
             let v = self.vel[1];
-            self.vel[1] = if d[1] < 0.0 && rest > 0.0 && -v > GRAVITY && !inp.shift {
+            let g = self.gravity();
+            self.vel[1] = if d[1] < 0.0 && rest > 0.0 && -v > g && !inp.shift {
                 let t = m[1] / v;
-                (t * GRAVITY - v) * (1.0 + t * (DRAG - 1.0)) * rest
+                (t * g - v) * (1.0 + t * (DRAG - 1.0)) * rest
             } else {
                 0.0
             };
@@ -654,7 +683,7 @@ impl Mover {
         }
         let in_water = fluid == crate::blocks::WATER;
         let in_lava = fluid == crate::blocks::LAVA;
-        if in_water {
+        if in_water || self.effects.slow_falling || self.effects.levitation.is_some() {
             self.fall_distance = 0.0;
         }
         if flying {
@@ -683,11 +712,14 @@ impl Mover {
             }
             self.move_relative(0.02, inp, yaw);
             let oy = self.pos[1];
+            let g = self.gravity();
             let d = self.vel;
             self.do_move(world, b, d, inp, false);
             let drag = if in_water { 0.8 } else { 0.5 };
-            self.vel = [self.vel[0] * drag, self.vel[1] * drag, self.vel[2] * drag];
-            self.vel[1] -= GRAVITY / 16.0;
+            // travelInWater: dolphin's grace keeps 0.96 of the horizontal speed.
+            let hdrag = if in_water && self.effects.dolphins_grace { 0.96f32 as f64 } else { drag };
+            self.vel = [self.vel[0] * hdrag, self.vel[1] * drag, self.vel[2] * hdrag];
+            self.vel[1] -= g / 16.0;
             // Climbing out at an edge: a hop, only when the player fits 0.6 higher and there
             // is no liquid there (travelInFluid's isFree).
             if self.horizontal_collision {
@@ -715,7 +747,8 @@ impl Mover {
         if inp.jump && self.on_ground && self.jump_delay == 0 {
             let jf = b.of_state(self.feet_block(world)).jump_factor;
             let jf = if jf == 1.0 { b.of_state(self.on_pos(world, b, 0.500001)).jump_factor } else { jf };
-            let power = inp.jump_strength * jf as f64;
+            // getJumpPower: in floats, plus jump boost's 0.1 per level.
+            let power = ((inp.jump_strength as f32) * jf + self.effects.jump_boost) as f64;
             if power > 1e-5 {
                 self.vel[1] = self.vel[1].max(power);
                 if inp.sprint {
@@ -763,7 +796,12 @@ impl Mover {
             self.vel[1] = 0.2;
         }
         let f = if self.on_ground { (block_friction as f32 * 0.91f32) as f64 } else { 0.91f32 as f64 };
-        self.vel = [self.vel[0] * f, (self.vel[1] - GRAVITY) * DRAG, self.vel[2] * f];
+        // travelInAir: levitation lifts towards 0.05 per level instead of gravity.
+        let vy = match self.effects.levitation {
+            Some(a) => self.vel[1] + (0.05 * (a + 1) as f64 - self.vel[1]) * 0.2,
+            None => self.vel[1] - self.gravity(),
+        };
+        self.vel = [self.vel[0] * f, vy * DRAG, self.vel[2] * f];
         self.after_travel(world, b, inp, false);
     }
 }

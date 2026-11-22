@@ -33,6 +33,12 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 - **Mobs, players and dropped items** with their vanilla models and textures, walking animation,
   heads turning, the red flash when hit, sheep wool in its colour. Left click attacks, right click
   uses.
+- **Status effects**: their icons at the top right and beside the inventory (names, times,
+  blinking as they run out), jump boost, levitation, slow falling and dolphin's grace on
+  movement, blindness and darkness closing the fog in, night vision lifting the night.
+- **Pistons and shulker boxes move**: pistons push and pull (slime and honey included) as
+  vanilla's client runs them, the moving blocks drawn sliding, carrying and launching the
+  player; an opening shulker box lifts what stands on it.
 - **Sky as vanilla**: sun, moon phases, stars, fancy clouds, the sky and fog colours of each
   biome, and grass, leaves and water in their biome colours (blended).
 - **Sound and music from your game**: every sound the server plays, plus the ones vanilla plays
@@ -80,7 +86,7 @@ network and makes those calls for Penryn:
 PENRYN_MSA_CLIENT_ID=<your client id> python3 tools/relay.py      # port 25580
 ```
 
-It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`) from
+It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`, `effects.bin`) from
 your own copy of Minecraft: the 26.3 client jar from an existing install (Horizon's launcher, the
 official launcher, Prism), or downloaded from Mojang for a signed-in account that owns the game,
 plus the data Horizon's `horizon-prepare` writes (install a Horizon release with its launcher).
@@ -142,6 +148,7 @@ E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
 | `src/entities.rs` | entities and their models |
 | `src/gui.rs`, `screens.rs`, `lang.rs` | vanilla's GUI |
 | `src/play.rs`, `physics.rs` | the game window, input, movement, digging |
+| `src/effects.rs`, `moving.rs` | status effects; pistons and shulker lids in motion |
 | `src/sys.rs`, `sdl.rs`, `math.rs` | the C library, SDL2 and OpenGL, float maths (no libm) |
 | `src/account.rs`, `http.rs`, `tools/relay.py` | sign-in and the relay |
 | `tools/make_assets.py` | the game files, from your copy of Minecraft |

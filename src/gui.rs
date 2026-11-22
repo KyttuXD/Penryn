@@ -53,6 +53,8 @@ enum Tex {
     Gui,
     Blocks,
     Invert,
+    /// Another texture (e.g. the status effect icons of effects.bin).
+    Ext(u32),
 }
 
 pub struct Part {
@@ -341,6 +343,11 @@ impl Gui {
             (s.y as f32 + v + h) / ah,
             [255; 4],
         );
+    }
+
+    /// A rectangle of another GL texture (uv 0..1), tinted by `c` (ARGB).
+    pub fn blit_tex(&mut self, tex: u32, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], c: u32) {
+        self.quad(Tex::Ext(tex), x, y, x + w, y + h, uv[0], uv[1], uv[2], uv[3], argb(c));
     }
 
     pub fn blit(&mut self, name: &str, x: f32, y: f32) {
@@ -708,6 +715,10 @@ impl Gui {
                     Tex::Blocks => {
                         (gl.Enable)(TEXTURE_2D);
                         (gl.BindTexture)(TEXTURE_2D, self.blocks_tex);
+                    }
+                    Tex::Ext(t) => {
+                        (gl.Enable)(TEXTURE_2D);
+                        (gl.BindTexture)(TEXTURE_2D, *t);
                     }
                 }
                 if *t == Tex::Invert {
