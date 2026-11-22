@@ -153,6 +153,7 @@ pub const UNPACK_ALIGNMENT: u32 = 0x0CF5;
 pub const PACK_ALIGNMENT: u32 = 0x0D05;
 pub const VERSION: u32 = 0x1F02;
 pub const TRIANGLES: u32 = 4;
+pub const UNSIGNED_SHORT: u32 = 0x1403;
 pub const UNSIGNED_INT: u32 = 0x1405;
 pub const ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 
@@ -183,7 +184,6 @@ api! { Gl, "gl", "system",
     BindBuffer(u32, u32);
     BufferData(u32, isize, *const c_void, u32);
     BufferSubData(u32, isize, isize, *const c_void);
-    GetBufferSubData(u32, isize, isize, *mut c_void);
     DeleteBuffers(i32, *const u32);
     ReadPixels(i32, i32, i32, i32, u32, u32, *mut c_void);
     GenTextures(i32, *mut u32);

@@ -58,6 +58,7 @@ pub struct Renderer {
     inflight: BTreeMap<(i32, i32, i32), u64>,
     gen: u64,
     done: Vec<crate::mesher::Done>,
+    batch: Vec<(i32, i32, i32)>,
     /// Cave culling.
     pub graph: crate::occlusion::Graph,
     eye_in_opaque: bool,
@@ -107,6 +108,7 @@ impl Renderer {
             inflight: BTreeMap::new(),
             gen: 0,
             done: Vec::new(),
+            batch: Vec::new(),
             graph: crate::occlusion::Graph::new(),
             eye_in_opaque: false,
             vis_stack: Vec::new(),
@@ -217,40 +219,30 @@ impl Renderer {
         }
         let (ex, ey, ez) = (eye[0] as i32 >> 4, (eye[1] as i32 - world.min_y) >> 4, eye[2] as i32 >> 4);
         let most = crate::mesher::workers() as usize * 3 + 2;
-        loop {
-            if world.dirty.is_empty() {
+        // The nearest dirty sections, a batch at a time (one pass over the set per batch).
+        'batches: loop {
+            nearest(&world.dirty, (ex, ey, ez), &mut self.batch);
+            if self.batch.is_empty() {
                 break;
             }
-            if threaded {
-                if crate::mesher::pending() >= most {
-                    break;
+            for i in 0..self.batch.len() {
+                if crate::sys::now_ms() - start > budget_ms || (threaded && crate::mesher::pending() >= most) {
+                    break 'batches;
                 }
-            } else if crate::sys::now_ms() - start > budget_ms {
-                break;
-            }
-            // The nearest dirty section.
-            let mut best = None;
-            let mut best_d = i32::MAX;
-            for &(x, y, z) in world.dirty.iter() {
-                let d = (x - ex).abs().max((z - ez).abs()) * 4 + (y - ey).abs();
-                if d < best_d {
-                    best_d = d;
-                    best = Some((x, y, z));
-                }
-            }
-            let k = best.unwrap();
-            world.dirty.remove(&k);
-            let Some(job) = self.job(gl, world, b, k) else { continue };
-            if threaded {
-                self.inflight.insert(k, job.gen);
-                crate::mesher::submit(job);
-            } else {
-                let d = crate::mesher::mesh(&job, &mut self.runs, &mut self.vis_stack);
-                self.graph.set(k, d.vis);
-                if d.first[RUNS] == 0 {
-                    self.terrain.remove(gl, k);
+                let k = self.batch[i];
+                world.dirty.remove(&k);
+                let Some(job) = self.job(gl, world, b, k) else { continue };
+                if threaded {
+                    self.inflight.insert(k, job.gen);
+                    crate::mesher::submit(job);
                 } else {
-                    self.terrain.put(gl, k, d.data, d.first);
+                    let d = crate::mesher::mesh(&job, &mut self.runs, &mut self.vis_stack);
+                    self.graph.set(k, d.vis);
+                    if d.first[RUNS] == 0 {
+                        self.terrain.remove(gl, k);
+                    } else {
+                        self.terrain.put(gl, k, d.data, d.first);
+                    }
                 }
             }
         }
@@ -656,6 +648,32 @@ pub fn exp(c: char) -> bool {
         EXP.as_ref().map_or(false, |e| e.contains(c))
     }
 }
+/// The (up to) 64 dirty sections nearest the camera section `e`, nearest first (horizontal
+/// distance counts four times the vertical, as the order chunks come in).
+fn nearest(dirty: &alloc::collections::BTreeSet<(i32, i32, i32)>, e: (i32, i32, i32), out: &mut Vec<(i32, i32, i32)>) {
+    const K: usize = 64;
+    let mut best: [(i32, (i32, i32, i32)); K] = [(i32::MAX, (0, 0, 0)); K];
+    let mut n = 0;
+    for &k in dirty.iter() {
+        let d = (k.0 - e.0).abs().max((k.2 - e.2).abs()) * 4 + (k.1 - e.1).abs();
+        if n == K && d >= best[K - 1].0 {
+            continue;
+        }
+        // Insert in order.
+        let mut i = if n < K { n } else { K - 1 };
+        while i > 0 && best[i - 1].0 > d {
+            best[i] = best[i - 1];
+            i -= 1;
+        }
+        best[i] = (d, k);
+        if n < K {
+            n += 1;
+        }
+    }
+    out.clear();
+    out.extend(best[..n].iter().map(|b| b.1));
+}
+
 pub fn perspective_pub(fov_deg: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
     perspective(fov_deg, aspect, near, far)
 }

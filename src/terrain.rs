@@ -2,15 +2,17 @@
 //!
 //! Old drivers (Apple's above all) spend several microseconds of CPU on every draw call, so a
 //! call per section (hundreds a frame) costs more than the drawing itself. Sections are
-//! therefore packed into regions of 8 x 4 x 8 sections (128 x 64 x 128 blocks), one vertex
-//! buffer each, and a frame draws every visible section of a region with one
-//! glMultiDrawElements. Positions are stored relative to the region's centre in 1/256 block
-//! (16-bit), so one matrix serves the whole region.
+//! therefore grouped into regions of 8 x 4 x 8 sections (128 x 64 x 128 blocks) whose
+//! positions are stored relative to the region's centre in 1/256 block (16-bit), so one matrix
+//! serves the whole region, and packed into pages: vertex buffers of 16384 quads (65536
+//! vertices, so 16-bit indices). A frame draws every visible section of a page with one
+//! glMultiDrawElements.
 //!
-//! Inside a region each section has a slot with some room to grow; a rebuilt section is
-//! written in place with glBufferSubData when it fits, else at the end, and the region is
-//! packed again into a bigger buffer when it runs out of room (read back from the card: no
-//! copy of the meshes is kept in memory).
+//! Each section has a slot in a page with a quarter more room than it needs; a rebuilt section
+//! is written in place with glBufferSubData when it fits, else in the first free space of the
+//! region's pages (or a new page). Nothing is ever moved, read back or kept in memory, so
+//! loading chunks never waits for the card. A section bigger than a page gets a page of its own
+//! (with 32-bit indices).
 //!
 //! A section's quads come in runs (render.rs): seven by facing (down, up, north, south,
 //! west, east, any) for the solid and cut-out quads, then the translucent ones.
@@ -61,16 +63,49 @@ pub fn to_region(k: SKey, p: [i16; 3]) -> [i16; 3] {
     out
 }
 
-struct Region {
+/// Quads per page.
+const PAGE: u32 = 16384;
+
+struct Page {
     vbo: u32,
-    /// Room, and the end of the last slot, in quads.
     cap: u32,
-    top: u32,
-    /// Quads held by live slots (with their room to grow).
-    live: u32,
+    /// Free space: (start, length) in quads, sorted, never touching each other.
+    free: Vec<(u32, u32)>,
+}
+
+impl Page {
+    fn take(&mut self, n: u32) -> Option<u32> {
+        let i = self.free.iter().position(|f| f.1 >= n)?;
+        let at = self.free[i].0;
+        if self.free[i].1 == n {
+            self.free.remove(i);
+        } else {
+            self.free[i] = (at + n, self.free[i].1 - n);
+        }
+        Some(at)
+    }
+
+    fn give(&mut self, at: u32, n: u32) {
+        let i = self.free.iter().position(|f| f.0 > at).unwrap_or(self.free.len());
+        self.free.insert(i, (at, n));
+        // Merge with the next, then the previous.
+        if i + 1 < self.free.len() && self.free[i].0 + self.free[i].1 == self.free[i + 1].0 {
+            self.free[i].1 += self.free[i + 1].1;
+            self.free.remove(i + 1);
+        }
+        if i > 0 && self.free[i - 1].0 + self.free[i - 1].1 == self.free[i].0 {
+            self.free[i - 1].1 += self.free[i].1;
+            self.free.remove(i);
+        }
+    }
+
+    fn empty(&self) -> bool {
+        self.free.len() == 1 && self.free[0] == (0, self.cap)
+    }
 }
 
 struct Slot {
+    page: u16,
     at: u32,
     cap: u32,
     /// Where each run starts within the slot, in quads; first[RUNS] is the total.
@@ -83,18 +118,22 @@ struct Item {
     rank: u32,
     d2: f64,
     region: RKey,
+    page: u16,
     first: [u32; RUNS + 1],
     runs: u16,
 }
 
 pub struct Terrain {
-    regions: BTreeMap<RKey, Region>,
+    /// Each region's pages (an emptied page is kept for reuse until the region goes).
+    regions: BTreeMap<RKey, Vec<Page>>,
     slots: BTreeMap<SKey, Slot>,
-    /// The shared quad index buffer (0 1 2, 2 3 0 per quad, as vanilla's), 32-bit.
-    index: u32,
-    index_quads: u32,
+    /// The shared quad index buffers (0 1 2, 2 3 0 per quad, as vanilla's): 16-bit for a page,
+    /// 32-bit for the pages of oversized sections.
+    index16: u32,
+    index32: u32,
+    index32_quads: u32,
     items: Vec<Item>,
-    seen: Vec<(RKey, f64)>,
+    seen: Vec<(RKey, u16)>,
     counts: Vec<i32>,
     offsets: Vec<*const c_void>,
     pub sections_drawn: u32,
@@ -108,8 +147,9 @@ impl Terrain {
         Terrain {
             regions: BTreeMap::new(),
             slots: BTreeMap::new(),
-            index: 0,
-            index_quads: 0,
+            index16: 0,
+            index32: 0,
+            index32_quads: 0,
             items: Vec::new(),
             seen: Vec::new(),
             counts: Vec::new(),
@@ -121,8 +161,10 @@ impl Terrain {
     }
 
     pub fn clear(&mut self, gl: &Gl) {
-        for (_, r) in core::mem::take(&mut self.regions) {
-            unsafe { (gl.DeleteBuffers)(1, &r.vbo) };
+        for (_, pages) in core::mem::take(&mut self.regions) {
+            for p in pages {
+                unsafe { (gl.DeleteBuffers)(1, &p.vbo) };
+            }
         }
         self.slots.clear();
     }
@@ -130,12 +172,16 @@ impl Terrain {
     pub fn remove(&mut self, gl: &Gl, k: SKey) {
         let Some(s) = self.slots.remove(&k) else { return };
         let rk = region_of(k);
-        if let Some(r) = self.regions.get_mut(&rk) {
-            r.live -= s.cap;
-            if r.live == 0 {
-                unsafe { (gl.DeleteBuffers)(1, &r.vbo) };
-                self.regions.remove(&rk);
+        let Some(pages) = self.regions.get_mut(&rk) else { return };
+        if let Some(p) = pages.get_mut(s.page as usize) {
+            p.give(s.at, s.cap);
+        }
+        // A region with nothing left gives its buffers back.
+        if pages.iter().all(|p| p.empty()) {
+            for p in pages.iter() {
+                unsafe { (gl.DeleteBuffers)(1, &p.vbo) };
             }
+            self.regions.remove(&rk);
         }
     }
 
@@ -148,73 +194,66 @@ impl Terrain {
         }
         let rk = region_of(k);
         // In place, when it fits its old slot.
-        if let (Some(s), Some(r)) = (self.slots.get_mut(&k), self.regions.get(&rk)) {
+        if let Some(s) = self.slots.get_mut(&k) {
             if quads <= s.cap {
-                upload(gl, r.vbo, s.at, &data);
-                s.first = first;
-                return;
+                if let Some(p) = self.regions.get(&rk).and_then(|pages| pages.get(s.page as usize)) {
+                    upload(gl, p.vbo, s.at, &data);
+                    s.first = first;
+                    return;
+                }
             }
         }
-        let old_cap = self.slots.get(&k).map_or(0, |s| s.cap);
-        let need = quads + quads / 4 + 16;
-        let r = self.regions.entry(rk).or_insert(Region { vbo: 0, cap: 0, top: 0, live: 0 });
-        r.live = r.live - old_cap + need;
-        if r.vbo != 0 && r.top + need <= r.cap {
-            let at = r.top;
-            r.top += need;
-            upload(gl, r.vbo, at, &data);
-            self.slots.insert(k, Slot { at, cap: need, first });
-            return;
-        }
-        // Out of room: pack the region again in a bigger buffer, the other sections read back
-        // from the old one (rare: the room grows by half each time).
-        self.slots.remove(&k);
-        let r = self.regions.get_mut(&rk).unwrap();
-        let cap = (r.live * 3 / 2).max(4096).next_power_of_two();
-        let old = r.vbo;
-        let mut vbo = 0u32;
-        unsafe {
-            (gl.GenBuffers)(1, &mut vbo);
-            (gl.BindBuffer)(ARRAY_BUFFER, vbo);
-            (gl.BufferData)(ARRAY_BUFFER, cap as isize * 4 * CSTRIDE as isize, core::ptr::null(), STATIC_DRAW);
-        }
-        r.vbo = vbo;
-        r.cap = cap;
-        let mut top = 0;
-        let lo = (rk.0 * RX, rk.1 * RY, rk.2 * RX);
-        let hi = (lo.0 + RX - 1, lo.1 + RY - 1, lo.2 + RX - 1);
-        let mut tmp: Vec<CV> = Vec::new();
-        for (sk, s) in self.slots.range_mut(lo..=hi) {
-            if region_of(*sk) != rk {
-                continue;
-            }
-            let n = s.first[RUNS] as usize * 4;
-            tmp.clear();
-            tmp.reserve(n);
-            unsafe {
-                tmp.set_len(n);
-                (gl.BindBuffer)(ARRAY_BUFFER, old);
-                (gl.GetBufferSubData)(ARRAY_BUFFER, s.at as isize * 4 * CSTRIDE as isize, (n * CSTRIDE as usize) as isize, tmp.as_mut_ptr() as *mut c_void);
-                (gl.BindBuffer)(ARRAY_BUFFER, vbo);
-                (gl.BufferSubData)(ARRAY_BUFFER, top as isize * 4 * CSTRIDE as isize, (n * CSTRIDE as usize) as isize, tmp.as_ptr() as *const c_void);
-            }
-            s.at = top;
-            top += s.cap;
-        }
-        unsafe {
-            (gl.BufferSubData)(ARRAY_BUFFER, top as isize * 4 * CSTRIDE as isize, (data.len() * CSTRIDE as usize) as isize, data.as_ptr() as *const c_void);
-            (gl.BindBuffer)(ARRAY_BUFFER, 0);
-            if old != 0 {
-                (gl.DeleteBuffers)(1, &old);
+        if let Some(s) = self.slots.remove(&k) {
+            if let Some(p) = self.regions.get_mut(&rk).and_then(|pages| pages.get_mut(s.page as usize)) {
+                p.give(s.at, s.cap);
             }
         }
-        self.slots.insert(k, Slot { at: top, cap: need, first });
-        r.top = top + need;
-        self.ensure_index(gl, cap);
+        let need = (quads + quads / 4 + 16).min(PAGE.max(quads));
+        let pages = self.regions.entry(rk).or_insert_with(Vec::new);
+        let mut spot = None;
+        for (i, p) in pages.iter_mut().enumerate() {
+            if let Some(at) = p.take(need) {
+                spot = Some((i, at));
+                break;
+            }
+        }
+        let (pi, at) = match spot {
+            Some(s) => s,
+            None => {
+                let cap = PAGE.max(need);
+                let mut vbo = 0u32;
+                unsafe {
+                    (gl.GenBuffers)(1, &mut vbo);
+                    (gl.BindBuffer)(ARRAY_BUFFER, vbo);
+                    (gl.BufferData)(ARRAY_BUFFER, cap as isize * 4 * CSTRIDE as isize, core::ptr::null(), STATIC_DRAW);
+                    (gl.BindBuffer)(ARRAY_BUFFER, 0);
+                }
+                let mut p = Page { vbo, cap, free: alloc::vec![(0, cap)] };
+                let at = p.take(need).unwrap_or(0);
+                pages.push(p);
+                (pages.len() - 1, at)
+            }
+        };
+        upload(gl, pages[pi].vbo, at, &data);
+        self.slots.insert(k, Slot { page: pi as u16, at, cap: need, first });
+        self.ensure_index(gl, need);
     }
 
     fn ensure_index(&mut self, gl: &Gl, quads: u32) {
-        if quads <= self.index_quads {
+        if self.index16 == 0 {
+            let mut ix: Vec<u16> = Vec::with_capacity(PAGE as usize * 6);
+            for q in 0..PAGE {
+                let v = (q * 4) as u16;
+                ix.extend_from_slice(&[v, v + 1, v + 2, v + 2, v + 3, v]);
+            }
+            unsafe {
+                (gl.GenBuffers)(1, &mut self.index16);
+                (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index16);
+                (gl.BufferData)(ELEMENT_ARRAY_BUFFER, (ix.len() * 2) as isize, ix.as_ptr() as *const c_void, STATIC_DRAW);
+                (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, 0);
+            }
+        }
+        if quads <= PAGE || quads <= self.index32_quads {
             return;
         }
         let n = quads.next_power_of_two();
@@ -224,14 +263,14 @@ impl Terrain {
             ix.extend_from_slice(&[v, v + 1, v + 2, v + 2, v + 3, v]);
         }
         unsafe {
-            if self.index == 0 {
-                (gl.GenBuffers)(1, &mut self.index);
+            if self.index32 == 0 {
+                (gl.GenBuffers)(1, &mut self.index32);
             }
-            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index);
+            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index32);
             (gl.BufferData)(ELEMENT_ARRAY_BUFFER, (ix.len() * 4) as isize, ix.as_ptr() as *const c_void, STATIC_DRAW);
             (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, 0);
         }
-        self.index_quads = n;
+        self.index32_quads = n;
     }
 
     /// Picks the sections to draw this frame: `keep(k, lo)` says whether section k (corner
@@ -249,17 +288,17 @@ impl Terrain {
             for f in first.iter_mut() {
                 *f += s.at;
             }
-            self.items.push(Item { rank: 0, d2, region: region_of(k), first, runs: faces(lo) as u16 | 1 << ANY });
+            self.items.push(Item { rank: 0, d2, region: region_of(k), page: s.page, first, runs: faces(lo) as u16 | 1 << ANY });
         }
-        // Near to far, and each region's sections together (ranked by its nearest section),
-        // so a region is one call and what is in front is drawn first.
+        // Near to far, and each page's sections together (ranked by its nearest section), so a
+        // page is one call and what is in front is drawn first.
         self.items.sort_unstable_by(|a, b| a.d2.partial_cmp(&b.d2).unwrap_or(core::cmp::Ordering::Equal));
         self.seen.clear();
         for it in self.items.iter_mut() {
-            let rank = match self.seen.iter().position(|s| s.0 == it.region) {
+            let rank = match self.seen.iter().position(|s| s.0 == it.region && s.1 == it.page) {
                 Some(i) => i,
                 None => {
-                    self.seen.push((it.region, it.d2));
+                    self.seen.push((it.region, it.page));
                     self.seen.len() - 1
                 }
             };
@@ -292,14 +331,20 @@ impl Terrain {
         if items.is_empty() {
             return;
         }
-        unsafe { (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index) };
+        let mut bound = 0u32;
         let mut i = 0;
         while i < items.len() {
-            let rk = items[i].region;
+            let (rk, pg) = (items[i].region, items[i].page);
+            let Some(page) = self.regions.get(&rk).and_then(|pages| pages.get(pg as usize)) else {
+                i += 1;
+                continue;
+            };
+            let (vbo, big) = (page.vbo, page.cap > PAGE);
+            let isz = if big { 4 } else { 2 };
             self.counts.clear();
             self.offsets.clear();
             let mut open: Option<(u32, u32)> = None;
-            while i < items.len() && items[i].region == rk {
+            while i < items.len() && items[i].region == rk && items[i].page == pg {
                 let it = &items[i];
                 i += 1;
                 let mask = if translucent { 1u16 << TRANSLUCENT } else { it.runs };
@@ -316,7 +361,7 @@ impl Terrain {
                         Some((os, oc)) if os + oc == s => Some((os, oc + e - s)),
                         Some((os, oc)) => {
                             self.counts.push((oc * 6) as i32);
-                            self.offsets.push((os as usize * 24) as *const c_void);
+                            self.offsets.push((os as usize * 6 * isz) as *const c_void);
                             Some((s, e - s))
                         }
                         None => Some((s, e - s)),
@@ -325,9 +370,8 @@ impl Terrain {
             }
             if let Some((os, oc)) = open {
                 self.counts.push((oc * 6) as i32);
-                self.offsets.push((os as usize * 24) as *const c_void);
+                self.offsets.push((os as usize * 6 * isz) as *const c_void);
             }
-            let Some(r) = self.regions.get(&rk) else { continue };
             if self.counts.is_empty() {
                 continue;
             }
@@ -343,16 +387,21 @@ impl Terrain {
             for k in 0..12 {
                 m[k] /= UNITS as f32;
             }
+            let (index, ty) = if big { (self.index32, UNSIGNED_INT) } else { (self.index16, UNSIGNED_SHORT) };
             unsafe {
+                if bound != index {
+                    (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, index);
+                    bound = index;
+                }
                 (gl.LoadMatrixf)(m.as_ptr());
-                (gl.BindBuffer)(ARRAY_BUFFER, r.vbo);
+                (gl.BindBuffer)(ARRAY_BUFFER, vbo);
                 (gl.VertexPointer)(3, SHORT, CSTRIDE, core::ptr::null());
                 (gl.TexCoordPointer)(2, SHORT, CSTRIDE, 8 as *const c_void);
                 (gl.ColorPointer)(4, UNSIGNED_BYTE, CSTRIDE, 12 as *const c_void);
                 if self.counts.len() == 1 {
-                    (gl.DrawElements)(TRIANGLES, self.counts[0], UNSIGNED_INT, self.offsets[0]);
+                    (gl.DrawElements)(TRIANGLES, self.counts[0], ty, self.offsets[0]);
                 } else {
-                    (gl.MultiDrawElements)(TRIANGLES, self.counts.as_ptr(), UNSIGNED_INT, self.offsets.as_ptr(), self.counts.len() as i32);
+                    (gl.MultiDrawElements)(TRIANGLES, self.counts.as_ptr(), ty, self.offsets.as_ptr(), self.counts.len() as i32);
                 }
             }
             self.calls += 1;

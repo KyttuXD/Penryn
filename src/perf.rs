@@ -57,6 +57,9 @@ const NAMES: [&str; N] = ["events", "net", "sound", "logic", "mesh", "sky", "wor
 static mut MODE: u8 = 0;
 static mut LAST: f64 = 0.0;
 static mut T: [f64; N] = [0.0; N];
+/// This frame's time per stage, and the longest single frame's per stage since the report.
+static mut CUR: [f64; N] = [0.0; N];
+static mut WORST: [f64; N] = [0.0; N];
 static mut FINISH: Option<unsafe extern "system" fn()> = None;
 
 /// GPU timing: timer queries in a ring, each charged to its stage once the card has done it.
@@ -168,7 +171,17 @@ pub fn lap(s: S) {
         }
         let t = crate::sys::now();
         T[s as usize] += t - LAST;
+        CUR[s as usize] += t - LAST;
         LAST = t;
+        // The frame's last stage: keep the worst of each.
+        if s as usize == S::Sleep as usize {
+            for i in 0..N {
+                if CUR[i] > WORST[i] {
+                    WORST[i] = CUR[i];
+                }
+                CUR[i] = 0.0;
+            }
+        }
     }
 }
 
@@ -189,6 +202,19 @@ pub fn report(frames: u32) -> String {
             T[i] = 0.0;
         }
         out.insert_str(0, &alloc::format!("frame {:.2} ms:", total * 1000.0 / f));
+        // The stage behind the slowest frame, when one stalled.
+        let mut w = 0;
+        for i in 0..N {
+            if WORST[i] > WORST[w] {
+                w = i;
+            }
+        }
+        if WORST[w] > 0.008 {
+            out.push_str(&alloc::format!("; stall: {} {:.0} ms", NAMES[w], WORST[w] * 1000.0));
+        }
+        for i in 0..N {
+            WORST[i] = 0.0;
+        }
         if let Some(g) = (*core::ptr::addr_of_mut!(GPU)).as_mut() {
             let total: f64 = g.t.iter().sum();
             out.push_str(&alloc::format!("; GPU {:.2} ms:", total * 1000.0 / f));
