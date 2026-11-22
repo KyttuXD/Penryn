@@ -111,35 +111,41 @@ pub struct BlockEntities {
     /// The server asked to edit this sign (ClientboundOpenSignEditorPacket): position, front.
     pub open_request: Option<([i32; 3], bool)>,
     pub editor: Option<Editor>,
-    /// Vertices of the sign text, kept between frames to avoid allocating each one.
-    scratch: RefCell<Vec<V>>,
+    /// Bumped on every change to the signs (their text mesh is made again).
+    pub version: u32,
+    mesh: RefCell<TextMesh>,
     /// signs.bin: not tried yet, missing (None), or loaded.
     pictures: Option<Option<Pictures>>,
 }
 
 impl BlockEntities {
     pub fn new() -> BlockEntities {
-        BlockEntities { signs: BTreeMap::new(), open_request: None, editor: None, scratch: RefCell::new(Vec::new()), pictures: None }
+        BlockEntities { signs: BTreeMap::new(), open_request: None, editor: None, version: 0, mesh: RefCell::new(TextMesh::default()), pictures: None }
     }
 
     /// Everything goes (a new dimension or level).
     pub fn clear(&mut self) {
         self.signs.clear();
+        self.version += 1;
     }
 
     /// A chunk column was unloaded.
     pub fn forget(&mut self, cx: i32, cz: i32) {
+        let n = self.signs.len();
         self.signs.retain(|k, _| !(k.0 >> 4 == cx && k.2 >> 4 == cz));
+        if self.signs.len() != n {
+            self.version += 1;
+        }
     }
 
     /// A block changed: its block entity goes unless the block is still a sign (vanilla keeps a
     /// block entity while the new state's block has the same type).
     pub fn block_changed(&mut self, blocks: &Blocks, x: i32, y: i32, z: i32, state: u16) {
         if self.signs.contains_key(&(x, y, z)) {
-            let was_hanging = sign_kind(blocks, state).map(|k| k.hanging);
-            if was_hanging.is_none() {
+            if sign_kind(blocks, state).is_none() {
                 self.signs.remove(&(x, y, z));
             }
+            self.version += 1;
         }
     }
 
@@ -189,6 +195,7 @@ impl BlockEntities {
         }
         if is_sign {
             self.signs.insert((x, y, z), Sign { front, back, waxed });
+            self.version += 1;
         }
         Some(())
     }
@@ -370,10 +377,8 @@ fn metrics(hanging: bool) -> (i32, f32) {
     }
 }
 
-/// Pushes a line's glyphs: `base` the colour (formatting codes change it unless `fixed`),
-/// `toward` how much closer to the eye than the sign's plane (keeps text in front of the board
-/// without moving it on screen).
-fn line_quads(out: &mut Vec<V>, gui: &Gui, m: &M, s: &str, x: f32, y: f32, base: u32, fixed: bool, toward: f64) {
+/// Pushes a line's glyphs: `base` the colour (formatting codes change it unless `fixed`).
+fn line_quads(out: &mut Vec<V>, gui: &Gui, m: &M, s: &str, x: f32, y: f32, base: u32, fixed: bool) {
     const CODES: [u32; 16] = [
         0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xFFAA00, 0xAAAAAA, 0x555555, 0x5555FF, 0x55FF55,
         0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
@@ -381,13 +386,12 @@ fn line_quads(out: &mut Vec<V>, gui: &Gui, m: &M, s: &str, x: f32, y: f32, base:
     let rgba = |c: u32| [(c >> 16) as u8, (c >> 8) as u8, c as u8, 255];
     let mut c = rgba(base);
     let mut pen = x;
-    let k = 1.0 - toward;
     let p = |px: f32, py: f32| -> [f32; 3] {
         let (px, py) = (px as f64, py as f64);
         [
-            ((m[0][0] * px + m[0][1] * py + m[0][3]) * k) as f32,
-            ((m[1][0] * px + m[1][1] * py + m[1][3]) * k) as f32,
-            ((m[2][0] * px + m[2][1] * py + m[2][3]) * k) as f32,
+            (m[0][0] * px + m[0][1] * py + m[0][3]) as f32,
+            (m[1][0] * px + m[1][1] * py + m[1][3]) as f32,
+            (m[2][0] * px + m[2][1] * py + m[2][3]) as f32,
         ]
     };
     let mut it = s.chars();
@@ -418,8 +422,9 @@ fn line_quads(out: &mut Vec<V>, gui: &Gui, m: &M, s: &str, x: f32, y: f32, base:
     }
 }
 
-/// One side's text (AbstractSignRenderer.submitSignText).
-fn side_quads(out: &mut Vec<V>, gui: &Gui, m: &M, t: &SignText, hanging: bool, near: bool) {
+/// One side's text (AbstractSignRenderer.submitSignText): plain text and outlines into
+/// `under`, glowing text over its outline into `over`.
+fn side_quads(under: &mut Vec<V>, over: &mut Vec<V>, gui: &Gui, m: &M, t: &SignText, hanging: bool, near: bool) {
     let (lh, max) = metrics(hanging);
     let darkc = dark_color(t);
     let (color, outline) = if t.glow {
@@ -440,47 +445,97 @@ fn side_quads(out: &mut Vec<V>, gui: &Gui, m: &M, t: &SignText, hanging: bool, n
         if outline {
             // Font.drawInBatch8xOutline: the outline colour around, the text in front.
             for (dx, dy) in [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (-1.0, 1.0), (0.0, 1.0), (1.0, 1.0)] {
-                line_quads(out, gui, m, s, x + dx, y + dy, darkc, true, 0.0010);
+                line_quads(under, gui, m, s, x + dx, y + dy, darkc, true);
             }
-            line_quads(out, gui, m, s, x, y, color, false, 0.0015);
+            line_quads(over, gui, m, s, x, y, color, false);
         } else {
-            line_quads(out, gui, m, s, x, y, color, false, 0.0010);
+            line_quads(under, gui, m, s, x, y, color, false);
         }
     }
 }
 
-/// Draws every sign's text near the eye. `view` is the view matrix (column-major), positions
-/// are relative to `eye`; called between the opaque world and the water.
+/// The sign text's vertex buffer, made again only when the signs or what is drawn of them
+/// changes (one more within 64 blocks, an outline within 16), not every frame.
+#[derive(Default)]
+pub struct TextMesh {
+    vbo: u32,
+    under: i32,
+    over: i32,
+    version: u32,
+    shape: u64,
+    anchor: [i32; 3],
+}
+
+/// Draws every sign's text near the eye. `view` is the view matrix (column-major); called
+/// between the opaque world and the water.
 pub fn draw_world(gl: &Gl, view: &[f32; 16], eye: [f64; 3], be: &BlockEntities, world: &World, blocks: &Blocks, gui: &Gui) {
     if be.signs.is_empty() {
         return;
     }
-    let mut out = be.scratch.borrow_mut();
-    out.clear();
-    let fwd = [-view[2] as f64, -view[6] as f64, -view[10] as f64];
-    for (&(x, y, z), sign) in be.signs.iter() {
-        let rel = [x as f64 - eye[0], y as f64 - eye[1], z as f64 - eye[2]];
-        let c = [rel[0] + 0.5, rel[1] + 0.5, rel[2] + 0.5];
+    let mut mesh = be.mesh.borrow_mut();
+    // Which signs are drawn, and which with an outline: a rebuild when that changes.
+    let mut shape = 0xcbf29ce484222325u64;
+    for &(x, y, z) in be.signs.keys() {
+        let c = [x as f64 + 0.5 - eye[0], y as f64 + 0.5 - eye[1], z as f64 + 0.5 - eye[2]];
         let d2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
-        if d2 > VIEW_DIST2 || c[0] * fwd[0] + c[1] * fwd[1] + c[2] * fwd[2] < -1.0 {
-            continue;
-        }
-        let Some(k) = sign_kind(blocks, world.get(x, y, z)) else { continue };
-        let near = d2 < OUTLINE_DIST2;
-        for (t, front) in [(&sign.front, true), (&sign.back, false)] {
-            if !t.is_empty() {
-                let m = text_transform(&k, front, rel);
-                side_quads(&mut out, gui, &m, t, k.hanging, near);
+        let flags = (d2 <= VIEW_DIST2) as u64 | ((d2 < OUTLINE_DIST2) as u64) << 1;
+        shape = (shape ^ flags ^ (x as u64) << 2 ^ (z as u64) << 22 ^ (y as u64) << 42).wrapping_mul(0x100000001b3);
+    }
+    if mesh.vbo == 0 || mesh.version != be.version || mesh.shape != shape {
+        let anchor = [crate::math::ifloor(eye[0]), crate::math::ifloor(eye[1]), crate::math::ifloor(eye[2])];
+        let (mut under, mut over) = (Vec::new(), Vec::new());
+        for (&(x, y, z), sign) in be.signs.iter() {
+            let c = [x as f64 + 0.5 - eye[0], y as f64 + 0.5 - eye[1], z as f64 + 0.5 - eye[2]];
+            let d2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
+            if d2 > VIEW_DIST2 {
+                continue;
+            }
+            let Some(k) = sign_kind(blocks, world.get(x, y, z)) else { continue };
+            let at = [(x - anchor[0]) as f64, (y - anchor[1]) as f64, (z - anchor[2]) as f64];
+            for (t, front) in [(&sign.front, true), (&sign.back, false)] {
+                if !t.is_empty() {
+                    let m = text_transform(&k, front, at);
+                    side_quads(&mut under, &mut over, gui, &m, t, k.hanging, d2 < OUTLINE_DIST2);
+                }
             }
         }
+        mesh.under = under.len() as i32;
+        mesh.over = over.len() as i32;
+        under.extend_from_slice(&over);
+        unsafe {
+            if mesh.vbo == 0 {
+                (gl.GenBuffers)(1, &mut mesh.vbo);
+            }
+            (gl.BindBuffer)(ARRAY_BUFFER, mesh.vbo);
+            (gl.BufferData)(ARRAY_BUFFER, (under.len() * 24) as isize, under.as_ptr() as *const c_void, STATIC_DRAW);
+        }
+        mesh.version = be.version;
+        mesh.shape = shape;
+        mesh.anchor = anchor;
     }
-    if out.is_empty() {
+    if mesh.under + mesh.over == 0 {
         return;
     }
+    // The text sits a hair in front of the board: drawn scaled toward the eye, which moves
+    // nothing on screen but wins the depth test (outlines and plain text 0.1 %, glowing text
+    // over its outline 0.15 %).
+    let t = [mesh.anchor[0] as f64 - eye[0], mesh.anchor[1] as f64 - eye[1], mesh.anchor[2] as f64 - eye[2]];
+    let matrix = |k: f64| -> [f32; 16] {
+        let mut m = [0f32; 16];
+        for j in 0..3 {
+            for r in 0..4 {
+                m[j * 4 + r] = (view[j * 4 + r] as f64 * k) as f32;
+            }
+        }
+        for r in 0..4 {
+            let v = view[r] as f64 * t[0] + view[4 + r] as f64 * t[1] + view[8 + r] as f64 * t[2];
+            m[12 + r] = (v * k + view[12 + r] as f64) as f32;
+        }
+        m
+    };
     unsafe {
         (gl.MatrixMode)(MODELVIEW);
-        (gl.LoadMatrixf)(view.as_ptr());
-        (gl.BindBuffer)(ARRAY_BUFFER, 0);
+        (gl.BindBuffer)(ARRAY_BUFFER, mesh.vbo);
         (gl.Disable)(CULL_FACE);
         (gl.Disable)(BLEND);
         (gl.Enable)(TEXTURE_2D);
@@ -490,11 +545,18 @@ pub fn draw_world(gl: &Gl, view: &[f32; 16], eye: [f64; 3], be: &BlockEntities, 
         (gl.EnableClientState)(VERTEX_ARRAY);
         (gl.EnableClientState)(COLOR_ARRAY);
         (gl.EnableClientState)(TEXTURE_COORD_ARRAY);
-        let base = out.as_ptr() as *const u8;
-        (gl.VertexPointer)(3, FLOAT, 24, base as *const c_void);
-        (gl.TexCoordPointer)(2, FLOAT, 24, base.add(12) as *const c_void);
-        (gl.ColorPointer)(4, UNSIGNED_BYTE, 24, base.add(20) as *const c_void);
-        (gl.DrawArrays)(QUADS, 0, out.len() as i32);
+        (gl.VertexPointer)(3, FLOAT, 24, core::ptr::null());
+        (gl.TexCoordPointer)(2, FLOAT, 24, 12 as *const c_void);
+        (gl.ColorPointer)(4, UNSIGNED_BYTE, 24, 20 as *const c_void);
+        if mesh.under > 0 {
+            (gl.LoadMatrixf)(matrix(1.0 - 0.0010).as_ptr());
+            (gl.DrawArrays)(QUADS, 0, mesh.under);
+        }
+        if mesh.over > 0 {
+            (gl.LoadMatrixf)(matrix(1.0 - 0.0015).as_ptr());
+            (gl.DrawArrays)(QUADS, mesh.under, mesh.over);
+        }
+        (gl.BindBuffer)(ARRAY_BUFFER, 0);
         (gl.Enable)(CULL_FACE);
     }
 }
@@ -534,6 +596,7 @@ pub fn open_editor(g: &mut Game, pos: [i32; 3], front: bool) -> bool {
     let color = if t.glow { DYE_TEXT[t.color as usize & 15] } else { dark_color(t) };
     let lines = [plain(&t.lines[0]), plain(&t.lines[1]), plain(&t.lines[2]), plain(&t.lines[3])];
     let cursor = lines[0].chars().count();
+    be.version += 1;
     be.editor = Some(Editor { pos, front, lines, line: 0, cursor, opened: crate::sys::now_ms(), hanging, wall, wood, color });
     true
 }
@@ -544,6 +607,7 @@ fn show_in_world(be: &mut BlockEntities) {
     if let Some(sign) = be.signs.get_mut(&(ed.pos[0], ed.pos[1], ed.pos[2])) {
         let t = if ed.front { &mut sign.front } else { &mut sign.back };
         t.lines = ed.lines.clone();
+        be.version += 1;
     }
 }
 
