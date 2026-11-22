@@ -181,7 +181,11 @@ fn run(args: &[String]) -> Result<(), String> {
                 i += 1;
             }
             let (h, p) = http::host_port(&host.ok_or(USAGE)?, 25565);
-            let acc = if name.is_some() { None } else { account::load_refreshed()? };
+            let mut acc = if name.is_some() { None } else { account::load_refreshed()? };
+            // --relay names the relay for this run's session calls too (join, chat keys).
+            if let (Some(r), Some(a)) = (relay.as_ref(), acc.as_mut()) {
+                a.relay = r.clone();
+            }
             if let Some(a) = &acc {
                 say!("signed in as {}", a.name);
             }

@@ -1023,8 +1023,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         if self.test_keys.contains('3') {
             self.debug = true;
         }
-        // chat=TEXT, say=A;B, tab: the chat screen and chat lines (chatui.rs).
-        if self.chat_ui.test(g, &self.test_keys)? && self.screen == Screen::Play {
+        // PENRYN_TEST_SAY, PENRYN_TEST_CHAT: the chat screen and chat lines (chatui.rs).
+        if self.chat_ui.test(g, &mut self.mouse, self.gui.as_ref(), &self.v)? && self.screen == Screen::Play {
             self.set_screen(Screen::Chat);
         }
         if self.test_keys.contains('A') && g.loaded_sent && sys::now_ms() / 50 % 10 == 0 {

@@ -797,7 +797,19 @@ impl Game {
 
     /// ChatScreen.handleChatInput: a command without its slash, or chat; kept in the history.
     pub fn send_line(&mut self, line: &str) -> Result<(), String> {
-        let line = truncate_utf16(line.trim(), 256);
+        // ChatScreen.normalizeChatMessage: trimmed, runs of spaces made one, at most 256;
+        // characters the server refuses (StringUtil.isAllowedChatCharacter) left out.
+        let mut norm = String::new();
+        for c in line.trim().chars() {
+            if c == '\u{a7}' || c < ' ' || c == '\u{7f}' {
+                continue;
+            }
+            if c.is_whitespace() && norm.ends_with(' ') {
+                continue;
+            }
+            norm.push(if c.is_whitespace() { ' ' } else { c });
+        }
+        let line = truncate_utf16(&norm, 256);
         if line.is_empty() {
             return Ok(());
         }

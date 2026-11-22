@@ -100,7 +100,6 @@ pub struct ChatUi {
     scroll: usize,
     confirm: Option<Confirm>,
     focused_at: u64,
-    test_done: u32,
     test_ticks: u64,
 }
 
@@ -124,7 +123,7 @@ impl ChatUi {
 
     /// ChatScreen.init: the chat opened with `initial` typed.
     pub fn open(&mut self, g: &mut Game, initial: &str) {
-        *self = ChatUi { test_done: self.test_done, test_ticks: self.test_ticks, ..ChatUi::default() };
+        *self = ChatUi { test_ticks: self.test_ticks, ..ChatUi::default() };
         self.input = String::from(initial);
         self.cursor = self.input.len();
         self.focused_at = crate::sys::now_ms();
@@ -576,39 +575,74 @@ impl ChatUi {
         }
     }
 
-    /// Test hooks (PENRYN_TEST_INPUT): `chat=TEXT` opens the chat with TEXT typed,
-    /// `say=A;B` sends lines a second apart, `tab` presses Tab once the chat is open.
-    /// Returns true when the chat screen should open.
-    pub fn test(&mut self, g: &mut Game, keys: &str) -> Result<bool, String> {
-        if !g.loaded_sent || !(keys.contains("chat=") || keys.contains("say=")) {
+    /// Test hooks: PENRYN_TEST_SAY="A;B" sends lines (chat or commands) a second apart,
+    /// PENRYN_TEST_CHAT=TEXT opens the chat with TEXT typed (after the lines), and
+    /// PENRYN_TEST_CHAT_KEYS="tab,down,mouse=X:Y,click" works it. Returns true when the chat
+    /// screen should open; `mouse` is moved for hover pictures.
+    pub fn test(&mut self, g: &mut Game, mouse: &mut (f32, f32), gui: Option<&Gui>, v: &crate::sdl::Video) -> Result<bool, String> {
+        if !g.loaded_sent {
+            return Ok(false);
+        }
+        let say = crate::sys::env("PENRYN_TEST_SAY").unwrap_or_default();
+        let chat = crate::sys::env("PENRYN_TEST_CHAT");
+        if say.is_empty() && chat.is_none() {
             return Ok(false);
         }
         self.test_ticks += 1;
         let ticks = self.test_ticks;
+        let lines: Vec<&str> = if say.is_empty() { Vec::new() } else { say.split(';').collect() };
+        for (i, line) in lines.iter().enumerate() {
+            if ticks == 60 + 20 * i as u64 {
+                g.send_line(line)?;
+            }
+        }
+        let open_at = 60 + 20 * lines.len() as u64 + 20;
         let mut open = false;
-        for part in keys.split(',') {
-            if let Some(t) = part.strip_prefix("chat=") {
-                if self.test_done & 1 == 0 && ticks > 60 {
-                    self.test_done |= 1;
-                    self.open(g, t);
-                    open = true;
-                }
+        if let Some(t) = chat {
+            if ticks == open_at {
+                self.open(g, &t);
+                open = true;
             }
-            if let Some(list) = part.strip_prefix("say=") {
-                for (i, line) in list.split(';').enumerate() {
-                    let at = 60 + 20 * i as u64;
-                    if ticks == at && self.test_done & (2 << i) == 0 {
-                        self.test_done |= 2 << i;
-                        g.send_line(line)?;
+            let keys = crate::sys::env("PENRYN_TEST_CHAT_KEYS").unwrap_or_default();
+            for (i, k) in keys.split(',').enumerate() {
+                if ticks != open_at + 20 + 10 * i as u64 {
+                    continue;
+                }
+                match k {
+                    "tab" => {
+                        self.key(g, K_TAB, &[false; 512], v)?;
                     }
-                }
-            }
-            if part == "tab" && self.test_done & 1 != 0 && self.test_done & 0x8000 == 0 && ticks > 80 {
-                self.test_done |= 0x8000;
-                if self.list.is_some() {
-                    self.use_suggestion(g);
-                } else {
-                    self.show_list(true);
+                    "down" => {
+                        self.key(g, K_DOWN, &[false; 512], v)?;
+                    }
+                    "click" => {
+                        if let Some(gui) = gui {
+                            self.click(g, gui, mouse.0, mouse.1, 1, false, v)?;
+                        }
+                    }
+                    _ => {
+                        let found = k.strip_prefix("find=").or_else(|| k.strip_prefix("clickon="));
+                        if let (Some(t), Some(gui)) = (found, gui) {
+                            // The mouse onto the newest chat line holding `t`.
+                            let lines = visible(g, gui, true, self.scroll, crate::sys::now_ms());
+                            let bottom = math_floor(gui.height - 40.0);
+                            for (i, (mi, li, _)) in lines.iter().enumerate() {
+                                let l = &g.talk.msgs[*mi].wrapped.as_ref().unwrap().1[*li];
+                                let plain: String = l.iter().map(|r| r.1.as_str()).collect();
+                                if let Some(at) = plain.find(t) {
+                                    *mouse = (4.0 + gui.text_width(&plain[..at]) + 2.0, bottom - i as f32 * LINE - 4.0);
+                                    if k.starts_with("clickon=") {
+                                        self.click(g, gui, mouse.0, mouse.1, 1, false, v)?;
+                                    }
+                                    break;
+                                }
+                            }
+                        } else if let Some((x, y)) = k.strip_prefix("mouse=").and_then(|m| m.split_once(':')) {
+                            *mouse = (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+                        } else if let Some(t) = k.strip_prefix("type=") {
+                            self.type_text(g, t);
+                        }
+                    }
                 }
             }
         }
