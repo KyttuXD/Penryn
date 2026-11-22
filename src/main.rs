@@ -25,6 +25,7 @@ mod md5;
 mod moving;
 mod mobs;
 mod nbt;
+mod occlusion;
 mod physics;
 mod play;
 mod render;
@@ -36,6 +37,7 @@ mod sky;
 mod net;
 mod options;
 mod particles;
+mod perf;
 mod sys;
 mod weather;
 mod wire;
@@ -233,6 +235,9 @@ fn selftest() -> Result<(), String> {
     let z = zlib::store(&data);
     check("zlib stored round trip", alloc::format!("{}", zlib::inflate(&z, data.len()) == Some(data.clone())), "true");
     for (what, got, want) in skins::selftest() {
+        check(what, got, want);
+    }
+    for (what, got, want) in occlusion::selftest().into_iter().chain(render::selftest()) {
         check(what, got, want);
     }
     // Movement against vanilla's collision, in a made-up world (needs blocks.bin).

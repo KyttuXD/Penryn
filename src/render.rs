@@ -45,22 +45,53 @@ fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
     }
 }
 
-struct Mesh {
-    vbo: u32,
-    count: i32,
-}
+/// A section's quads are kept in one vertex buffer in 15 runs: the solid quads (drawn without
+/// the alpha test, so the card can reject hidden pixels early), the cut-out quads (leaves,
+/// plants, glass: the alpha test), each split by the way the face looks (BUCKETS), then the
+/// translucent ones (water, stained glass, ice).
+const RUNS: usize = 15;
+/// Facing runs per layer: 0..6 face down, up, north, south, west, east (the cull faces'
+/// order); 6 any other way (plants' crossed quads, slanted faces).
+const BUCKETS: usize = 7;
+const SOLID: usize = 0;
+const CUTOUT: usize = 1;
+const TRANSLUCENT_RUN: usize = 14;
+/// Quads one 16-bit index buffer reaches (65536 vertices).
+const MAX_QUADS_16: u32 = 16384;
 
 struct SectionMesh {
-    opaque: Mesh,
-    water: Mesh,
+    vbo: u32,
+    /// Where each run starts, in quads; first[RUNS] is the total.
+    first: [u32; RUNS + 1],
+}
+
+/// A section to draw this frame: its distance, buffer, runs, matrix and the facing runs that
+/// can face the camera.
+#[derive(Clone, Copy)]
+struct Draw {
+    d2: f64,
+    vbo: u32,
+    first: [u32; RUNS + 1],
+    m: [f32; 16],
+    faces: u8,
 }
 
 pub struct Renderer {
     meshes: BTreeMap<(i32, i32, i32), SectionMesh>,
     epoch: u32,
     cache: Vec<u16>,
-    opaque: Vec<CV>,
-    water: Vec<CV>,
+    runs: [Vec<CV>; RUNS],
+    upload: Vec<CV>,
+    order: Vec<Draw>,
+    /// Shared index buffers turning quads into two triangles each (0 1 2, 2 3 0, as vanilla's
+    /// quad index buffer): 16-bit for sections up to MAX_QUADS_16 quads, 32-bit (made when a
+    /// section needs it) for bigger ones.
+    index16: u32,
+    index32: u32,
+    index32_quads: u32,
+    /// Cave culling.
+    pub graph: crate::occlusion::Graph,
+    vis_stack: Vec<u16>,
     pub ui: Vec<V>,
     pub sections_drawn: u32,
     pub vertices_drawn: u32,
@@ -102,8 +133,14 @@ impl Renderer {
             meshes: BTreeMap::new(),
             epoch: 0,
             cache: alloc::vec![0; (P * P * P) as usize],
-            opaque: Vec::new(),
-            water: Vec::new(),
+            runs: Default::default(),
+            upload: Vec::new(),
+            order: Vec::new(),
+            index16: 0,
+            index32: 0,
+            index32_quads: 0,
+            graph: crate::occlusion::Graph::new(),
+            vis_stack: Vec::new(),
             ui: Vec::new(),
             sections_drawn: 0,
             vertices_drawn: 0,
@@ -172,10 +209,8 @@ impl Renderer {
     }
 
     fn drop_mesh(gl: &Gl, m: SectionMesh) {
-        for b in [m.opaque.vbo, m.water.vbo] {
-            if b != 0 {
-                unsafe { (gl.DeleteBuffers)(1, &b) };
-            }
+        if m.vbo != 0 {
+            unsafe { (gl.DeleteBuffers)(1, &m.vbo) };
         }
     }
 
@@ -187,6 +222,7 @@ impl Renderer {
             for (_, m) in old {
                 Self::drop_mesh(gl, m);
             }
+            self.graph.clear();
         }
         let start = crate::sys::now_ms();
         let (ex, ey, ez) = (eye[0] as i32 >> 4, (eye[1] as i32 - world.min_y) >> 4, eye[2] as i32 >> 4);
@@ -213,6 +249,8 @@ impl Renderer {
                 if let Some(m) = self.build(gl, world, b, k) {
                     self.meshes.insert(k, m);
                 }
+            } else {
+                self.graph.set(k, crate::occlusion::ALL);
             }
         }
     }
@@ -269,10 +307,18 @@ impl Renderer {
 
     fn build(&mut self, gl: &Gl, world: &World, b: &Blocks, k: (i32, i32, i32)) -> Option<SectionMesh> {
         if !self.fill_cache(world, k) {
+            self.graph.set(k, crate::occlusion::ALL);
             return None;
         }
-        self.opaque.clear();
-        self.water.clear();
+        {
+            let cache = &self.cache;
+            let solid = |i: usize| b.opaque_cube(cache[ci((i & 15) as i32, (i >> 8) as i32, ((i >> 4) & 15) as i32)]);
+            let vis = crate::occlusion::section_vis(&solid, &mut self.vis_stack);
+            self.graph.set(k, vis);
+        }
+        for r in self.runs.iter_mut() {
+            r.clear();
+        }
         // Biome colours for this section, made on first need: per 4-block layer, the biome ids
         // of a 20 x 20 area, blended over 5 x 5 (vanilla's default biome blend).
         let mut tints: Option<Vec<[[u8; 3]; 3]>> = None;
@@ -350,11 +396,13 @@ impl Renderer {
                                 continue;
                             }
                             let c = shade(tint, *light, if water { 190 } else { 255 });
-                            let out = if water { &mut self.water } else { &mut self.opaque };
+                            let mut quad = [cv([0.0; 3], [0.0; 2], c); 4];
                             for (i, cr) in corners.iter().enumerate() {
                                 let p = [fx + cr[0] as f32, fy + if cr[1] == 1 { top } else { 0.0 }, fz + cr[2] as f32];
-                                out.push(cv(p, corner_uv[i], c));
+                                quad[i] = cv(p, corner_uv[i], c);
                             }
+                            let run = if water { TRANSLUCENT_RUN } else { SOLID * BUCKETS + facing(&quad) };
+                            self.runs[run].extend_from_slice(&quad);
                         }
                         continue;
                     }
@@ -384,7 +432,7 @@ impl Renderer {
                         let light = q.light as f32 / 255.0;
                         // The face's outward direction, for ambient occlusion on boundary faces.
                         let edge = q.flags & blocks::Q_ON_EDGE != 0 && q.cull < 6;
-                        let out = if q.flags & blocks::Q_TRANSLUCENT != 0 { &mut self.water } else { &mut self.opaque };
+                        let mut quad = [cv([0.0; 3], [0.0; 2], [0; 4]); 4];
                         for i in 0..4 {
                             let p = q.pos[i];
                             let (px, py, pz) = (p[0] as f32 / 1024.0, p[1] as f32 / 1024.0, p[2] as f32 / 1024.0);
@@ -413,7 +461,7 @@ impl Renderer {
                                 let ao = if sides[0] && sides[1] { 0 } else { 3 - (sides[0] as usize + sides[1] as usize + c as usize) };
                                 k *= AO[ao];
                             }
-                            out.push(CV {
+                            quad[i] = CV {
                                 p: [
                                     (x * 1024) as i16 + q.pos[i][0] + off[0],
                                     (y * 1024) as i16 + q.pos[i][1] + off[1],
@@ -422,29 +470,73 @@ impl Renderer {
                                 _pad: 0,
                                 uv: [(q.uv[i][0] >> 1) as i16, (q.uv[i][1] >> 1) as i16],
                                 c: shade(base, k, 255),
-                            });
+                            };
                         }
+                        let run = if q.flags & blocks::Q_TRANSLUCENT != 0 {
+                            TRANSLUCENT_RUN
+                        } else if q.flags & blocks::Q_CUTOUT != 0 {
+                            CUTOUT * BUCKETS + facing(&quad)
+                        } else {
+                            SOLID * BUCKETS + facing(&quad)
+                        };
+                        self.runs[run].extend_from_slice(&quad);
                     }
                 }
             }
         }
-        if self.opaque.is_empty() && self.water.is_empty() {
+        let mut first = [0u32; RUNS + 1];
+        self.upload.clear();
+        for (i, r) in self.runs.iter().enumerate() {
+            first[i] = (self.upload.len() / 4) as u32;
+            self.upload.extend_from_slice(r);
+        }
+        first[RUNS] = (self.upload.len() / 4) as u32;
+        if self.upload.is_empty() {
             return None;
         }
-        let up = |v: &Vec<CV>| -> Mesh {
-            if v.is_empty() {
-                return Mesh { vbo: 0, count: 0 };
+        self.ensure_indices(gl, first[RUNS]);
+        let mut id = 0u32;
+        unsafe {
+            (gl.GenBuffers)(1, &mut id);
+            (gl.BindBuffer)(ARRAY_BUFFER, id);
+            (gl.BufferData)(ARRAY_BUFFER, (self.upload.len() * CSTRIDE as usize) as isize, self.upload.as_ptr() as *const c_void, STATIC_DRAW);
+            (gl.BindBuffer)(ARRAY_BUFFER, 0);
+        }
+        Some(SectionMesh { vbo: id, first })
+    }
+
+    /// The shared quad index buffers: the 16-bit one, and the 32-bit one grown to `quads`.
+    fn ensure_indices(&mut self, gl: &Gl, quads: u32) {
+        if self.index16 == 0 {
+            let mut ix: Vec<u16> = Vec::with_capacity(MAX_QUADS_16 as usize * 6);
+            for q in 0..MAX_QUADS_16 {
+                let v = (q * 4) as u16;
+                ix.extend_from_slice(&[v, v + 1, v + 2, v + 2, v + 3, v]);
             }
-            let mut id = 0u32;
             unsafe {
-                (gl.GenBuffers)(1, &mut id);
-                (gl.BindBuffer)(ARRAY_BUFFER, id);
-                (gl.BufferData)(ARRAY_BUFFER, (v.len() * CSTRIDE as usize) as isize, v.as_ptr() as *const c_void, STATIC_DRAW);
-                (gl.BindBuffer)(ARRAY_BUFFER, 0);
+                (gl.GenBuffers)(1, &mut self.index16);
+                (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index16);
+                (gl.BufferData)(ELEMENT_ARRAY_BUFFER, (ix.len() * 2) as isize, ix.as_ptr() as *const c_void, STATIC_DRAW);
+                (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, 0);
             }
-            Mesh { vbo: id, count: v.len() as i32 }
-        };
-        Some(SectionMesh { opaque: up(&self.opaque), water: up(&self.water) })
+        }
+        if quads > MAX_QUADS_16 && quads > self.index32_quads {
+            let n = quads.next_power_of_two();
+            let mut ix: Vec<u32> = Vec::with_capacity(n as usize * 6);
+            for q in 0..n {
+                let v = q * 4;
+                ix.extend_from_slice(&[v, v + 1, v + 2, v + 2, v + 3, v]);
+            }
+            unsafe {
+                if self.index32 == 0 {
+                    (gl.GenBuffers)(1, &mut self.index32);
+                }
+                (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index32);
+                (gl.BufferData)(ELEMENT_ARRAY_BUFFER, (ix.len() * 4) as isize, ix.as_ptr() as *const c_void, STATIC_DRAW);
+                (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, 0);
+            }
+            self.index32_quads = n;
+        }
     }
 
     /// Draws the world from `eye` looking along yaw/pitch (degrees, Minecraft's convention).
@@ -501,6 +593,7 @@ impl Renderer {
                 (gl.MatrixMode)(MODELVIEW);
             }
             sky_pass(&vf);
+            crate::perf::lap(crate::perf::S::Sky);
             unsafe {
                 let t: [f32; 16] = [1.0 / 32767.0, 0.0, 0.0, 0.0, 0.0, 1.0 / 32767.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
                 (gl.MatrixMode)(TEXTURE);
@@ -517,53 +610,51 @@ impl Renderer {
             }
         }
         let planes = frustum(&proj, &view);
-        let mut order: Vec<((i32, i32, i32), f64)> = Vec::new();
         let maxd = (view_chunks as f64 + 1.0) * 16.0;
-        for (&k, _) in self.meshes.iter() {
-            let c = [
-                (k.0 * 16 + 8) as f64 - eye[0],
-                (world.min_y + k.1 * 16 + 8) as f64 - eye[1],
-                (k.2 * 16 + 8) as f64 - eye[2],
-            ];
+        let layers = world.height / 16;
+        let cam = (math::ifloor(eye[0]) >> 4, (math::ifloor(eye[1]) - world.min_y) >> 4, math::ifloor(eye[2]) >> 4);
+        self.graph.update(cam, view_chunks + 1, layers);
+        self.order.clear();
+        for (&k, mesh) in self.meshes.iter() {
+            let lo = [(k.0 * 16) as f64 - eye[0], (world.min_y + k.1 * 16) as f64 - eye[1], (k.2 * 16) as f64 - eye[2]];
+            let c = [lo[0] + 8.0, lo[1] + 8.0, lo[2] + 8.0];
             let d2 = c[0] * c[0] + c[2] * c[2];
             if d2 > maxd * maxd {
                 continue;
             }
-            if !in_frustum(&planes, [c[0] - 8.0, c[1] - 8.0, c[2] - 8.0], [c[0] + 8.0, c[1] + 8.0, c[2] + 8.0]) {
+            if !in_frustum(&planes, lo, [lo[0] + 16.0, lo[1] + 16.0, lo[2] + 16.0]) {
                 continue;
             }
-            order.push((k, d2 + c[1] * c[1]));
-        }
-        self.sections_drawn = order.len() as u32;
-        let set = |k: &(i32, i32, i32)| {
-            let t = [
-                (k.0 * 16) as f64 - eye[0],
-                (world.min_y + k.1 * 16) as f64 - eye[1],
-                (k.2 * 16) as f64 - eye[2],
-            ];
-            let mut m = translate(&view, t);
+            if !self.graph.visible(k) {
+                continue;
+            }
+            let mut m = translate(&view, lo);
             for i in 0..12 {
                 m[i] /= 1024.0;
             }
-            unsafe { (gl.LoadMatrixf)(m.as_ptr()) };
-        };
-        let draw = |m: &Mesh| unsafe {
-            (gl.BindBuffer)(ARRAY_BUFFER, m.vbo);
-            (gl.VertexPointer)(3, SHORT, CSTRIDE, core::ptr::null());
-            (gl.TexCoordPointer)(2, SHORT, CSTRIDE, 8 as *const c_void);
-            (gl.ColorPointer)(4, UNSIGNED_BYTE, CSTRIDE, 12 as *const c_void);
-            (gl.DrawArrays)(QUADS, 0, m.count);
-        };
-        self.vertices_drawn = order.iter().map(|(k, _)| (self.meshes[k].opaque.count + self.meshes[k].water.count) as u32).sum();
-        for (k, _) in order.iter() {
-            let m = &self.meshes[k];
-            if m.opaque.count > 0 {
-                set(k);
-                draw(&m.opaque);
+            self.order.push(Draw { d2: d2 + c[1] * c[1], vbo: mesh.vbo, first: mesh.first, m, faces: faces_seen(lo) });
+        }
+        // Near to far: what is in front hides the rest before it is shaded.
+        self.order.sort_unstable_by(|a, b| a.d2.partial_cmp(&b.d2).unwrap_or(core::cmp::Ordering::Equal));
+        self.sections_drawn = self.order.len() as u32;
+        let mut quads = 0u32;
+        unsafe {
+            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index16);
+            // Solid quads first, without the alpha test; then the cut-out ones with it.
+            (gl.Disable)(ALPHA_TEST);
+        }
+        for layer in [SOLID, CUTOUT] {
+            if layer == CUTOUT {
+                unsafe { (gl.Enable)(ALPHA_TEST) };
+            }
+            for d in self.order.iter() {
+                quads += draw_runs(gl, d, layer * BUCKETS, d.faces as u32 | 1 << 6, self.index16, self.index32);
             }
         }
+        crate::perf::lap(crate::perf::S::World);
         // Entities, between the opaque world and the water (vanilla's order).
         unsafe {
+            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, 0);
             (gl.BindBuffer)(ARRAY_BUFFER, 0);
             (gl.MatrixMode)(TEXTURE);
             (gl.LoadIdentity)();
@@ -581,24 +672,25 @@ impl Renderer {
             (gl.MatrixMode)(MODELVIEW);
             (gl.Enable)(TEXTURE_2D);
             (gl.BindTexture)(TEXTURE_2D, self.atlas);
+            (gl.EnableClientState)(VERTEX_ARRAY);
+            (gl.EnableClientState)(COLOR_ARRAY);
             (gl.EnableClientState)(TEXTURE_COORD_ARRAY);
             (gl.Enable)(ALPHA_TEST);
         }
         // Water, far to near, blended, without writing depth.
-        order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
         unsafe {
             (gl.Enable)(BLEND);
             (gl.BlendFunc)(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
             (gl.DepthMask)(0);
             (gl.AlphaFunc)(GREATER, 0.004);
+            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index16);
         }
-        for (k, _) in order.iter() {
-            let m = &self.meshes[k];
-            if m.water.count > 0 {
-                set(k);
-                draw(&m.water);
-            }
+        for d in self.order.iter().rev() {
+            quads += draw_runs(gl, d, TRANSLUCENT_RUN, 1, self.index16, self.index32);
         }
+        self.vertices_drawn = quads * 4;
+        unsafe { (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, 0) };
+        crate::perf::lap(crate::perf::S::Water);
         unsafe {
             (gl.DepthMask)(1);
             (gl.BindBuffer)(ARRAY_BUFFER, 0);
@@ -740,6 +832,108 @@ impl Renderer {
     }
 }
 
+/// Which facing runs (bit per BUCKETS entry) of a section whose corner is at `lo` (relative to
+/// the eye) can face the camera: a face looking up is seen only from above its plane, and so on.
+/// Faces stay within a block or two of their section (models reach out a block, plants move).
+fn faces_seen(lo: [f64; 3]) -> u8 {
+    const M: f64 = 2.0;
+    let mut f = 0u8;
+    // 0 down, 1 up, 2 north (-z), 3 south (+z), 4 west (-x), 5 east (+x)
+    for (axis, neg, pos) in [(1, 0, 1), (2, 2, 3), (0, 4, 5)] {
+        if lo[axis] + 16.0 + M > 0.0 {
+            f |= 1 << neg;
+        }
+        if lo[axis] - M < 0.0 {
+            f |= 1 << pos;
+        }
+    }
+    f
+}
+
+/// Which facing run a quad goes in: its normal (from the diagonals, counter-clockwise front)
+/// when it lies along an axis, else 6.
+fn facing(q: &[CV; 4]) -> usize {
+    let d = |a: usize, b: usize| [q[b].p[0] as i32 - q[a].p[0] as i32, q[b].p[1] as i32 - q[a].p[1] as i32, q[b].p[2] as i32 - q[a].p[2] as i32];
+    let (a, b) = (d(0, 2), d(1, 3));
+    let n = [
+        a[1] as i64 * b[2] as i64 - a[2] as i64 * b[1] as i64,
+        a[2] as i64 * b[0] as i64 - a[0] as i64 * b[2] as i64,
+        a[0] as i64 * b[1] as i64 - a[1] as i64 * b[0] as i64,
+    ];
+    match (n[0].signum(), n[1].signum(), n[2].signum()) {
+        (0, -1, 0) => 0,
+        (0, 1, 0) => 1,
+        (0, 0, -1) => 2,
+        (0, 0, 1) => 3,
+        (-1, 0, 0) => 4,
+        (1, 0, 0) => 5,
+        _ => 6,
+    }
+}
+
+/// Draws the runs `base..base + 7` picked by `mask` (or just `base` for the translucent run,
+/// mask 1) of a section in one call, merging runs that touch. Returns the quads drawn.
+fn draw_runs(gl: &Gl, d: &Draw, base: usize, mask: u32, index16: u32, index32: u32) -> u32 {
+    let mut counts = [0i32; BUCKETS];
+    let mut offs = [core::ptr::null::<c_void>(); BUCKETS];
+    let mut n = 0usize;
+    let mut quads = 0u32;
+    let mut open: Option<(u32, u32)> = None;
+    let big = d.first[RUNS] > MAX_QUADS_16;
+    let isz = if big { 4 } else { 2 };
+    let mut flush = |r: (u32, u32), n: &mut usize| {
+        counts[*n] = (r.1 * 6) as i32;
+        offs[*n] = (r.0 as usize * 6 * isz) as *const c_void;
+        *n += 1;
+    };
+    let list: &[usize] = if base == TRANSLUCENT_RUN { &[0] } else { &[0, 1, 2, 3, 4, 5, 6] };
+    for &b in list {
+        if mask >> b & 1 == 0 {
+            continue;
+        }
+        let run = base + b;
+        let (s, e) = (d.first[run], d.first[run + 1]);
+        if s == e {
+            continue;
+        }
+        quads += e - s;
+        open = match open {
+            Some((os, oc)) if os + oc == s => Some((os, oc + e - s)),
+            Some(r) => {
+                flush(r, &mut n);
+                Some((s, e - s))
+            }
+            None => Some((s, e - s)),
+        };
+    }
+    if let Some(r) = open {
+        flush(r, &mut n);
+    }
+    if n == 0 {
+        return 0;
+    }
+    unsafe {
+        (gl.LoadMatrixf)(d.m.as_ptr());
+        (gl.BindBuffer)(ARRAY_BUFFER, d.vbo);
+        (gl.VertexPointer)(3, SHORT, CSTRIDE, core::ptr::null());
+        (gl.TexCoordPointer)(2, SHORT, CSTRIDE, 8 as *const c_void);
+        (gl.ColorPointer)(4, UNSIGNED_BYTE, CSTRIDE, 12 as *const c_void);
+        if big {
+            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, index32);
+        }
+        let ty = if big { UNSIGNED_INT } else { UNSIGNED_SHORT };
+        if n == 1 {
+            (gl.DrawElements)(TRIANGLES, counts[0], ty, offs[0]);
+        } else {
+            (gl.MultiDrawElements)(TRIANGLES, counts.as_ptr(), ty, offs.as_ptr(), n as i32);
+        }
+        if big {
+            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, index16);
+        }
+    }
+    quads
+}
+
 pub fn perspective_pub(fov_deg: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
     perspective(fov_deg, aspect, near, far)
 }
@@ -807,4 +1001,25 @@ fn in_frustum(planes: &[[f64; 4]; 6], lo: [f64; 3], hi: [f64; 3]) -> bool {
         }
     }
     true
+}
+
+/// Checks for `penryn selftest`: quads land in the right facing run, and a run is drawn
+/// exactly when its faces can be seen.
+pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
+    let mut out = Vec::new();
+    let mut names = String::new();
+    for (_, corners, _) in FACES.iter() {
+        let mut q = [cv([0.0; 3], [0.0; 2], [0; 4]); 4];
+        for (i, c) in corners.iter().enumerate() {
+            q[i] = cv([c[0] as f32 + 3.0, c[1] as f32 + 5.0, c[2] as f32 + 7.0], [0.0; 2], [0; 4]);
+        }
+        names.push_str(&alloc::format!("{}", facing(&q)));
+    }
+    // FACES: up, down, east, west, south, north.
+    out.push(("render facing runs", names, "105432"));
+    let cross = [cv([0.0, 0.0, 0.0], [0.0; 2], [0; 4]), cv([1.0, 0.0, 1.0], [0.0; 2], [0; 4]), cv([1.0, 1.0, 1.0], [0.0; 2], [0; 4]), cv([0.0, 1.0, 0.0], [0.0; 2], [0; 4])];
+    out.push(("render slanted run", alloc::format!("{}", facing(&cross)), "6"));
+    // A section far below, east and south of the eye: its tops, west and north faces show.
+    out.push(("render faces seen", alloc::format!("{:06b} {:06b}", faces_seen([40.0, -60.0, 30.0]), faces_seen([-8.0, -8.0, -8.0])), "010110 111111"));
+    out
 }

@@ -286,6 +286,7 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
     unsafe { (v.sdl.SDL_GL_SetSwapInterval)(settings.on(O::Vsync) as i32) };
     let view: i32 = settings.int(O::RenderDistance);
     say!("OpenGL: {} ({})", v.gl_string(sdl::RENDERER), v.gl_string(sdl::VERSION));
+    crate::perf::init(&v.gl);
     let mut app = App {
         v,
         r: Renderer::new(),
@@ -445,6 +446,7 @@ impl App {
                 next_tick += 50;
             }
             let partial = 1.0 - ((next_tick - now) as f64 / 50.0).clamp(0.0, 1.0);
+            crate::perf::lap(crate::perf::S::Logic);
             self.draw(g, partial);
             // The Max Framerate option (vanilla's FramerateLimitTracker), on top of vsync.
             if let Some(fps) = self.menu.o.frame_limit() {
@@ -454,6 +456,7 @@ impl App {
                     sys::sleep_ms((due - t) as u32);
                 }
             }
+            crate::perf::lap(crate::perf::S::Sleep);
             self.frame_shown = sys::now_ms();
             if let Some(shot) = self.test_shot.as_ref() {
                 // PENRYN_TEST_INPUT "m": wait for a piston in motion.
@@ -484,6 +487,7 @@ impl App {
                         if self.mover.on_ground { " ground" } else { "" },
                         if self.mover.horizontal_collision { " wall" } else { "" }
                     );
+                    say!("perf: {}, {} sections, {}k vertices", crate::perf::report(self.frames), self.r.sections_drawn, self.r.vertices_drawn / 1000);
                     if self.mover.horizontal_collision {
                         // What is around the player at feet and head height.
                         let (bx, by, bz) = (math::ifloor(p[0]), math::ifloor(p[1]), math::ifloor(p[2]));
@@ -1528,6 +1532,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             lerp(self.prev_pos[2], self.mover.pos[2]),
         ];
         self.r.update(&self.v.gl, &mut g.world, &g.blocks, eye, 6);
+        crate::perf::lap(crate::perf::S::Mesh);
         // GameRenderer.getFov: the FOV option times the modifier, narrower under water.
         {
             use crate::options::O;
@@ -1605,16 +1610,20 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     crate::skins::draw(gl, view, eye, entities, pf, own, t);
                 }
                 crate::entities::draw_items(gl, view, eye, entities, pf, icons, blocks_ref, atlas, atlas_size);
+                crate::perf::lap(crate::perf::S::Entities);
                 if let Some(gui) = gui_ref {
                     crate::signs::draw_world(gl, view, eye, block_entities, world_ref, blocks_ref, gui);
                 }
                 crate::moving::draw(gl, view, eye, world_ref, blocks_ref, atlas, pf);
+                crate::perf::lap(crate::perf::S::BlockEntities);
                 if let (Some(gui), false, true, None) = (gui_ref, dim, clouds_on, fog) {
                     sky_ref.draw_clouds(gl, view, gui, eye, game_time, day, radius);
                 }
+                crate::perf::lap(crate::perf::S::Clouds);
                 if let Some(pt) = parts.as_deref_mut() {
                     pt.draw(gl, view, eye, pf, atlas);
                 }
+                crate::perf::lap(crate::perf::S::Particles);
             },
             &mut |view| {
                 if let Some(f) = fog.as_ref() {
@@ -1626,6 +1635,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         );
         // Rain, snow and lightning, over the water (vanilla: after the translucent terrain).
         self.weather.draw(&self.v.gl, &world_view, &g.world, &g.blocks, eye, pf, rain, 0.2 + 0.8 * rain_light);
+        crate::perf::lap(crate::perf::S::Weather);
         let hit = if self.screen == Screen::Play { self.pick(g) } else { None };
         if let Some(hh) = hit {
             let s = g.world.get(hh.pos[0], hh.pos[1], hh.pos[2]);
@@ -1663,9 +1673,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if self.menu.o.on(crate::options::O::BobView) { (-walk, bob) } else { (0.0, 0.0) },
             );
         }
+        crate::perf::lap(crate::perf::S::Hand);
         // ---- 2D: vanilla's HUD and screens
         let Some(mut gui) = self.gui.take() else {
             self.v.swap();
+            crate::perf::lap(crate::perf::S::Swap);
             return;
         };
         gui.begin(w, h);
@@ -1750,7 +1762,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         gui.flush(&self.v.gl, w, h);
         self.gui = Some(gui);
+        crate::perf::lap(crate::perf::S::Gui);
         self.v.swap();
+        crate::perf::lap(crate::perf::S::Swap);
     }
 }
 

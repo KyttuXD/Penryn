@@ -151,6 +151,10 @@ pub const NEAREST_MIPMAP_LINEAR: i32 = 0x2702;
 pub const UNPACK_ALIGNMENT: u32 = 0x0CF5;
 pub const PACK_ALIGNMENT: u32 = 0x0D05;
 pub const VERSION: u32 = 0x1F02;
+pub const TRIANGLES: u32 = 4;
+pub const UNSIGNED_SHORT: u32 = 0x1403;
+pub const UNSIGNED_INT: u32 = 0x1405;
+pub const ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 
 api! { Gl, "gl", "system",
     Clear(u32);
@@ -187,6 +191,9 @@ api! { Gl, "gl", "system",
     TexCoordPointer(i32, u32, i32, *const c_void);
     AlphaFunc(u32, f32);
     PixelStorei(u32, i32);
+    Finish();
+    DrawElements(u32, i32, u32, *const c_void);
+    MultiDrawElements(u32, *const i32, u32, *const *const c_void, i32);
 }
 
 pub struct Video {
