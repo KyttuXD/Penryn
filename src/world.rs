@@ -32,6 +32,8 @@ pub struct World {
     pub epoch: u32,
     /// Per biome registry id: grass, foliage, water and sky colours.
     pub biome_colours: Vec<[u32; 4]>,
+    /// The server's biome names, by registry id.
+    pub biome_names: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -100,6 +102,7 @@ impl World {
             dirty: BTreeSet::new(),
             epoch: 0,
             biome_colours: Vec::new(),
+            biome_names: Vec::new(),
         }
     }
 
@@ -180,6 +183,7 @@ impl World {
     pub fn set_biomes(&mut self, names: &[String], blocks: &crate::blocks::Blocks) {
         let plains = [0x91BD59, 0x77AB2F, 0x3F76E4, 0x78A7FF];
         self.biome_colours = names.iter().map(|n| blocks.biomes.get(n).copied().unwrap_or(plains)).collect();
+        self.biome_names = names.to_vec();
     }
 
     /// The biome registry id at a block (its 4x4x4 cell); 0 where nothing is loaded.

@@ -84,6 +84,9 @@ pub struct Game {
     pub move_speed: f64,
     pub jump_strength: f64,
     pub fly_speed: f32,
+    /// The rain and thunder levels (ClientboundGameEventPacket 1, 2, 7 and 8).
+    pub rain_level: f32,
+    pub thunder_level: f32,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -288,6 +291,8 @@ impl Game {
             move_speed: 0.1f32 as f64,
             jump_strength: 0.42f32 as f64,
             fly_speed: 0.05,
+            rain_level: 0.0,
+            thunder_level: 0.0,
         })
     }
 
@@ -499,8 +504,14 @@ impl Game {
             play::C_GAME_EVENT => {
                 let e = r.u8().unwrap_or(0);
                 let v = r.f32().unwrap_or(0.0);
-                if e == 3 {
-                    self.game_mode = v as i32;
+                match e {
+                    3 => self.game_mode = v as i32,
+                    // Start raining: from level 0 up; stop: from 1 down (the server sends the levels).
+                    1 => self.rain_level = 0.0,
+                    2 => self.rain_level = 1.0,
+                    7 => self.rain_level = v.clamp(0.0, 1.0),
+                    8 => self.thunder_level = v.clamp(0.0, 1.0),
+                    _ => {}
                 }
             }
             play::C_SYSTEM_CHAT => {
@@ -829,6 +840,9 @@ impl Game {
         let _seed = r.i64();
         self.game_mode = r.varint().unwrap_or(0);
         self.world.set_dimension(&dim);
+        // A new level starts dry; the server sends its weather again.
+        self.rain_level = 0.0;
+        self.thunder_level = 0.0;
     }
 
     pub fn add_chat(&mut self, line: String) {
