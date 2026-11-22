@@ -276,6 +276,39 @@ pub fn component(patch: &[u8], kind: i32) -> Option<&[u8]> {
     None
 }
 
+/// A patch with one component's value set (added, or replaced).
+pub fn set_component(patch: &[u8], kind: i32, value: &[u8]) -> Vec<u8> {
+    let mut entries: Vec<(i32, &[u8])> = Vec::new();
+    let mut removed: Vec<i32> = Vec::new();
+    let mut r = In::new(patch);
+    if let (Some(add), Some(remove)) = (r.varint(), r.varint()) {
+        for _ in 0..add {
+            let (Some(k), Some(l)) = (r.varint(), r.varint()) else { break };
+            let Some(v) = r.take(l as usize) else { break };
+            if k != kind {
+                entries.push((k, v));
+            }
+        }
+        for _ in 0..remove {
+            if let Some(k) = r.varint() {
+                if k != kind {
+                    removed.push(k);
+                }
+            }
+        }
+    }
+    entries.push((kind, value));
+    let mut o = Out::new();
+    o.varint(entries.len() as i32).varint(removed.len() as i32);
+    for (k, v) in entries {
+        o.varint(k).varint(v.len() as i32).bytes(v);
+    }
+    for k in removed {
+        o.varint(k);
+    }
+    o.b
+}
+
 /// The name a stack shows: its custom_name, its item_name, or the item's own.
 pub fn stack_name(g: &Game, item: i32, patch: &[u8]) -> String {
     for kind in [6, 9] {
@@ -1835,6 +1868,8 @@ pub fn selftest(data: Option<&[u8]>) -> Vec<(&'static str, String, &'static str)
     v.push(("furnace arrow at half", format!("{}", libm_ceil(0.5 * 24.0)), "12"));
     let mut p = Out::new();
     p.varint(2).varint(0).varint(48).varint(1).varint(7).varint(6).varint(3).bytes(&[10, 0, 0]);
+    let q = set_component(&p.b, 48, &[9]);
+    v.push(("component replaced in a patch", format!("{:?} {:?}", component(&q, 48), component(&q, 6)), "Some([9]) Some([10, 0, 0])"));
     v.push(("component in a patch (map_id)", format!("{:?} {:?}", component(&p.b, 48), crate::maps::map_id(&p.b)), "Some([7]) Some(7)"));
     // A stonecutter recipe list: no property sets, one recipe (stone -> 2 stone slabs).
     let mut rec = Out::new();

@@ -1078,6 +1078,13 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         if self.test_keys.contains('3') {
             self.debug = true;
         }
+        // G: use (right click) the entity under the crosshair, sneaking with v (tests).
+        if self.test_keys.contains('G') && self.screen == Screen::Play && g.loaded_sent && sys::now_ms() / 50 % 20 == 0 {
+            if let Some((id, _, at)) = self.pick_entity(g) {
+                say!("using entity {}", id);
+                g.interact(id, at, self.keys[K_LSHIFT])?;
+            }
+        }
         if self.test_keys.contains('A') && g.loaded_sent && sys::now_ms() / 50 % 10 == 0 {
             if let Some((id, d, _)) = self.pick_entity(g) {
                 say!("attacking entity {} at {:.2}", id, d);
@@ -1115,6 +1122,17 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         // click=X:Y (GUI units): a left click on the open screen, one each half second.
         if self.screen != Screen::Play && self.test_keys.contains("click=") {
             self.test_ticks += 1;
+            // type=TEXT: typed into the open screen after the first click; ptr=X:Y: where the
+            // mouse rests after the last one (menus.rs, books.rs).
+            if self.test_ticks == 5 {
+                if let Some(t) = self.test_keys.split(',').find_map(|t| t.strip_prefix("type=")).map(String::from) {
+                    if self.screen == Screen::Inventory {
+                        crate::menus::text(g, &t)?;
+                    } else if let (Some(gui), Some(b)) = (self.gui.as_ref(), self.book.as_mut()) {
+                        crate::books::text(gui, b, &t);
+                    }
+                }
+            }
             if self.test_ticks % 10 == 1 {
                 let clicks: Vec<String> = self.test_keys.split(',').filter_map(|t| t.strip_prefix("click=")).map(String::from).collect();
                 if let Some((x, y)) = clicks.get(self.test_ticks / 10 - 1).and_then(|c| c.split_once(':')) {
@@ -1126,16 +1144,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     if let crate::options::Ev::Click = self.menu.release() {
                         self.ui_click();
                     }
-                } else if self.test_ticks / 10 == clicks.len() + 1 && self.test_ticks % 10 == 1 {
-                    // type=TEXT: typed into the open screen after the clicks; ptr=X:Y: where the
-                    // mouse rests then (menus.rs, books.rs).
-                    if let Some(t) = self.test_keys.split(',').find_map(|t| t.strip_prefix("type=")).map(String::from) {
-                        if self.screen == Screen::Inventory {
-                            crate::menus::text(g, &t)?;
-                        } else if let (Some(gui), Some(b)) = (self.gui.as_ref(), self.book.as_mut()) {
-                            crate::books::text(gui, b, &t);
-                        }
-                    }
+                }
+                if self.test_ticks / 10 == clicks.len() + 1 && self.test_ticks % 10 == 1 {
                     if let Some((x, y)) = self.test_keys.split(',').find_map(|t| t.strip_prefix("ptr=")).and_then(|c| c.split_once(':')) {
                         self.mouse = (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
                     }
@@ -1145,7 +1155,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         if self.test_keys.contains('L') {
             self.left_down = true;
         }
-        if self.test_keys.contains('R') && self.screen == Screen::Play {
+        // rwait=TICKS: R starts that many ticks after joining (menus.rs counts them).
+        let rwait: u32 = self.test_keys.split(',').find_map(|t| t.strip_prefix("rwait=")).and_then(|v| v.parse().ok()).unwrap_or(0);
+        if self.test_keys.contains('R') && self.screen == Screen::Play && g.menus.ticks >= rwait {
             self.right_down = true;
         }
         for part in self.test_keys.split(',') {

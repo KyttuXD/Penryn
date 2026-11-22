@@ -278,7 +278,23 @@ fn save(g: &mut Game, b: &mut Book, sign: bool) -> Result<(), String> {
     if let Some(e) = b.edit.as_mut() {
         e.changed = false;
     }
+    // BookEditScreen.saveChanges also changes the stack in hand at once.
+    if !sign {
+        let mut v = Out::new();
+        v.varint(pages.len() as i32);
+        for p in pages.iter() {
+            v.string(p).bool(false);
+        }
+        let i = if e_slot(b) == 40 { 45 } else { 36 + e_slot(b) as usize };
+        if let Some(p) = g.creative.patches.get_mut(i) {
+            *p = crate::menus::set_component(p, 56, &v.b);
+        }
+    }
     g.conn.send(S_EDIT_BOOK, &o)
+}
+
+fn e_slot(b: &Book) -> i32 {
+    b.edit.as_ref().map_or(0, |e| e.slot)
 }
 
 /// A click; true when the book closes.
