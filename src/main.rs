@@ -262,7 +262,7 @@ fn selftest() -> Result<(), String> {
     let data: Vec<u8> = (0..70000u32).map(|i| (i * 7 % 251) as u8).collect();
     let z = zlib::store(&data);
     check("zlib stored round trip", alloc::format!("{}", zlib::inflate(&z, data.len()) == Some(data.clone())), "true");
-    for (what, got, want) in skins::selftest() {
+    for (what, got, want) in skins::selftest().into_iter().chain(entities::selftest()) {
         check(what, got, want);
     }
     for (what, got, want) in json::selftest().into_iter().chain(servers::selftest()).chain(title::selftest()).chain(multiplayer::selftest()) {
