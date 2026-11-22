@@ -395,8 +395,17 @@ pub fn read_urandom(n: usize) -> Option<Vec<u8>> {
 
 /// Writes `data` to `path`, readable by its owner only (0600).
 pub fn write_file_private(path: &str, data: &[u8]) -> bool {
+    write_file_mode(path, data, 0o600)
+}
+
+/// Writes `data` to `path` with the usual file mode (0644), as a screenshot is saved.
+pub fn write_file_readable(path: &str, data: &[u8]) -> bool {
+    write_file_mode(path, data, 0o644)
+}
+
+fn write_file_mode(path: &str, data: &[u8], mode: c_int) -> bool {
     let p = cstr(path);
-    let fd = unsafe { open(p.as_ptr() as *const c_char, O_WRONLY_CREAT_TRUNC, 0o600) };
+    let fd = unsafe { open(p.as_ptr() as *const c_char, O_WRONLY_CREAT_TRUNC, mode) };
     if fd < 0 {
         return false;
     }

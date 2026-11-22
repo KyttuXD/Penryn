@@ -131,6 +131,29 @@ pub fn glfw_button(sdl: u8) -> u8 {
     }
 }
 
+/// The character a keyboard key types (lower case), by SDL scancode: what a key that opens the
+/// chat also sends as text (the game drops that first character).
+pub fn kb_char(sc: u16) -> Option<char> {
+    Some(match sc {
+        4..=29 => (b'a' + (sc - 4) as u8) as char,
+        30..=38 => (b'1' + (sc - 30) as u8) as char,
+        39 => '0',
+        44 => ' ',
+        45 => '-',
+        46 => '=',
+        47 => '[',
+        48 => ']',
+        49 => '\\',
+        51 => ';',
+        52 => '\'',
+        53 => '`',
+        54 => ',',
+        55 => '.',
+        56 => '/',
+        _ => return None,
+    })
+}
+
 /// The options.txt name of a keyboard key (InputConstants: "key.keyboard.w"), by SDL scancode.
 pub fn kb_name(sc: u16) -> Option<String> {
     let s = match sc {
@@ -410,5 +433,6 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     check("written line", format!("{}", text.contains("key_key.jump:key.mouse.4\n")), "true");
     check("read back", format!("{:?}", Keymap::load(&o).get(B::Jump)), "Mouse(3)");
     check("hotbar slot", format!("{:?} {:?}", B::hotbar(4).hotbar_slot(), B::Forward.hotbar_slot()), "Some(4) None");
+    check("chat key typed char", format!("{:?} {:?} {:?}", kb_char(28), kb_char(56), kb_char(79)), "Some('y') Some('/') None");
     out
 }

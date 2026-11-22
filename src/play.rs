@@ -246,6 +246,14 @@ impl App {
         }
     }
 
+    /// The character a binding's key types, when it is a keyboard key.
+    fn bound_char(&self, b: B) -> Option<char> {
+        match self.menu.keys.get(b) {
+            Key::Kb(sc) => crate::keybinds::kb_char(sc),
+            _ => None,
+        }
+    }
+
     /// Sneaking: the sneak binding held, or toggled on (Options' toggleCrouch).
     fn sneaking(&self) -> bool {
         self.screen == Screen::Play && if self.menu.o.on(crate::options::O::ToggleCrouch) { self.sneak_toggle } else { self.held(B::Sneak) }
@@ -377,7 +385,7 @@ impl App {
             path = format!("{}_{}.png", base, n);
             n += 1;
         }
-        if sys::write_file_private(&path, &png) {
+        if sys::write_file_readable(&path, &png) {
             say!("screenshot: {}", path);
         } else {
             say!("cannot save screenshot {}", path);
@@ -1147,14 +1155,15 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             return Ok(());
         }
         match b {
+            // The key that opens the chat also arrives as text: its character is dropped.
             B::Chat => {
                 self.set_screen(Screen::Chat);
-                self.skip_text = Some(('t', sys::now_ms()));
+                self.skip_text = self.bound_char(B::Chat).map(|c| (c, sys::now_ms()));
             }
             B::Command => {
                 self.set_screen(Screen::Chat);
                 self.chat_line = String::from("/");
-                self.skip_text = Some(('/', sys::now_ms()));
+                self.skip_text = self.bound_char(B::Command).map(|c| (c, sys::now_ms()));
             }
             B::Inventory => self.open_inventory(g, 'e'),
             B::Drop => {
