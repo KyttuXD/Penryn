@@ -12,6 +12,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// How far the join on its thread got, for ConnectScreen (title.rs): 0 connecting, 1 logging
+/// in (the session server), 2 encrypting, 3 joining the world.
+pub static JOIN_STAGE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+fn stage(s: u8) {
+    JOIN_STAGE.store(s, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// A signed-in Minecraft account (from the relay).
 #[derive(Clone)]
 pub struct Account {
@@ -212,6 +220,7 @@ impl Game {
                     let s = random_bytes(16);
                     let mut secret = [0u8; 16];
                     secret.copy_from_slice(&s);
+                    stage(1);
                     if authenticate {
                         let a = account.ok_or(
                             "this is an online-mode server: sign in with a Microsoft account first (penryn login)",
@@ -224,6 +233,7 @@ impl Game {
                             return Err(format!("Mojang refused the join ({}): {}", resp.status, resp.text()));
                         }
                     }
+                    stage(2);
                     let mut pad = random_bytes(512).into_iter().cycle();
                     let mut rnd = || pad.next().unwrap_or(7);
                     let es = rsa.encrypt(&secret, &mut rnd).ok_or("encryption failed")?;
@@ -253,6 +263,7 @@ impl Game {
                     final_uuid = u;
                     let n = r.string().unwrap_or_default();
                     crate::say!("logged in as {} ({})", n, uuid_text(&u));
+                    stage(3);
                     c.send(login::S_ACKNOWLEDGED, &Out::new())?;
                     break;
                 }
@@ -1179,9 +1190,13 @@ fn configure(
                 }
             }
             config::C_RESOURCE_PACK_PUSH => {
-                // Accept (we do not download it): 3 accepted, then 0 loaded.
+                // Accept (we do not download it): 3 accepted, then 0 loaded; 1 declined when
+                // the server's Resource Packs setting is Disabled (the server list's Edit).
                 let u = r.uuid().unwrap_or([0; 16]);
-                for status in [3, 0] {
+                let declined: &[i32] = &[1];
+                let accepted: &[i32] = &[3, 0];
+                let statuses = if crate::servers::join_pack() == crate::servers::Pack::Disabled { declined } else { accepted };
+                for &status in statuses {
                     let mut o = Out::new();
                     o.bytes(&u).varint(status);
                     c.send(config::S_RESOURCE_PACK, &o)?;

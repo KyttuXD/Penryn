@@ -25,6 +25,18 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 
 ## What it does
 
+- **Starts like Minecraft**: vanilla's title screen (the turning panorama, the logo and edition,
+  the pulsing yellow splash with its date specials, "Minecraft 26.3", the copyright, Options...,
+  Quit Game, the accessibility button) and its multiplayer screens: the server list in
+  `servers.dat` (vanilla's own format, so a Minecraft install's file works) with each server's
+  ping bars, MOTD in colour, players online with the names in a tooltip, favicon and
+  incompatible versions marked; Join Server, double click, Direct Connection, Add Server and
+  Edit (name, address, resource packs Enabled / Disabled / Prompt), Delete with its question,
+  Refresh, moving servers up and down, and LAN worlds found on the local network. Then
+  "Connecting to the server...", "Loading terrain...", the disconnected screen with the
+  server's reason, and the pause menu's Disconnect back to the server list. Singleplayer and
+  Realms are there but greyed out (Penryn has no integrated server). Its pictures are in
+  `menu.bin` (optional); `penryn HOST` still joins a server straight away.
 - **Joins 26.3 servers** (protocol 777): offline mode, or online mode signed in with a Microsoft
   account that owns the game. Encryption (AES-128-CFB8, RSA) and compression are built in.
 - **Draws the world as vanilla's models**: every block state's own block model (variants,
@@ -93,6 +105,9 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 
 ## Not done yet
 
+- Menus: no Singleplayer, Realms, friends list, language or credits screens; server addresses
+  are not looked up as SRV records; no server resource pack download (the Resource Packs setting
+  only declines them when Disabled).
 - No recipe book. The creative inventory draws potions and tipped arrows untinted and without
   the enchantment glint, and has no drag-splitting of stacks.
 - No ambient cave sounds or biome music (music.game everywhere).
@@ -135,7 +150,7 @@ network and makes those calls for Penryn:
 PENRYN_MSA_CLIENT_ID=<your client id> python3 tools/relay.py      # port 25580
 ```
 
-It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`, `effects.bin`, `weather.bin`, `signs.bin`, `particles.bin`) from
+It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`, `effects.bin`, `weather.bin`, `signs.bin`, `particles.bin`, `menu.bin`) from
 your own copy of Minecraft: the 26.3 client jar from an existing install (Horizon's launcher, the
 official launcher, Prism), or downloaded from Mojang for a signed-in account that owns the game,
 plus the data Horizon's `horizon-prepare` writes (install a Horizon release with its launcher).
@@ -164,15 +179,19 @@ Signing in needs an Azure app registration of your own; never use another applic
 
 ## On the Mac
 
-Copy `dist/Penryn` to the Mac, edit `settings.txt` (the server, the relay, a name for offline
-play), double-click **Sign in.command** once, then **Play.command**. Snow Leopard runs 64-bit
-programs on its 32-bit kernel, so no special boot is needed.
+Copy `dist/Penryn` to the Mac, edit `settings.txt` (the relay, a name for offline play, and
+optionally a server, which is put in the Multiplayer list), then open Penryn: it starts at the
+title screen. Its **Sign in...** button signs in through the relay (Horizon's launcher there, or
+Microsoft's code shown in the window); **Sign in.command** does the same in Terminal. Snow
+Leopard runs 64-bit programs on its 32-bit kernel, so no special boot is needed.
 
 From a terminal:
 
 ```sh
+./penryn --relay RELAY:25580               # the title screen
 ./penryn login RELAY:25580                 # sign in (once)
 ./penryn --relay RELAY:25580 SERVER:25565  # play, signed in
+./penryn add-server SERVER:25565 [NAME]    # put a server in the Multiplayer list
 ./penryn --name Steve SERVER:25565         # play offline (offline-mode servers)
 ./penryn status SERVER                     # the server-list ping
 ```
@@ -198,6 +217,8 @@ E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
 | `src/render.rs` | meshing and drawing the world (OpenGL 1.5 fixed function) |
 | `src/entities.rs` | entities and their models |
 | `src/skins.rs` | players' skins and capes: profile textures, PNG decoding, the download thread |
+| `src/title.rs`, `multiplayer.rs`, `servers.rs` | the title screen and panorama, the multiplayer screens, servers.dat, the server-list ping, LAN worlds |
+| `src/task.rs`, `json.rs` | work on threads of its own (pings, joining, signing in); a JSON reader |
 | `src/weather.rs` | rain, snow, thunder and lightning |
 | `src/particles.rs` | particles (vanilla's ParticleEngine) |
 | `src/gui.rs`, `screens.rs`, `lang.rs` | vanilla's GUI |

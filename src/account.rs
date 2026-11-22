@@ -94,23 +94,32 @@ pub fn poll(relay: &(String, u16), session: &str) -> Result<Option<Account>, Str
     }
 }
 
+/// The sign-in through Horizon's launcher on the relay's computer: the account (saved), or
+/// None when the launcher has none signed in (then Microsoft's device code is needed).
+pub fn login_launcher(relay: &(String, u16), who: Option<&str>) -> Result<Option<Account>, String> {
+    let list = http::post(&relay.0, relay.1, "/login/accounts", b"", 60000)?;
+    let accounts: Vec<String> = list.text().lines().filter(|l| !l.trim().is_empty()).map(String::from).collect();
+    if list.status != 200 || accounts.is_empty() {
+        return Ok(None);
+    }
+    crate::say!("Accounts signed in to Horizon's launcher on the relay's computer (* plays):");
+    for a in accounts.iter() {
+        crate::say!("    {}", a.splitn(2, ' ').nth(1).unwrap_or(a));
+    }
+    let r = http::post(&relay.0, relay.1, "/login/launcher", who.unwrap_or("").as_bytes(), 120000)?;
+    if r.status != 200 {
+        return Err(String::from(r.text().trim()));
+    }
+    let (acc, refresh) = parse(&r.text(), relay.clone()).ok_or("bad answer from the relay")?;
+    save(&acc, &refresh);
+    crate::say!("Signed in as {}. The sign-in is saved in {}.", acc.name, path());
+    Ok(Some(acc))
+}
+
 /// `penryn login RELAY [ACCOUNT]`: the sign-in, through Horizon's launcher on the relay's
 /// computer when it has an account signed in, else Microsoft's device code.
 pub fn login_terminal(relay: (String, u16), who: Option<&str>) -> Result<(), String> {
-    let list = http::post(&relay.0, relay.1, "/login/accounts", b"", 60000)?;
-    let accounts: Vec<String> = list.text().lines().filter(|l| !l.trim().is_empty()).map(String::from).collect();
-    if list.status == 200 && !accounts.is_empty() {
-        crate::say!("Accounts signed in to Horizon's launcher on the relay's computer (* plays):");
-        for a in accounts.iter() {
-            crate::say!("    {}", a.splitn(2, ' ').nth(1).unwrap_or(a));
-        }
-        let r = http::post(&relay.0, relay.1, "/login/launcher", who.unwrap_or("").as_bytes(), 120000)?;
-        if r.status != 200 {
-            return Err(String::from(r.text().trim()));
-        }
-        let (acc, refresh) = parse(&r.text(), relay.clone()).ok_or("bad answer from the relay")?;
-        save(&acc, &refresh);
-        crate::say!("Signed in as {}. The sign-in is saved in {}.", acc.name, path());
+    if login_launcher(&relay, who)?.is_some() {
         return Ok(());
     }
     login_device_code(relay)
@@ -149,7 +158,7 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
     const FILES: [(&str, &[u8; 4]); 4] =
         [("blocks.bin", BLOCKS_MAGIC), ("atlas.bin", ATLAS_MAGIC), ("gui.bin", GUI_MAGIC), ("entities.bin", ENTITIES_MAGIC)];
     // Small optional files: the game runs without them (no weather...).
-    const OPTIONAL: &[(&str, &[u8; 4])] = &[("weather.bin", WEATHER_MAGIC), ("signs.bin", crate::signs::SIGNS_MAGIC), ("effects.bin", EFFECTS_MAGIC), ("particles.bin", PARTICLES_MAGIC)];
+    const OPTIONAL: &[(&str, &[u8; 4])] = &[("weather.bin", WEATHER_MAGIC), ("signs.bin", crate::signs::SIGNS_MAGIC), ("effects.bin", EFFECTS_MAGIC), ("particles.bin", PARTICLES_MAGIC), ("menu.bin", crate::title::MENU_MAGIC)];
     let have = |n: &str, magic: &[u8; 4]| sys::read_head(&format!("{}/{}", dir, n), 4).map_or(false, |d| d == magic);
     let optional = OPTIONAL.iter().all(|(n, m)| have(n, m));
     if FILES.iter().all(|(n, m)| have(n, m)) && ((have("sounds.bin", SOUNDS_MAGIC) && optional) || relay.is_none()) {

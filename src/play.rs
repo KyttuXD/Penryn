@@ -1,7 +1,7 @@
 //! The game window: input, the 20 Hz tick (movement, digging, placing), and drawing.
 //! Controls are vanilla's defaults (see README.md).
 
-use crate::blocks::{self, Blocks};
+use crate::blocks;
 use crate::client::{Account, Game};
 use crate::math;
 use crate::math::FloorExt;
@@ -224,6 +224,10 @@ pub struct App {
     test_ticks: usize,
     particles: Option<crate::particles::Particles>,
     creative: crate::creative::Screen,
+    /// The pause menu's Disconnect (or the death screen's): back to the menus, not out.
+    to_title: bool,
+    /// Since when the world is being waited for (LevelLoadingScreen).
+    loading_from: Option<u64>,
 }
 
 impl App {
@@ -234,42 +238,11 @@ impl App {
             physics::EYE
         }
     }
-
-    fn message(&mut self, lines: &[&str]) {
-        let (w, h) = self.v.size();
-        let gl = &self.v.gl;
-        unsafe {
-            (gl.Viewport)(0, 0, w, h);
-            (gl.ClearColor)(0.06, 0.06, 0.06, 1.0);
-            (gl.Clear)(sdl::COLOR_BUFFER_BIT | sdl::DEPTH_BUFFER_BIT);
-        }
-        if let Some(gui) = self.gui.as_mut() {
-            gui.begin(w, h);
-            let (cx, cy) = (gui.width / 2.0, gui.height / 2.0);
-            for (i, l) in lines.iter().enumerate() {
-                gui.text_centered(l, cx, cy - 20.0 + i as f32 * 12.0, if i == 0 { screens::WHITE } else { 0xFFA0_A0A0 });
-            }
-            gui.flush(&self.v.gl, w, h);
-        }
-        self.v.swap();
-    }
-
-    /// Shows `lines` until the window is closed or Escape is pressed.
-    fn wait_on(&mut self, lines: &[&str]) {
-        loop {
-            while let Some(e) = self.v.poll() {
-                let t = e.u32_at(0);
-                if t == sdl::EV_QUIT || (t == sdl::EV_KEYDOWN && e.i32_at(16) as usize == K_ESC) {
-                    return;
-                }
-            }
-            self.message(lines);
-            unsafe { (self.v.sdl.SDL_Delay)(30) };
-        }
-    }
 }
 
-pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks: Blocks) -> Result<(), String> {
+/// The window: the title screen and the menus (title.rs), then each game joined from them. With
+/// `server` Penryn connects straight away, as `penryn HOST` always has.
+pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, relay: Option<(String, u16)>) -> Result<(), String> {
     // options.txt first; settings.txt's VIEW and FULLSCREEN (PENRYN_VIEW, PENRYN_FULLSCREEN)
     // stand in for what it does not say yet.
     let mut settings = crate::options::Settings::load();
@@ -315,7 +288,7 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
             let after: u64 = sys::env("PENRYN_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(8);
             (p, sys::now_ms() + after * 1000)
         }),
-        test_keys: sys::env("PENRYN_TEST_INPUT").unwrap_or_default(),
+        test_keys: crate::title::game_test_keys(&sys::env("PENRYN_TEST_INPUT").unwrap_or_default()),
         fps_at: sys::now_ms(),
         perf: sys::env("PENRYN_PERF").is_some(),
         frame_at: sys::now_ms(),
@@ -350,6 +323,8 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
         test_ticks: 0,
         particles: None,
         creative: crate::creative::Screen::new(),
+        to_title: false,
+        loading_from: None,
     };
     let atlas = sys::read_file(&format!("{}/atlas.bin", crate::data_dir())).ok_or("cannot read atlas.bin (see README.md)")?;
     app.r.load_atlas(&app.v.gl, &atlas)?;
@@ -382,23 +357,68 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
     if let Some(d) = sys::read_file(&format!("{}/entities.bin", crate::data_dir())) {
         app.entities = Some(crate::entities::EntityTable::load(&app.v.gl, &d)?);
     }
-    let target = format!("Joining {}:{} ...", host, port);
-    app.message(&[&target]);
-    let mut g = match Game::join(host, port, name, account, blocks, view as i8) {
-        Ok(g) => g,
-        Err(e) => {
-            app.wait_on(&["Could not join the server", &e, "", "Esc to quit"]);
-            return Err(e);
-        }
-    };
-    app.v.grab_mouse(true);
-    let result = app.main_loop(&mut g);
-    if let Err(e) = &result {
-        app.v.grab_mouse(false);
-        let reason = g.disconnected.clone().unwrap_or_else(|| e.clone());
-        app.wait_on(&["Disconnected", &reason, "", "Esc to quit"]);
+    let mut front = crate::title::Front::new(account, relay, name, &sys::env("PENRYN_TEST_INPUT").unwrap_or_default());
+    if let Some((h, p)) = server {
+        // A listed server keeps its resource pack setting when joined from the command line.
+        let list = crate::servers::List::load();
+        let listed = list.servers.iter().find(|s| crate::servers::address(&s.ip) == Some((h.clone(), p)));
+        crate::servers::set_join_pack(listed.map_or(crate::servers::Pack::Prompt, |s| s.pack));
+        front.connect(&format!("{}:{}", h, p), false, view as i8);
     }
-    result
+    loop {
+        let next = {
+            let Some(gui) = app.gui.as_mut() else { return Err(String::from("no GUI")) };
+            let mut ui = crate::title::Ui { v: &app.v, gui, menu: &mut app.menu, audio: app.audio.as_mut(), shot: &app.test_shot };
+            front.run(&mut ui)
+        };
+        let mut g = match next {
+            crate::title::Next::Quit => return Ok(()),
+            crate::title::Next::Play(g, address) => {
+                say!("playing on {}", address);
+                g
+            }
+        };
+        app.new_session();
+        app.v.grab_mouse(true);
+        let result = app.main_loop(&mut g);
+        app.v.grab_mouse(false);
+        match result {
+            _ if app.to_title => front.after_game(None),
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let reason = g.disconnected.clone().unwrap_or(e);
+                crate::warn!("disconnected: {}", reason);
+                front.after_game(Some(reason));
+            }
+        }
+    }
+}
+
+impl App {
+    /// A new game: what the last one left behind goes.
+    fn new_session(&mut self) {
+        use crate::options::O;
+        self.r.forget_world(&self.v.gl);
+        self.set_screen(Screen::Play);
+        self.keys = [false; 512];
+        self.chat_line.clear();
+        self.mover = Mover::new([0.0; 3]);
+        self.prev_pos = [0.0; 3];
+        self.sprinting = false;
+        self.mining = None;
+        self.using = None;
+        self.respawn_sent = false;
+        self.swing_ticks = -1;
+        self.held_item = None;
+        self.held_ticks = 0;
+        self.last_held = (-1, None);
+        self.container_screen = false;
+        self.creative = crate::creative::Screen::new();
+        self.to_title = false;
+        self.loading_from = None;
+        self.view = self.menu.o.int(O::RenderDistance);
+        self.fullscreen = self.menu.o.on(O::Fullscreen);
+    }
 }
 
 impl App {
@@ -657,6 +677,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     self.set_screen(Screen::Play);
                 } else if b[1].hit(mx, my) {
                     self.ui_click();
+                    self.to_title = true;
                     return Ok(true);
                 } else if b[2].hit(mx, my) {
                     self.ui_click();
@@ -682,6 +703,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     g.respawn()?;
                 } else if b[1].hit(mx, my) {
                     self.ui_click();
+                    self.to_title = true;
                     return Ok(true);
                 }
             }
@@ -1520,6 +1542,18 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
     }
 
     fn draw(&mut self, g: &mut Game, partial: f64) {
+        // LevelLoadingScreen until the client is in its world (at most 30 s).
+        if !g.loaded_sent {
+            let now = sys::now_ms();
+            let since = *self.loading_from.get_or_insert(now);
+            if let (true, Some(gui)) = (now < since + 30000, self.gui.as_mut()) {
+                use crate::options::O;
+                crate::title::draw_loading(&self.v, gui, self.menu.o.get(O::PanoramaSpeed), self.menu.o.int(O::MenuBlur));
+                return;
+            }
+        } else {
+            self.loading_from = None;
+        }
         let (w, h) = self.v.size();
         let lerp = |a: f64, b: f64| a + (b - a) * partial;
         let eye = [

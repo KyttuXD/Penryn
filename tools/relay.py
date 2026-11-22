@@ -256,7 +256,7 @@ class Relay:
 
     def build_assets(self, token=None):
         out = os.path.join(self.data_dir, "assets")
-        names = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin")
+        names = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin", "menu.bin")
         tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_assets.py")
         # Made again when the tool is newer (another format) than the files.
         if all(os.path.isfile(os.path.join(out, n)) and os.path.getmtime(os.path.join(out, n)) >= os.path.getmtime(tool)
@@ -349,7 +349,7 @@ def make_handler(relay):
                 except Exception as e:  # noqa: BLE001 - reported to the client
                     return self.reply(500, str(e))
             if self.path in ("/assets/blocks.bin", "/assets/atlas.bin", "/assets/gui.bin", "/assets/entities.bin",
-                             "/assets/weather.bin", "/assets/signs.bin", "/assets/particles.bin"):
+                             "/assets/weather.bin", "/assets/signs.bin", "/assets/particles.bin", "/assets/menu.bin"):
                 try:
                     d = relay.build_assets()
                     with open(os.path.join(d, self.path.rsplit("/", 1)[1]), "rb") as f:

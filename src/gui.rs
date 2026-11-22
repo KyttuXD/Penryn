@@ -143,6 +143,8 @@ pub struct Gui {
     pub fixed_scale: i32,
     pub width: f32,
     pub height: f32,
+    /// Every quad's alpha is scaled by this (the title screen's fade-in), 255 normally.
+    pub fade: u8,
     segs: Vec<(Tex, Vec<V>)>,
 }
 
@@ -300,6 +302,7 @@ impl Gui {
             fixed_scale: 0,
             width: 0.0,
             height: 0.0,
+            fade: 255,
             segs: Vec::new(),
         })
     }
@@ -323,12 +326,29 @@ impl Gui {
         &mut self.segs.last_mut().unwrap().1
     }
 
-    fn quad(&mut self, t: Tex, x0: f32, y0: f32, x1: f32, y1: f32, u0: f32, v0: f32, u1: f32, v1: f32, c: [u8; 4]) {
+    fn quad(&mut self, t: Tex, x0: f32, y0: f32, x1: f32, y1: f32, u0: f32, v0: f32, u1: f32, v1: f32, mut c: [u8; 4]) {
+        if self.fade != 255 {
+            c[3] = (c[3] as u16 * self.fade as u16 / 255) as u8;
+        }
         let s = self.seg(t);
         s.push(V { p: [x0, y0, 0.0], uv: [u0, v0], c });
         s.push(V { p: [x0, y1, 0.0], uv: [u0, v1], c });
         s.push(V { p: [x1, y1, 0.0], uv: [u1, v1], c });
         s.push(V { p: [x1, y0, 0.0], uv: [u1, v0], c });
+    }
+
+    /// A quad of the GUI atlas with corners anywhere (in quad order: top left, bottom left,
+    /// bottom right, top right): turned and scaled text (the title screen's splash).
+    pub fn quad4(&mut self, p: [[f32; 2]; 4], uv: [f32; 4], color: u32) {
+        let mut c = argb(color);
+        if self.fade != 255 {
+            c[3] = (c[3] as u16 * self.fade as u16 / 255) as u8;
+        }
+        let s = self.seg(Tex::Gui);
+        s.push(V { p: [p[0][0], p[0][1], 0.0], uv: [uv[0], uv[1]], c });
+        s.push(V { p: [p[1][0], p[1][1], 0.0], uv: [uv[0], uv[3]], c });
+        s.push(V { p: [p[2][0], p[2][1], 0.0], uv: [uv[2], uv[3]], c });
+        s.push(V { p: [p[3][0], p[3][1], 0.0], uv: [uv[2], uv[1]], c });
     }
 
     pub fn fill(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, color: u32) {

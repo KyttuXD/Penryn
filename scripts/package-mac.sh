@@ -47,11 +47,13 @@ EOF
 cat > "$APP/Contents/Resources/settings.txt" <<'EOF'
 # Penryn's settings. Lines are NAME=value. This file is in
 # ~/Library/Application Support/Penryn; open Penryn again after changing it.
-# The Minecraft server to join (host or host:port).
-SERVER=10.0.0.1:25565
+# Penryn opens at its title screen: Multiplayer has the server list (add servers there).
+# A server here (host or host:port) is put in that list for you. Optional.
+SERVER=
 # The computer running penryn-relay (tools/relay.py), for signing in and the game files.
 RELAY=10.0.0.1:25580
-# Leave empty to play signed in; a name plays offline under it (offline-mode servers only).
+# Leave empty to play signed in (the title screen's "Sign in..." button, or Sign in.command);
+# a name plays offline under it (offline-mode servers only).
 NAME=
 # Chunks in each direction (2 to 16). 6 to 8 suits a Radeon HD 2600. Only until the game's
 # Options... screens save options.txt (here too): its render distance is used from then on.
@@ -60,11 +62,11 @@ VIEW=8
 FULLSCREEN=
 EOF
 
-# Sign-in through Microsoft's device code needs a window to show the code in: Terminal.
+# Signing in from Terminal, for those who prefer it to the title screen's button.
 cat > "$APP/Contents/Resources/Sign in.command" <<'EOF'
 #!/bin/sh
-# Signs in with your Microsoft account (once; it is remembered). Penryn opens this when the
-# relay's computer has no account signed in to Horizon's launcher.
+# Signs in with your Microsoft account (once; it is remembered), in Terminal. The title
+# screen's "Sign in..." button does the same in the game's window.
 DATA="$HOME/Library/Application Support/Penryn"
 . "$DATA/settings.txt"
 export PENRYN_DATA="$DATA"
@@ -90,26 +92,22 @@ if [ ! -f "$DATA/settings.txt" ]; then
   cp "$RES/settings.txt" "$DATA/settings.txt"
 fi
 . "$DATA/settings.txt"
-if [ "$SERVER" = "10.0.0.1:25565" ] || [ "$RELAY" = "10.0.0.1:25580" ]; then
+if [ "$RELAY" = "10.0.0.1:25580" ]; then
   open -t "$DATA/settings.txt"
-  say "Set SERVER and RELAY in settings.txt (it is open now), save it, then open Penryn again."
+  say "Set RELAY in settings.txt (it is open now), save it, then open Penryn again."
   exit 0
 fi
 export PENRYN_DATA="$DATA" PENRYN_VIEW="${VIEW:-8}"
 [ "$FULLSCREEN" = yes ] && export PENRYN_FULLSCREEN=1
-if [ -z "$NAME" ] && [ ! -f "$DATA/account.txt" ]; then
-  # Through Horizon's launcher on the relay's computer when it has an account; else the
-  # device code, which needs Terminal.
-  if ! "$HERE/penryn-bin" login "$RELAY" >"$LOG" 2>&1; then
-    chmod +x "$RES/Sign in.command"
-    open -a Terminal "$RES/Sign in.command"
-    exit 0
-  fi
+# SERVER (optional) goes into the Multiplayer list (servers.dat) once.
+if [ -n "$SERVER" ]; then
+  "$HERE/penryn-bin" add-server "$SERVER" >"$LOG" 2>&1
 fi
+# The title screen. Signing in is its "Sign in..." button (or Sign in.command).
 if [ -n "$NAME" ]; then
-  "$HERE/penryn-bin" --relay "$RELAY" --name "$NAME" "$SERVER" >"$LOG" 2>&1
+  "$HERE/penryn-bin" --relay "$RELAY" --name "$NAME" >>"$LOG" 2>&1
 else
-  "$HERE/penryn-bin" --relay "$RELAY" "$SERVER" >"$LOG" 2>&1
+  "$HERE/penryn-bin" --relay "$RELAY" >>"$LOG" 2>&1
 fi
 code=$?
 if [ $code -ne 0 ]; then
