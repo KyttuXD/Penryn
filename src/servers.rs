@@ -40,22 +40,6 @@ impl Pack {
     }
 }
 
-/// The server being joined's resource pack setting, for the resource pack code to honour
-/// (ClientPackSource / ServerPackManager: Enabled accepts, Disabled declines, Prompt asks).
-static JOIN_PACK: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(2);
-
-pub fn set_join_pack(p: Pack) {
-    JOIN_PACK.store(p as u8, Ordering::Relaxed);
-}
-
-pub fn join_pack() -> Pack {
-    match JOIN_PACK.load(Ordering::Relaxed) {
-        0 => Pack::Enabled,
-        1 => Pack::Disabled,
-        _ => Pack::Prompt,
-    }
-}
-
 #[derive(Clone)]
 pub struct Server {
     pub name: String,

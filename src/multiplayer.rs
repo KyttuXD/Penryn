@@ -234,7 +234,7 @@ pub enum Act {
     /// Back to the title screen.
     Back,
     /// Join this address (Direct Connection, a server, a LAN world), with its server's pack setting.
-    Join(String, Pack),
+    Join(String),
 }
 
 pub struct Mp {
@@ -469,11 +469,11 @@ impl Mp {
     fn select_join(&self) -> Act {
         match self.sel {
             Some(Sel::Server(i)) => match self.list.servers.get(i) {
-                Some(s) => Act::Join(s.ip.clone(), s.pack),
+                Some(s) => Act::Join(s.ip.clone()),
                 None => Act::None,
             },
             Some(Sel::Lan(i)) => match self.lan.get(i) {
-                Some((_, a)) => Act::Join(a.clone(), Pack::Prompt),
+                Some((_, a)) => Act::Join(a.clone()),
                 None => Act::None,
             },
             None => Act::None,
@@ -687,7 +687,7 @@ impl Mp {
             self.list.save();
         }
         self.sub = Sub::List;
-        Act::Join(addr, Pack::Prompt)
+        Act::Join(addr)
     }
 
     /// Escape, Enter, Tab and the text keys.

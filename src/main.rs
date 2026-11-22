@@ -38,6 +38,7 @@ mod signs;
 mod sky;
 mod net;
 mod options;
+mod packs;
 mod particles;
 mod sys;
 mod task;
@@ -104,7 +105,7 @@ pub fn data_dir() -> String {
 }
 
 pub fn load_blocks() -> Result<blocks::Blocks, String> {
-    let path = alloc::format!("{}/blocks.bin", data_dir());
+    let path = packs::path("blocks.bin");
     let d = sys::read_file(&path).ok_or_else(|| alloc::format!("cannot read {} (see README.md)", path))?;
     blocks::Blocks::parse(&d).ok_or_else(|| alloc::format!("{} is damaged", path))
 }
@@ -120,13 +121,18 @@ fn run(args: &[String]) -> Result<(), String> {
             let (h, p) = http::host_port(args.get(2).ok_or(USAGE)?, 25565);
             let name = args.get(3).cloned().unwrap_or_else(|| String::from("LitePlayer"));
             let secs: u64 = sys::env("PENRYN_SECONDS").and_then(|s| s.parse().ok()).unwrap_or(20);
-            let mut g = client::Game::join(&h, p, &name, None, load_blocks()?, 6)?;
+            packs::set_relay(sys::env("PENRYN_RELAY").map(|r| http::host_port(&r, 25580)));
+            let mut g = client::Game::join(&h, p, &name, None, load_blocks()?, 6, Vec::new(), &mut packs::NoWindow)?;
             let end = sys::now_ms() + secs * 1000;
             let mut next_tick = sys::now_ms();
             let mut last_report = 0;
             let mut said = false;
             while sys::now_ms() < end {
                 g.wait(10)?;
+                if g.reconfigure {
+                    g.reconfigure_now(&mut packs::NoWindow)?;
+                }
+                g.pack_step(&mut packs::NoWindow)?;
                 if sys::now_ms() >= next_tick {
                     g.tick()?;
                     next_tick += 50;
@@ -218,6 +224,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let fetch_from = relay.clone().or_else(|| acc.as_ref().map(|a| a.relay.clone()));
             account::ensure_game_files(fetch_from.as_ref())?;
             skins::set_relay(fetch_from.clone());
+            packs::set_relay(fetch_from.clone());
             let name = name.unwrap_or_else(|| String::from("Player"));
             play::run(server, &name, acc, fetch_from)
         }
@@ -290,6 +297,12 @@ fn selftest() -> Result<(), String> {
     let wdata = sys::read_file(&alloc::format!("{}/weather.bin", data_dir()));
     let wblocks = load_blocks().ok();
     for (what, got, want) in weather::checks(wdata.as_deref(), wblocks.as_ref()) {
+        check(what, got, want);
+    }
+    for (what, got, want) in packs::selftest() {
+        check(what, got, want);
+    }
+    for (what, got, want) in audio::overlay_selftest() {
         check(what, got, want);
     }
     for (what, got, want) in options::selftest() {

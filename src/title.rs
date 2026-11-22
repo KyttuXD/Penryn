@@ -4,7 +4,7 @@
 //! disconnected screen and the sign-in through the relay. The pictures are in menu.bin
 //! (optional: without it the screens are drawn on a dark background).
 
-use crate::client::{Account, Game};
+use crate::client::{Account, Game, Login};
 use crate::gui::Gui;
 use crate::lang;
 use crate::multiplayer::{self, fl, Mp};
@@ -12,7 +12,6 @@ use crate::screens::{self, Button, WHITE};
 use crate::sdl::{self, Gl, Video};
 use crate::sys;
 use crate::task::{self, Sendable, Task};
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
@@ -516,8 +515,11 @@ fn draw_title(gui: &mut Gui, a: Option<&Assets>, splash: Option<&str>, fade: f32
 /// What happens after the menus.
 pub enum Next {
     Quit,
-    /// A game joined, and the address it was joined at.
-    Play(Box<Game>, String),
+    /// The login went through: the window finishes the join (the packs' configuration, play.rs),
+    /// to the address it was made at, and back to the server list when it fails.
+    Join(Login, String, bool),
+    /// Options > Resource Packs: the selection screen (packs.rs), then the menus again.
+    Packs,
 }
 
 /// What the first sign-in step gave: the account (Horizon's launcher had one), or Microsoft's
@@ -536,7 +538,7 @@ enum Scr {
     /// The options screens (options.rs), from the title screen.
     Options,
     Multiplayer,
-    Connect { task: Task<Result<Sendable<Game>, String>>, address: String, back_to_list: bool },
+    Connect { task: Task<Result<Sendable<Login>, String>>, address: String, back_to_list: bool },
     Disconnected { title: String, reason: String, to_list: bool },
     SignIn(SignIn),
 }
@@ -605,7 +607,7 @@ impl Front {
 
     /// Starts joining `address` (ConnectScreen.startConnecting): the login runs on its own
     /// thread while the screen shows how far it got.
-    pub fn connect(&mut self, address: &str, back_to_list: bool, view: i8) {
+    pub fn connect(&mut self, address: &str, back_to_list: bool) {
         let Some((host, port)) = crate::servers::address(address) else {
             self.scr = Scr::Disconnected { title: lang::get("connect.failed"), reason: lang::get("disconnect.unknownHost"), to_list: back_to_list };
             return;
@@ -613,11 +615,17 @@ impl Front {
         let acc = self.account.clone();
         let name = self.player_name();
         crate::client::JOIN_STAGE.store(0, core::sync::atomic::Ordering::Relaxed);
-        let task = task::spawn(move || {
-            let blocks = crate::load_blocks()?;
-            Game::join(&host, port, &name, acc.as_ref(), blocks, view).map(Sendable)
-        });
+        let task = task::spawn(move || Game::login(&host, port, &name, acc.as_ref()).map(Sendable));
         self.scr = Scr::Connect { task, address: String::from(address), back_to_list };
+    }
+
+    /// Joining failed after the login (the configuration): the disconnected screen.
+    pub fn join_failed(&mut self, back_to_list: bool, e: String) {
+        let reason = String::from(
+            e.strip_prefix("the server refused the login: ").or_else(|| e.strip_prefix("disconnected while joining: ")).unwrap_or(&e),
+        );
+        crate::warn!("could not join: {}", e);
+        self.scr = Scr::Disconnected { title: lang::get("connect.failed"), reason, to_list: back_to_list };
     }
 
     /// The game ended: back to the menus (DisconnectedScreen when it was lost).
@@ -787,15 +795,10 @@ impl Front {
                 if let Some(r) = task.take() {
                     let (address, back) = (address.clone(), *back_to_list);
                     match r {
-                        Ok(g) => {
-                            return Some(Next::Play(Box::new(g.0), address));
-                        }
+                        Ok(l) => return Some(Next::Join(l.0, address, back)),
                         Err(e) => {
-                            let reason = String::from(
-                                e.strip_prefix("the server refused the login: ").or_else(|| e.strip_prefix("disconnected while joining: ")).unwrap_or(&e),
-                            );
                             crate::warn!("could not join {}: {}", address, e);
-                            self.scr = Scr::Disconnected { title: lang::get("connect.failed"), reason, to_list: back };
+                            self.join_failed(back, e);
                         }
                     }
                 }
@@ -973,17 +976,15 @@ impl Front {
                 Self::click_sound(ui);
                 self.scr = Scr::Title;
             }
-            multiplayer::Act::Join(address, pack) => {
+            multiplayer::Act::Join(address) => {
                 Self::click_sound(ui);
-                crate::servers::set_join_pack(pack);
                 if let Some(mp) = self.mp.as_ref() {
                     if !mp.last_direct.is_empty() {
                         ui.menu.o.set_other("lastServer", &mp.last_direct);
                         ui.menu.o.save();
                     }
                 }
-                let view = ui.menu.o.int(crate::options::O::RenderDistance) as i8;
-                self.connect(&address, true, view);
+                self.connect(&address, true);
             }
         }
         None
@@ -1039,6 +1040,10 @@ impl Front {
                     crate::options::Ev::Close => {
                         Self::click_sound(ui);
                         self.scr = Scr::Title;
+                    }
+                    crate::options::Ev::Packs => {
+                        Self::click_sound(ui);
+                        return Some(Next::Packs);
                     }
                     crate::options::Ev::None => {}
                 }

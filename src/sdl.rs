@@ -181,6 +181,7 @@ api! { Gl, "gl", "system",
     DeleteBuffers(i32, *const u32);
     ReadPixels(i32, i32, i32, i32, u32, u32, *mut c_void);
     GenTextures(i32, *mut u32);
+    DeleteTextures(i32, *const u32);
     BindTexture(u32, u32);
     TexImage2D(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
     TexParameteri(u32, u32, i32);

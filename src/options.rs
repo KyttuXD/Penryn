@@ -284,8 +284,7 @@ impl Settings {
     pub fn set(&mut self, o: O, v: f64) {
         self.v[o as usize] = v;
     }
-
-    /// A line of options.txt Penryn has no option for (lastServer...).
+    /// A line of options.txt Penryn has no option for (lastServer, resourcePacks...).
     pub fn other(&self, key: &str) -> Option<&str> {
         self.other.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
@@ -648,6 +647,8 @@ pub enum Ev {
     Click,
     /// Done or Escape on the first screen: back to the pause menu.
     Close,
+    /// Resource Packs...: the pack selection screen (packs.rs).
+    Packs,
 }
 
 fn ceil(x: f32) -> f32 {
@@ -971,6 +972,7 @@ impl Menu {
                 self.open(page);
                 Ev::Click
             }
+            W::Off("options.resourcepack", _) => Ev::Packs,
             W::Off(..) => Ev::None,
             W::Opt(O::GuiScale) => {
                 let n = self.max_gui_scale.max(1) + 1;
@@ -1069,7 +1071,8 @@ impl Menu {
                         Some(v) => lang::format("options.generic_value", &[lang::get(key), lang::get(v)]),
                         None => lang::get(key),
                     };
-                    button(gui, &t, p, false, false);
+                    let on = key == "options.resourcepack";
+                    button(gui, &t, p, on, on && hover);
                 }
             }
         }
