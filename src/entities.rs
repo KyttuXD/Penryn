@@ -620,6 +620,8 @@ impl EntityTable {
         let dir = [-math::sin(yr) * math::cos(pr), -math::sin(pr), math::cos(yr) * math::cos(pr)];
         let picked = self.pick(ents, eye, dir, cx.reach, skip).map(|h| h.0);
         let (mut mats, mut body): (Vec<M>, Vec<M>) = (Vec::new(), Vec::new());
+        // The view's forward axis (its third row, negated).
+        let fwd = [-view[2] as f64, -view[6] as f64, -view[10] as f64];
         for (&id, e) in ents.iter() {
             if id == skip || e.item.is_some() {
                 continue;
@@ -628,6 +630,11 @@ impl EntityTable {
             let p = [lerp(e.prev[0], e.pos[0]) - eye[0], lerp(e.prev[1], e.pos[1]) - eye[1], lerp(e.prev[2], e.pos[2]) - eye[2]];
             let dist2 = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
             if p[0] * p[0] + p[2] * p[2] > 96.0 * 96.0 {
+                continue;
+            }
+            // Behind the camera (with room for its size and name tag): nothing of it shows.
+            let (w, h) = self.dims(e);
+            if p[0] * fwd[0] + p[1] * fwd[1] + p[2] * fwd[2] < -(w as f64 + h as f64 + 2.0) {
                 continue;
             }
             let invisible = e.d(0) & 0x20 != 0;

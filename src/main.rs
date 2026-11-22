@@ -29,10 +29,12 @@ mod maps;
 mod math;
 mod md5;
 mod menus;
+mod mesher;
 mod moving;
 mod mobs;
 mod multiplayer;
 mod nbt;
+mod occlusion;
 mod physics;
 mod play;
 mod poses;
@@ -53,11 +55,13 @@ mod net;
 mod options;
 mod packs;
 mod particles;
+mod perf;
 mod sys;
 mod task;
 mod title;
 mod talk;
 mod text;
+mod terrain;
 mod weather;
 mod wire;
 mod world;
@@ -294,7 +298,7 @@ fn selftest() -> Result<(), String> {
     for (what, got, want) in skins::selftest() {
         check(what, got, want);
     }
-    for (what, got, want) in json::selftest().into_iter().chain(servers::selftest()).chain(title::selftest()).chain(multiplayer::selftest()) {
+    for (what, got, want) in occlusion::selftest().into_iter().chain(render::selftest()).chain(terrain::selftest()).chain(sky::selftest()).chain(json::selftest()).chain(servers::selftest()).chain(title::selftest()).chain(multiplayer::selftest()) {
         check(what, got, want);
     }
     // Movement against vanilla's collision, in a made-up world (needs blocks.bin).

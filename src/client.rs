@@ -420,12 +420,14 @@ impl Game {
     /// Handles every packet that has arrived, without waiting.
     pub fn pump(&mut self) -> Result<(), String> {
         let mut n = 0;
+        let start = crate::sys::now_ms();
         while !self.reconfigure {
             let Some(p) = self.conn.recv(0)? else { break };
             self.handle(p)?;
             n += 1;
-            if n > 2000 {
-                break; // let the frame go on; the rest next time
+            // Let the frame go on (a burst of chunks takes a while); the rest next time.
+            if n > 2000 || crate::sys::now_ms() - start >= 4 {
+                break;
             }
         }
         Ok(())

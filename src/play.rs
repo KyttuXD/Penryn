@@ -273,6 +273,7 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
     unsafe { (v.sdl.SDL_GL_SetSwapInterval)(settings.on(O::Vsync) as i32) };
     let view: i32 = settings.int(O::RenderDistance);
     say!("OpenGL: {} ({})", v.gl_string(sdl::RENDERER), v.gl_string(sdl::VERSION));
+    crate::perf::init(&v);
     let mut app = App {
         v,
         r: Renderer::new(),
@@ -425,6 +426,8 @@ fn play_session(app: &mut App, front: &mut crate::title::Front, mut login: crate
         app.v.grab_mouse(true);
         let result = app.main_loop(&mut g);
         app.v.grab_mouse(false);
+        // The meshing threads read the block table: they finish before the game's goes.
+        app.r.cancel_meshing();
         // Back to the player's own packs (DownloadedPackSource.cleanupAfterDisconnect).
         {
             let crate::client::Game { packs, world, blocks, .. } = &mut g;
@@ -546,7 +549,8 @@ impl App {
         loop {
             // ---- events
             let mut quit = false;
-            while let Some(e) = self.v.poll() {
+            self.v.pump();
+            while let Some(e) = self.v.next_event() {
                 if self.event(g, &e)? {
                     quit = true;
                 }
@@ -557,6 +561,7 @@ impl App {
             if !self.menu.changed.is_empty() {
                 self.apply_options(g)?;
             }
+            crate::perf::lap(crate::perf::S::Events);
             // ---- network
             g.pump()?;
             if g.reconfigure {
@@ -572,6 +577,7 @@ impl App {
                 self.v.grab_mouse(self.screen == Screen::Play);
             }
             self.particle_effects(g);
+            crate::perf::lap(crate::perf::S::Net);
             // ---- sound
             if let Some(a) = self.audio.as_mut() {
                 let eye = [self.mover.pos[0], self.mover.pos[1] + 1.62, self.mover.pos[2]];
@@ -586,6 +592,7 @@ impl App {
             } else {
                 g.sounds.clear();
             }
+            crate::perf::lap(crate::perf::S::Sound);
             // ---- ticks
             let now = sys::now_ms();
             if now > next_tick + 1000 {
@@ -596,6 +603,7 @@ impl App {
                 next_tick += 50;
             }
             let partial = 1.0 - ((next_tick - now) as f64 / 50.0).clamp(0.0, 1.0);
+            crate::perf::lap(crate::perf::S::Logic);
             self.draw(g, partial);
             // The Max Framerate option (vanilla's FramerateLimitTracker), on top of vsync.
             if let Some(fps) = self.menu.o.frame_limit() {
@@ -605,6 +613,7 @@ impl App {
                     sys::sleep_ms((due - t) as u32);
                 }
             }
+            crate::perf::lap(crate::perf::S::Sleep);
             self.frame_shown = sys::now_ms();
             if let Some(shot) = self.test_shot.as_ref() {
                 // PENRYN_TEST_INPUT "m": wait for a piston in motion.
@@ -638,6 +647,7 @@ impl App {
                     if self.special.pose != 0 || self.special.swimming || self.special.fall_flying {
                         say!("perf: pose {}, swimming {}, gliding {}, in water {}", self.special.pose, self.special.swimming, self.special.fall_flying, self.special.in_water);
                     }
+                    say!("perf: {}, {} sections, {}k vertices", crate::perf::report(self.frames), self.r.sections_drawn, self.r.vertices_drawn / 1000);
                     if self.mover.horizontal_collision {
                         // What is around the player at feet and head height.
                         let (bx, by, bz) = (math::ifloor(p[0]), math::ifloor(p[1]), math::ifloor(p[2]));
@@ -1886,6 +1896,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             eye = [c[0], c[1] + self.eye_height(), c[2]];
         }
         self.r.update(&self.v.gl, &mut g.world, &g.blocks, eye, 6);
+        crate::perf::lap(crate::perf::S::Mesh);
         // GameRenderer.getFov: the FOV option times the modifier, narrower under water.
         {
             use crate::options::O;
@@ -1894,6 +1905,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             let in_water = g.blocks.kind(g.world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2]))) == blocks::WATER;
             let water = if in_water { 1.0 + (6.0 / 7.0 - 1.0) * o.get(O::FovEffect) as f32 } else { 1.0 };
             self.r.fov = o.int(O::Fov) as f32 * m * water;
+            self.r.cutout_leaves = o.on(O::CutoutLeaves);
             self.menu.max_gui_scale = crate::options::auto_gui_scale(w, h);
         }
         let clouds_on = self.menu.o.int(crate::options::O::Clouds) != 0;
@@ -1972,16 +1984,20 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
                 crate::entities::draw_items(gl, view, eye, entities, pf, icons, blocks_ref, atlas, atlas_size);
                 crate::maps::draw_frames(gl, view, eye, entities, maps_ref, icons, blocks_ref, atlas, atlas_size);
+                crate::perf::lap(crate::perf::S::Entities);
                 if let Some(gui) = gui_ref {
                     crate::signs::draw_world(gl, view, eye, block_entities, world_ref, blocks_ref, gui);
                 }
                 crate::moving::draw(gl, view, eye, world_ref, blocks_ref, atlas, pf);
+                crate::perf::lap(crate::perf::S::BlockEntities);
                 if let (Some(gui), false, true, None) = (gui_ref, dim, clouds_on, fog) {
                     sky_ref.draw_clouds(gl, view, gui, eye, game_time, day, radius);
                 }
+                crate::perf::lap(crate::perf::S::Clouds);
                 if let Some(pt) = parts.as_deref_mut() {
                     pt.draw(gl, view, eye, pf, atlas);
                 }
+                crate::perf::lap(crate::perf::S::Particles);
             },
             &mut |view| {
                 if let Some(f) = fog.as_ref() {
@@ -1995,6 +2011,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         self.weather.draw(&self.v.gl, &world_view, &g.world, &g.blocks, eye, pf, rain, 0.2 + 0.8 * rain_light);
         // The world border's wall (WorldBorderRenderer), after the weather.
         crate::serverhud::draw_wall(&self.v.gl, &world_view, eye, &g.ui, partial, self.view, (self.view as f64 + 1.0) * 16.0);
+        crate::perf::lap(crate::perf::S::Weather);
         let hit = if self.screen == Screen::Play { self.pick(g) } else { None };
         if let Some(hh) = hit {
             let s = g.world.get(hh.pos[0], hh.pos[1], hh.pos[2]);
@@ -2037,9 +2054,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             );
             }
         }
+        crate::perf::lap(crate::perf::S::Hand);
         // ---- 2D: vanilla's HUD and screens
         let Some(mut gui) = self.gui.take() else {
             self.v.swap();
+            crate::perf::lap(crate::perf::S::Swap);
             return;
         };
         crate::serverhud::vignette(&self.v.gl, w, h, &g.ui, eye[0], eye[2]);
@@ -2140,7 +2159,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         gui.flush(&self.v.gl, w, h);
         self.gui = Some(gui);
+        crate::perf::lap(crate::perf::S::Gui);
         self.v.swap();
+        crate::perf::lap(crate::perf::S::Swap);
     }
 }
 
@@ -2188,6 +2209,8 @@ impl crate::packs::Host for App {
 
     fn reload(&mut self, names: &[String], world: Option<&mut crate::world::World>, blocks: &mut Blocks) {
         use crate::packs::path;
+        // The meshing threads read the block table, which a reload replaces.
+        self.r.cancel_meshing();
         let has = |n: &str| names.iter().any(|x| x == n);
         let gl = &self.v.gl;
         if has("blocks.bin") {

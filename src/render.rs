@@ -1,8 +1,8 @@
-//! Drawing with OpenGL 1.5 fixed function: one vertex buffer per 16x16x16 section (opaque and
-//! water apart), coloured faces with ambient occlusion instead of textures, fog, the block
-//! outline and a 2D layer for the HUD.
+//! Drawing with OpenGL 1.5 fixed function: the world's sections (meshed on worker threads by
+//! mesher.rs, kept on the card by terrain.rs, culled by occlusion.rs), fog, the sky pass, the
+//! block outline and cracks.
 
-use crate::blocks::{self, Blocks};
+use crate::blocks::Blocks;
 use crate::font;
 use crate::math;
 use crate::sdl::*;
@@ -34,9 +34,8 @@ pub struct CV {
     pub c: [u8; 4],
 }
 
-const CSTRIDE: i32 = 16;
 
-fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
+pub fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
     CV {
         p: [(p[0] * 1024.0) as i16, (p[1] * 1024.0) as i16, (p[2] * 1024.0) as i16],
         _pad: 0,
@@ -45,22 +44,29 @@ fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
     }
 }
 
-struct Mesh {
-    vbo: u32,
-    count: i32,
-}
-
-struct SectionMesh {
-    opaque: Mesh,
-    water: Mesh,
-}
+use crate::terrain::{Terrain, RUNS};
 
 pub struct Renderer {
-    meshes: BTreeMap<(i32, i32, i32), SectionMesh>,
+    /// The meshed sections, on the card (terrain.rs).
+    pub terrain: Terrain,
     epoch: u32,
     cache: Vec<u16>,
-    opaque: Vec<CV>,
-    water: Vec<CV>,
+    /// A section's quads by run while it is meshed: facing down, up, north, south, west, east,
+    /// any (solid and cut-out together), then translucent.
+    runs: [Vec<CV>; RUNS],
+    /// Sections being meshed on the worker threads, and the number of their newest job.
+    inflight: BTreeMap<(i32, i32, i32), u64>,
+    gen: u64,
+    done: Vec<crate::mesher::Done>,
+    batch: Vec<(i32, i32, i32)>,
+    /// Cave culling.
+    pub graph: crate::occlusion::Graph,
+    eye_in_opaque: bool,
+    /// Vanilla's Cutout Leaves option (set by the caller each frame), and the value the
+    /// meshes were made with: a change meshes everything again.
+    pub cutout_leaves: bool,
+    meshed_leaves: bool,
+    vis_stack: Vec<u16>,
     pub ui: Vec<V>,
     pub sections_drawn: u32,
     pub vertices_drawn: u32,
@@ -76,7 +82,7 @@ pub struct Renderer {
 
 /// Faces: normal, the four corners (0 min, 1 max per axis, counter-clockwise from outside),
 /// brightness.
-const FACES: [([i32; 3], [[u8; 3]; 4], f32); 6] = [
+pub const FACES: [([i32; 3], [[u8; 3]; 4], f32); 6] = [
     ([0, 1, 0], [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]], 1.0),
     ([0, -1, 0], [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]], 0.5),
     ([1, 0, 0], [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]], 0.6),
@@ -84,14 +90,14 @@ const FACES: [([i32; 3], [[u8; 3]; 4], f32); 6] = [
     ([0, 0, 1], [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], 0.8),
     ([0, 0, -1], [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]], 0.8),
 ];
-const AO: [f32; 4] = [0.5, 0.68, 0.84, 1.0];
+pub const AO: [f32; 4] = [0.5, 0.68, 0.84, 1.0];
 
 const P: i32 = 18; // padded section side
-fn ci(x: i32, y: i32, z: i32) -> usize {
+pub fn ci(x: i32, y: i32, z: i32) -> usize {
     (((y + 1) * P + (z + 1)) * P + (x + 1)) as usize
 }
 
-fn shade(c: [u8; 3], k: f32, a: u8) -> [u8; 4] {
+pub fn shade(c: [u8; 3], k: f32, a: u8) -> [u8; 4] {
     let f = |v: u8| (v as f32 * k).min(255.0) as u8;
     [f(c[0]), f(c[1]), f(c[2]), a]
 }
@@ -99,11 +105,19 @@ fn shade(c: [u8; 3], k: f32, a: u8) -> [u8; 4] {
 impl Renderer {
     pub fn new() -> Renderer {
         Renderer {
-            meshes: BTreeMap::new(),
+            terrain: Terrain::new(),
             epoch: 0,
             cache: alloc::vec![0; (P * P * P) as usize],
-            opaque: Vec::new(),
-            water: Vec::new(),
+            runs: Default::default(),
+            inflight: BTreeMap::new(),
+            gen: 0,
+            done: Vec::new(),
+            batch: Vec::new(),
+            graph: crate::occlusion::Graph::new(),
+            eye_in_opaque: false,
+            cutout_leaves: true,
+            meshed_leaves: true,
+            vis_stack: Vec::new(),
             ui: Vec::new(),
             sections_drawn: 0,
             vertices_drawn: 0,
@@ -171,57 +185,135 @@ impl Renderer {
         Ok(())
     }
 
-    /// A new world (another server): the old world's meshes go.
+    /// A new world (another server): the old world's meshes go, and the meshing that was on its way.
     pub fn forget_world(&mut self, gl: &Gl) {
-        for (_, m) in core::mem::take(&mut self.meshes) {
-            Self::drop_mesh(gl, m);
-        }
+        self.cancel_meshing();
+        self.terrain.clear(gl);
+        self.graph.clear();
     }
 
-    fn drop_mesh(gl: &Gl, m: SectionMesh) {
-        for b in [m.opaque.vbo, m.water.vbo] {
-            if b != 0 {
-                unsafe { (gl.DeleteBuffers)(1, &b) };
-            }
-        }
+    /// The meshing threads stop and what they had is dropped: before the block table changes
+    /// (a resource pack reload) or goes (the game ends).
+    pub fn cancel_meshing(&mut self) {
+        crate::mesher::cancel_and_wait();
+        self.inflight.clear();
+        self.done.clear();
     }
 
-    /// Meshes the dirty sections nearest the camera, for up to `budget_ms`.
+    /// Meshes the dirty sections nearest the camera: hands them to the worker threads and
+    /// puts what they finished on the card (for up to `budget_ms`), or without threads meshes
+    /// them here for up to `budget_ms`.
     pub fn update(&mut self, gl: &Gl, world: &mut World, b: &Blocks, eye: [f64; 3], budget_ms: u64) {
         if world.epoch != self.epoch {
             self.epoch = world.epoch;
-            let old = core::mem::take(&mut self.meshes);
-            for (_, m) in old {
-                Self::drop_mesh(gl, m);
+            crate::mesher::cancel_and_wait();
+            self.inflight.clear();
+            self.done.clear();
+            self.terrain.clear(gl);
+            self.graph.clear();
+        }
+        // Vanilla turns cave culling off for a spectator inside a full block (LevelRenderer
+        // .setupRender): the camera then sees through the ground.
+        self.eye_in_opaque = b.opaque_cube(world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2])));
+        if self.cutout_leaves != self.meshed_leaves {
+            self.meshed_leaves = self.cutout_leaves;
+            let n = world.height / 16;
+            let keys: Vec<(i32, i32)> = world.columns.keys().copied().collect();
+            for (x, z) in keys {
+                for sy in 0..n {
+                    world.dirty.insert((x, sy, z));
+                }
             }
         }
         let start = crate::sys::now_ms();
-        let (ex, ey, ez) = (eye[0] as i32 >> 4, (eye[1] as i32 - world.min_y) >> 4, eye[2] as i32 >> 4);
-        loop {
-            if world.dirty.is_empty() || crate::sys::now_ms() - start > budget_ms {
-                break;
-            }
-            // The nearest dirty section.
-            let mut best = None;
-            let mut best_d = i32::MAX;
-            for &(x, y, z) in world.dirty.iter() {
-                let d = (x - ex).abs().max((z - ez).abs()) * 4 + (y - ey).abs();
-                if d < best_d {
-                    best_d = d;
-                    best = Some((x, y, z));
+        let threaded = crate::mesher::threaded();
+        if threaded {
+            crate::mesher::collect(&mut self.done);
+            let mut used = 0;
+            for d in self.done.iter_mut() {
+                if used > 0 && crate::sys::now_ms() - start > budget_ms {
+                    break;
+                }
+                used += 1;
+                if self.inflight.get(&d.key) != Some(&d.gen) {
+                    continue; // its blocks changed again: a newer job is on the way
+                }
+                self.inflight.remove(&d.key);
+                self.graph.set(d.key, d.vis);
+                if d.first[RUNS] == 0 {
+                    self.terrain.remove(gl, d.key);
+                } else {
+                    self.terrain.put(gl, d.key, core::mem::take(&mut d.data), d.first);
                 }
             }
-            let k = best.unwrap();
-            world.dirty.remove(&k);
-            if let Some(m) = self.meshes.remove(&k) {
-                Self::drop_mesh(gl, m);
+            self.done.drain(..used);
+        }
+        let (ex, ey, ez) = (eye[0] as i32 >> 4, (eye[1] as i32 - world.min_y) >> 4, eye[2] as i32 >> 4);
+        let most = crate::mesher::workers() as usize * 3 + 2;
+        // The nearest dirty sections, a batch at a time (one pass over the set per batch).
+        'batches: loop {
+            nearest(&world.dirty, (ex, ey, ez), &mut self.batch);
+            if self.batch.is_empty() {
+                break;
             }
-            if world.columns.contains_key(&(k.0, k.2)) {
-                if let Some(m) = self.build(gl, world, b, k) {
-                    self.meshes.insert(k, m);
+            for i in 0..self.batch.len() {
+                if crate::sys::now_ms() - start > budget_ms || (threaded && crate::mesher::pending() >= most) {
+                    break 'batches;
+                }
+                let k = self.batch[i];
+                world.dirty.remove(&k);
+                let Some(job) = self.job(gl, world, b, k) else { continue };
+                if threaded {
+                    self.inflight.insert(k, job.gen);
+                    crate::mesher::submit(job);
+                } else {
+                    let d = crate::mesher::mesh(&job, &mut self.runs, &mut self.vis_stack);
+                    self.graph.set(k, d.vis);
+                    if d.first[RUNS] == 0 {
+                        self.terrain.remove(gl, k);
+                    } else {
+                        self.terrain.put(gl, k, d.data, d.first);
+                    }
                 }
             }
         }
+    }
+
+    /// What meshing section `k` needs, or None when it has nothing to draw (then it is
+    /// dropped here).
+    fn job(&mut self, gl: &Gl, world: &World, b: &Blocks, k: (i32, i32, i32)) -> Option<crate::mesher::Job> {
+        if !world.columns.contains_key(&(k.0, k.2)) || !self.fill_cache(world, k) {
+            self.inflight.remove(&k);
+            self.terrain.remove(gl, k);
+            self.graph.set(k, crate::occlusion::ALL);
+            return None;
+        }
+        // The biome ids of the 20 x 20 columns around, per 4-block layer (as World::biome).
+        let mut cols: [[Option<&crate::world::Column>; 3]; 3] = [[None; 3]; 3];
+        for dz in 0..3 {
+            for dx in 0..3 {
+                cols[dz][dx] = world.columns.get(&(k.0 + dx as i32 - 1, k.2 + dz as i32 - 1));
+            }
+        }
+        let mut ids = alloc::vec![0u16; 1600];
+        for layer in 0..4 {
+            let ly = (k.1 * 16 + layer * 4 + 2).clamp(0, world.height - 1);
+            let (sec, cy) = ((ly >> 4) as usize, (ly & 15) >> 2);
+            for gz in 0..20 {
+                let wz = k.2 * 16 + gz - 2;
+                let (cz, lz) = (((wz >> 4) - k.2 + 1) as usize, wz & 15);
+                for gx in 0..20 {
+                    let wx = k.0 * 16 + gx - 2;
+                    let (cx, lx) = (((wx >> 4) - k.0 + 1) as usize, wx & 15);
+                    ids[(layer * 400 + gz * 20 + gx) as usize] = match cols[cz][cx] {
+                        Some(c) => c.biomes[sec][((cy * 4 + (lz >> 2)) * 4 + (lx >> 2)) as usize],
+                        None => u16::MAX,
+                    };
+                }
+            }
+        }
+        self.gen += 1;
+        Some(crate::mesher::Job { key: k, gen: self.gen, cache: self.cache.clone(), ids, colours: world.biome_colours.clone(), blocks: b as *const Blocks, cutout_leaves: self.meshed_leaves })
     }
 
     fn fill_cache(&mut self, world: &World, (cx, sy, cz): (i32, i32, i32)) -> bool {
@@ -272,186 +364,6 @@ impl Renderer {
             }
         }
         true
-    }
-
-    fn build(&mut self, gl: &Gl, world: &World, b: &Blocks, k: (i32, i32, i32)) -> Option<SectionMesh> {
-        if !self.fill_cache(world, k) {
-            return None;
-        }
-        self.opaque.clear();
-        self.water.clear();
-        // Biome colours for this section, made on first need: per 4-block layer, the biome ids
-        // of a 20 x 20 area, blended over 5 x 5 (vanilla's default biome blend).
-        let mut tints: Option<Vec<[[u8; 3]; 3]>> = None;
-        let section_y = world.min_y + k.1 * 16;
-        let make_tints = || -> Vec<[[u8; 3]; 3]> {
-            let mut out = alloc::vec![[[0u8; 3]; 3]; 4 * 256];
-            for layer in 0..4 {
-                let y = section_y + layer * 4 + 2;
-                let mut ids = [0u16; 400];
-                for gz in 0..20 {
-                    for gx in 0..20 {
-                        ids[gz * 20 + gx] = world.biome(k.0 * 16 + gx as i32 - 2, y, k.2 * 16 + gz as i32 - 2);
-                    }
-                }
-                for z in 0..16 {
-                    for x in 0..16 {
-                        let mut acc = [[0u32; 3]; 3];
-                        let mut n = 0;
-                        for dz in 0..5 {
-                            for dx in 0..5 {
-                                if let Some(c) = world.biome_colours.get(ids[(z + dz) * 20 + x + dx] as usize) {
-                                    for kind in 0..3 {
-                                        acc[kind][0] += c[kind] >> 16 & 255;
-                                        acc[kind][1] += c[kind] >> 8 & 255;
-                                        acc[kind][2] += c[kind] & 255;
-                                    }
-                                    n += 1;
-                                }
-                            }
-                        }
-                        let mut col = [[0x91, 0xBD, 0x59], [0x77, 0xAB, 0x2F], [0x3F, 0x76, 0xE4]];
-                        if n > 0 {
-                            for kind in 0..3 {
-                                col[kind] = [(acc[kind][0] / n) as u8, (acc[kind][1] / n) as u8, (acc[kind][2] / n) as u8];
-                            }
-                        }
-                        out[layer as usize * 256 + z * 16 + x] = col;
-                    }
-                }
-            }
-            out
-        };
-        let cache = &self.cache;
-        let at = |x: i32, y: i32, z: i32| cache[ci(x, y, z)];
-        let occ = |x: i32, y: i32, z: i32| b.opaque_cube(at(x, y, z));
-        const DIR: [[i32; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
-        for y in 0..16 {
-            for z in 0..16 {
-                for x in 0..16 {
-                    let s = at(x, y, z);
-                    if s == 0 {
-                        continue;
-                    }
-                    let blk = b.of_state(s);
-                    let kind = blk.kind;
-                    if kind == blocks::AIR || kind == blocks::INVISIBLE_SOLID {
-                        continue;
-                    }
-                    let (fx, fy, fz) = (x as f32, y as f32, z as f32);
-                    if kind == blocks::WATER || kind == blocks::LAVA {
-                        let water = kind == blocks::WATER;
-                        let same = |s2: u16| b.kind(s2) == kind;
-                        let top = if same(at(x, y + 1, z)) { 1.0 } else { 0.875 };
-                        let r = if water { b.water_uv } else { b.lava_uv };
-                        let tint = if water {
-                            let t = tints.get_or_insert_with(&make_tints);
-                            t[((y >> 2) * 256 + z * 16 + x) as usize][2]
-                        } else {
-                            [255, 255, 255]
-                        };
-                        let corner_uv = [[r[0], r[1]], [r[0], r[3]], [r[2], r[3]], [r[2], r[1]]];
-                        for (nrm, corners, light) in FACES.iter() {
-                            let (nx, ny, nz) = (x + nrm[0], y + nrm[1], z + nrm[2]);
-                            if same(at(nx, ny, nz)) || occ(nx, ny, nz) {
-                                continue;
-                            }
-                            let c = shade(tint, *light, if water { 190 } else { 255 });
-                            let out = if water { &mut self.water } else { &mut self.opaque };
-                            for (i, cr) in corners.iter().enumerate() {
-                                let p = [fx + cr[0] as f32, fy + if cr[1] == 1 { top } else { 0.0 }, fz + cr[2] as f32];
-                                out.push(cv(p, corner_uv[i], c));
-                            }
-                        }
-                        continue;
-                    }
-                    // Grass, foliage and water take their biome's colour; birch, spruce,
-                    // redstone and stems keep their fixed ones.
-                    let tint = match blk.tint {
-                        1 | 2 | 5 => {
-                            let t = tints.get_or_insert_with(&make_tints);
-                            t[((y >> 2) * 256 + z * 16 + x) as usize][match blk.tint { 1 => 0, 2 => 1, _ => 2 }]
-                        }
-                        0 => [255, 255, 255],
-                        n => blocks::tint_colour(n),
-                    };
-                    let glassy = kind == blocks::CUTOUT && !blk.name.ends_with("leaves");
-                    // Plants, bamboo and dripstone stand at their random offset (getOffset).
-                    let off = b.offset_at(s, k.0 * 16 + x, k.2 * 16 + z);
-                    let off = [(off[0] * 1024.0) as i16, (off[1] * 1024.0) as i16, (off[2] * 1024.0) as i16];
-                    for q in b.model(s) {
-                        if q.cull < 6 {
-                            let d = DIR[q.cull as usize];
-                            let ns = at(x + d[0], y + d[1], z + d[2]);
-                            if b.opaque_cube(ns) || (glassy && b.state(ns).block == b.state(s).block) {
-                                continue;
-                            }
-                        }
-                        let base = if q.flags & blocks::Q_TINTED != 0 { tint } else { [255, 255, 255] };
-                        let light = q.light as f32 / 255.0;
-                        // The face's outward direction, for ambient occlusion on boundary faces.
-                        let edge = q.flags & blocks::Q_ON_EDGE != 0 && q.cull < 6;
-                        let out = if q.flags & blocks::Q_TRANSLUCENT != 0 { &mut self.water } else { &mut self.opaque };
-                        for i in 0..4 {
-                            let p = q.pos[i];
-                            let (px, py, pz) = (p[0] as f32 / 1024.0, p[1] as f32 / 1024.0, p[2] as f32 / 1024.0);
-                            let mut k = light;
-                            if edge {
-                                let n = DIR[q.cull as usize];
-                                let (nx, ny, nz) = (x + n[0], y + n[1], z + n[2]);
-                                let cr = [px > 0.5, py > 0.5, pz > 0.5];
-                                let mut t = [0i32; 3];
-                                for a in 0..3 {
-                                    if n[a] == 0 {
-                                        t[a] = if cr[a] { 1 } else { -1 };
-                                    }
-                                }
-                                let mut sides = [false; 2];
-                                let mut j = 0;
-                                for a in 0..3 {
-                                    if t[a] != 0 && j < 2 {
-                                        let mut dd = [nx, ny, nz];
-                                        dd[a] += t[a];
-                                        sides[j] = occ(dd[0], dd[1], dd[2]);
-                                        j += 1;
-                                    }
-                                }
-                                let c = occ(nx + t[0], ny + t[1], nz + t[2]);
-                                let ao = if sides[0] && sides[1] { 0 } else { 3 - (sides[0] as usize + sides[1] as usize + c as usize) };
-                                k *= AO[ao];
-                            }
-                            out.push(CV {
-                                p: [
-                                    (x * 1024) as i16 + q.pos[i][0] + off[0],
-                                    (y * 1024) as i16 + q.pos[i][1] + off[1],
-                                    (z * 1024) as i16 + q.pos[i][2] + off[2],
-                                ],
-                                _pad: 0,
-                                uv: [(q.uv[i][0] >> 1) as i16, (q.uv[i][1] >> 1) as i16],
-                                c: shade(base, k, 255),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        if self.opaque.is_empty() && self.water.is_empty() {
-            return None;
-        }
-        let up = |v: &Vec<CV>| -> Mesh {
-            if v.is_empty() {
-                return Mesh { vbo: 0, count: 0 };
-            }
-            let mut id = 0u32;
-            unsafe {
-                (gl.GenBuffers)(1, &mut id);
-                (gl.BindBuffer)(ARRAY_BUFFER, id);
-                (gl.BufferData)(ARRAY_BUFFER, (v.len() * CSTRIDE as usize) as isize, v.as_ptr() as *const c_void, STATIC_DRAW);
-                (gl.BindBuffer)(ARRAY_BUFFER, 0);
-            }
-            Mesh { vbo: id, count: v.len() as i32 }
-        };
-        Some(SectionMesh { opaque: up(&self.opaque), water: up(&self.water) })
     }
 
     /// Draws the world from `eye` looking along yaw/pitch (degrees, Minecraft's convention).
@@ -506,6 +418,7 @@ impl Renderer {
                 (gl.MatrixMode)(MODELVIEW);
             }
             sky_pass(&vf);
+            crate::perf::lap(crate::perf::S::Sky);
             unsafe {
                 let t: [f32; 16] = [1.0 / 32767.0, 0.0, 0.0, 0.0, 0.0, 1.0 / 32767.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
                 (gl.MatrixMode)(TEXTURE);
@@ -522,54 +435,30 @@ impl Renderer {
             }
         }
         let planes = frustum(&proj, &view);
-        let mut order: Vec<((i32, i32, i32), f64)> = Vec::new();
         let maxd = (view_chunks as f64 + 1.0) * 16.0;
-        for (&k, _) in self.meshes.iter() {
-            let c = [
-                (k.0 * 16 + 8) as f64 - eye[0],
-                (world.min_y + k.1 * 16 + 8) as f64 - eye[1],
-                (k.2 * 16 + 8) as f64 - eye[2],
-            ];
-            let d2 = c[0] * c[0] + c[2] * c[2];
-            if d2 > maxd * maxd {
-                continue;
-            }
-            if !in_frustum(&planes, [c[0] - 8.0, c[1] - 8.0, c[2] - 8.0], [c[0] + 8.0, c[1] + 8.0, c[2] + 8.0]) {
-                continue;
-            }
-            order.push((k, d2 + c[1] * c[1]));
-        }
-        self.sections_drawn = order.len() as u32;
-        let set = |k: &(i32, i32, i32)| {
-            let t = [
-                (k.0 * 16) as f64 - eye[0],
-                (world.min_y + k.1 * 16) as f64 - eye[1],
-                (k.2 * 16) as f64 - eye[2],
-            ];
-            let mut m = translate(&view, t);
-            for i in 0..12 {
-                m[i] /= 1024.0;
-            }
-            unsafe { (gl.LoadMatrixf)(m.as_ptr()) };
+        let layers = world.height / 16;
+        let cam = (math::ifloor(eye[0]) >> 4, (math::ifloor(eye[1]) - world.min_y) >> 4, math::ifloor(eye[2]) >> 4);
+        self.graph.update(cam, view_chunks + 1, layers, !self.eye_in_opaque);
+        let graph = &self.graph;
+        let mut keep = |k: (i32, i32, i32), lo: [f64; 3]| {
+            let (cx, cz) = (lo[0] + 8.0, lo[2] + 8.0);
+            cx * cx + cz * cz <= maxd * maxd && in_frustum(&planes, lo, [lo[0] + 16.0, lo[1] + 16.0, lo[2] + 16.0]) && graph.visible(k)
         };
-        let draw = |m: &Mesh| unsafe {
-            (gl.BindBuffer)(ARRAY_BUFFER, m.vbo);
-            (gl.VertexPointer)(3, SHORT, CSTRIDE, core::ptr::null());
-            (gl.TexCoordPointer)(2, SHORT, CSTRIDE, 8 as *const c_void);
-            (gl.ColorPointer)(4, UNSIGNED_BYTE, CSTRIDE, 12 as *const c_void);
-            (gl.DrawArrays)(QUADS, 0, m.count);
+        let keep_box = |lo: [f64; 3], hi: [f64; 3]| {
+            // The nearest point of the box, horizontally.
+            let dx = if lo[0] > 0.0 { lo[0] } else if hi[0] < 0.0 { -hi[0] } else { 0.0 };
+            let dz = if lo[2] > 0.0 { lo[2] } else if hi[2] < 0.0 { -hi[2] } else { 0.0 };
+            dx * dx + dz * dz <= (maxd + 16.0) * (maxd + 16.0) && in_frustum(&planes, lo, hi)
         };
-        self.vertices_drawn = order.iter().map(|(k, _)| (self.meshes[k].opaque.count + self.meshes[k].water.count) as u32).sum();
-        for (k, _) in order.iter() {
-            let m = &self.meshes[k];
-            if m.opaque.count > 0 {
-                set(k);
-                draw(&m.opaque);
-            }
-        }
+        self.terrain.select(eye, world.min_y, &keep_box, &mut keep, &faces_seen);
+        self.sections_drawn = self.terrain.sections_drawn;
+        // Solid and cut-out quads together, with the alpha test, near to far: on the cards
+        // measured one pass beats two (solid without the test, then cut-out with it).
+        unsafe { (gl.Enable)(ALPHA_TEST) };
+        self.terrain.draw_opaque(gl, &view, eye, world.min_y);
+        crate::perf::lap(crate::perf::S::World);
         // Entities, between the opaque world and the water (vanilla's order).
         unsafe {
-            (gl.BindBuffer)(ARRAY_BUFFER, 0);
             (gl.MatrixMode)(TEXTURE);
             (gl.LoadIdentity)();
             (gl.MatrixMode)(MODELVIEW);
@@ -586,24 +475,21 @@ impl Renderer {
             (gl.MatrixMode)(MODELVIEW);
             (gl.Enable)(TEXTURE_2D);
             (gl.BindTexture)(TEXTURE_2D, self.atlas);
+            (gl.EnableClientState)(VERTEX_ARRAY);
+            (gl.EnableClientState)(COLOR_ARRAY);
             (gl.EnableClientState)(TEXTURE_COORD_ARRAY);
             (gl.Enable)(ALPHA_TEST);
         }
         // Water, far to near, blended, without writing depth.
-        order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
         unsafe {
             (gl.Enable)(BLEND);
             (gl.BlendFunc)(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
             (gl.DepthMask)(0);
             (gl.AlphaFunc)(GREATER, 0.004);
         }
-        for (k, _) in order.iter() {
-            let m = &self.meshes[k];
-            if m.water.count > 0 {
-                set(k);
-                draw(&m.water);
-            }
-        }
+        self.terrain.draw_translucent(gl, &view, eye, world.min_y);
+        self.vertices_drawn = self.terrain.quads_drawn * 4;
+        crate::perf::lap(crate::perf::S::Water);
         unsafe {
             (gl.DepthMask)(1);
             (gl.BindBuffer)(ARRAY_BUFFER, 0);
@@ -741,6 +627,73 @@ impl Renderer {
     }
 }
 
+/// Which facing runs (bit per BUCKETS entry) of a section whose corner is at `lo` (relative to
+/// the eye) can face the camera: a face looking up is seen only from above its plane, and so on.
+/// Faces stay within a block or two of their section (models reach out a block, plants move).
+fn faces_seen(lo: [f64; 3]) -> u8 {
+    const M: f64 = 2.0;
+    let mut f = 0u8;
+    // 0 down, 1 up, 2 north (-z), 3 south (+z), 4 west (-x), 5 east (+x)
+    for (axis, neg, pos) in [(1, 0, 1), (2, 2, 3), (0, 4, 5)] {
+        if lo[axis] + 16.0 + M > 0.0 {
+            f |= 1 << neg;
+        }
+        if lo[axis] - M < 0.0 {
+            f |= 1 << pos;
+        }
+    }
+    f
+}
+
+/// Which facing run a quad goes in: its normal (from the diagonals, counter-clockwise front)
+/// when it lies along an axis, else 6.
+pub fn facing(q: &[CV; 4]) -> usize {
+    let d = |a: usize, b: usize| [q[b].p[0] as i32 - q[a].p[0] as i32, q[b].p[1] as i32 - q[a].p[1] as i32, q[b].p[2] as i32 - q[a].p[2] as i32];
+    let (a, b) = (d(0, 2), d(1, 3));
+    let n = [
+        a[1] as i64 * b[2] as i64 - a[2] as i64 * b[1] as i64,
+        a[2] as i64 * b[0] as i64 - a[0] as i64 * b[2] as i64,
+        a[0] as i64 * b[1] as i64 - a[1] as i64 * b[0] as i64,
+    ];
+    match (n[0].signum(), n[1].signum(), n[2].signum()) {
+        (0, -1, 0) => 0,
+        (0, 1, 0) => 1,
+        (0, 0, -1) => 2,
+        (0, 0, 1) => 3,
+        (-1, 0, 0) => 4,
+        (1, 0, 0) => 5,
+        _ => 6,
+    }
+}
+
+/// Draws the runs `base..base + 7` picked by `mask` (or just `base` for the translucent run,
+/// mask 1) of a section in one call, merging runs that touch. Returns the quads drawn.
+/// The (up to) 64 dirty sections nearest the camera section `e`, nearest first (horizontal
+/// distance counts four times the vertical, as the order chunks come in).
+fn nearest(dirty: &alloc::collections::BTreeSet<(i32, i32, i32)>, e: (i32, i32, i32), out: &mut Vec<(i32, i32, i32)>) {
+    const K: usize = 64;
+    let mut best: [(i32, (i32, i32, i32)); K] = [(i32::MAX, (0, 0, 0)); K];
+    let mut n = 0;
+    for &k in dirty.iter() {
+        let d = (k.0 - e.0).abs().max((k.2 - e.2).abs()) * 4 + (k.1 - e.1).abs();
+        if n == K && d >= best[K - 1].0 {
+            continue;
+        }
+        // Insert in order.
+        let mut i = if n < K { n } else { K - 1 };
+        while i > 0 && best[i - 1].0 > d {
+            best[i] = best[i - 1];
+            i -= 1;
+        }
+        best[i] = (d, k);
+        if n < K {
+            n += 1;
+        }
+    }
+    out.clear();
+    out.extend(best[..n].iter().map(|b| b.1));
+}
+
 pub fn perspective_pub(fov_deg: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
     perspective(fov_deg, aspect, near, far)
 }
@@ -820,4 +773,25 @@ fn in_frustum(planes: &[[f64; 4]; 6], lo: [f64; 3], hi: [f64; 3]) -> bool {
         }
     }
     true
+}
+
+/// Checks for `penryn selftest`: quads land in the right facing run, and a run is drawn
+/// exactly when its faces can be seen.
+pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
+    let mut out = Vec::new();
+    let mut names = String::new();
+    for (_, corners, _) in FACES.iter() {
+        let mut q = [cv([0.0; 3], [0.0; 2], [0; 4]); 4];
+        for (i, c) in corners.iter().enumerate() {
+            q[i] = cv([c[0] as f32 + 3.0, c[1] as f32 + 5.0, c[2] as f32 + 7.0], [0.0; 2], [0; 4]);
+        }
+        names.push_str(&alloc::format!("{}", facing(&q)));
+    }
+    // FACES: up, down, east, west, south, north.
+    out.push(("render facing runs", names, "105432"));
+    let cross = [cv([0.0, 0.0, 0.0], [0.0; 2], [0; 4]), cv([1.0, 0.0, 1.0], [0.0; 2], [0; 4]), cv([1.0, 1.0, 1.0], [0.0; 2], [0; 4]), cv([0.0, 1.0, 0.0], [0.0; 2], [0; 4])];
+    out.push(("render slanted run", alloc::format!("{}", facing(&cross)), "6"));
+    // A section far below, east and south of the eye: its tops, west and north faces show.
+    out.push(("render faces seen", alloc::format!("{:06b} {:06b}", faces_seen([40.0, -60.0, 30.0]), faces_seen([-8.0, -8.0, -8.0])), "010110 111111"));
+    out
 }

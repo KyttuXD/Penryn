@@ -106,6 +106,14 @@ extern "C" {
     pub fn recvfrom(fd: c_int, buf: *mut c_void, n: SizeT, flags: c_int, from: *mut c_void, len: *mut u32) -> SsizeT;
     fn localtime_r(t: *const i64, out: *mut c_void) -> *mut c_void;
     fn system(cmd: *const c_char) -> c_int;
+    /// The processor count, for the meshing threads (mesher.rs).
+    fn sysconf(name: c_int) -> i64;
+}
+
+/// Processors online (sysconf _SC_NPROCESSORS_ONLN: 58 on Mac OS X, 84 on Linux), at least 1.
+pub fn processors() -> u32 {
+    let name = if cfg!(target_os = "macos") { 58 } else { 84 };
+    unsafe { sysconf(name) }.clamp(1, 64) as u32
 }
 
 // The prebuilt `alloc` was compiled with unwinding; with panic = "abort" nothing ever unwinds,

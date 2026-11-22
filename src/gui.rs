@@ -148,6 +148,8 @@ pub struct Gui {
     /// Text drawn bigger (vanilla's pose scale: titles 4x, subtitles 2x); normally 1.
     pub text_scale: f32,
     segs: Vec<(Tex, Vec<V>)>,
+    /// Emptied vertex lists kept for the next frame's segments (no allocation per frame).
+    spare: Vec<Vec<V>>,
 }
 
 pub fn rd16(d: &[u8], o: usize) -> u16 {
@@ -307,6 +309,7 @@ impl Gui {
             fade: 255,
             text_scale: 1.0,
             segs: Vec::new(),
+            spare: Vec::new(),
         })
     }
 
@@ -319,12 +322,20 @@ impl Gui {
         self.scale = s as f32;
         self.width = w as f32 / self.scale;
         self.height = h as f32 / self.scale;
-        self.segs.clear();
+        self.recycle();
+    }
+
+    fn recycle(&mut self) {
+        for (_, mut v) in self.segs.drain(..) {
+            v.clear();
+            self.spare.push(v);
+        }
     }
 
     fn seg(&mut self, t: Tex) -> &mut Vec<V> {
         if self.segs.last().map_or(true, |s| s.0 != t) {
-            self.segs.push((t, Vec::new()));
+            let v = self.spare.pop().unwrap_or_default();
+            self.segs.push((t, v));
         }
         &mut self.segs.last_mut().unwrap().1
     }
@@ -862,6 +873,6 @@ impl Gui {
             (gl.DisableClientState)(TEXTURE_COORD_ARRAY);
         }
         self.segs = segs;
-        self.segs.clear();
+        self.recycle();
     }
 }

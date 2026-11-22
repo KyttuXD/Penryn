@@ -27,6 +27,8 @@ pub struct Conn {
     /// The compression threshold, once the server has set one.
     pub threshold: Option<i32>,
     pub cipher: Option<crate::crypto::Cfb8Pair>,
+    /// The receive buffer, kept (zeroing 64 KB on every call cost more than the call).
+    buf: Vec<u8>,
 }
 
 /// The longest frame the protocol allows (2^21 - 1 bytes).
@@ -34,7 +36,7 @@ const MAX_FRAME: usize = 2_097_151;
 
 impl Conn {
     pub fn open(host: &str, port: u16) -> Result<Conn, String> {
-        Ok(Conn { tcp: Tcp::connect(host, port)?, rx: Vec::new(), used: 0, threshold: None, cipher: None })
+        Ok(Conn { tcp: Tcp::connect(host, port)?, rx: Vec::new(), used: 0, threshold: None, cipher: None, buf: alloc::vec![0u8; 65536] })
     }
 
     pub fn send(&mut self, id: i32, body: &Out) -> Result<(), String> {
@@ -73,8 +75,7 @@ impl Conn {
                 return Ok(None);
             }
             polled = true;
-            let mut buf = [0u8; 65536];
-            let n = self.tcp.recv(&mut buf, left.max(0))?;
+            let n = self.tcp.recv(&mut self.buf, left.max(0))?;
             if n == 0 {
                 if left <= 0 {
                     return Ok(None);
@@ -82,7 +83,7 @@ impl Conn {
                 continue;
             }
             if let Some(c) = self.cipher.as_mut() {
-                c.decrypt(&mut buf[..n]);
+                c.decrypt(&mut self.buf[..n]);
             }
             if self.used > 0 && self.used == self.rx.len() {
                 self.rx.clear();
@@ -91,7 +92,7 @@ impl Conn {
                 self.rx.drain(..self.used);
                 self.used = 0;
             }
-            self.rx.extend_from_slice(&buf[..n]);
+            self.rx.extend_from_slice(&self.buf[..n]);
         }
     }
 
