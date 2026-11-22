@@ -8,6 +8,7 @@ extern crate alloc;
 mod account;
 mod audio;
 mod blocks;
+mod books;
 mod font;
 mod gui;
 mod hand;
@@ -20,8 +21,10 @@ mod entities;
 mod http;
 mod ids;
 mod lang;
+mod maps;
 mod math;
 mod md5;
+mod menus;
 mod moving;
 mod mobs;
 mod nbt;
@@ -276,6 +279,11 @@ fn selftest() -> Result<(), String> {
             }
         }
         Err(e) => say!("skip mob checks: {}", e),
+    }
+    // The container screens, maps and books (containers.bin is optional).
+    let cdata = sys::read_file(&alloc::format!("{}/containers.bin", data_dir()));
+    for (what, got, want) in menus::selftest(cdata.as_deref()).into_iter().chain(maps::selftest()).chain(books::selftest()) {
+        check(what, got, want);
     }
     if ok {
         Ok(())

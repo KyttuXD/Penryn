@@ -934,6 +934,9 @@ pub fn draw_items(
     let tiles_row = (atlas_size.0 / 16.0) as u32;
     for e in ents.values() {
         let Some((item, _)) = e.item else { continue };
+        if crate::maps::is_frame(e.kind) {
+            continue; // maps.rs draws what is in item frames
+        }
         let lerp = |a: f64, b: f64| a + (b - a) * partial as f64;
         let p = [lerp(e.prev[0], e.pos[0]) - eye[0], lerp(e.prev[1], e.pos[1]) - eye[1], lerp(e.prev[2], e.pos[2]) - eye[2]];
         if p[0] * p[0] + p[2] * p[2] > 48.0 * 48.0 {
