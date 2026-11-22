@@ -635,7 +635,7 @@ impl Game {
     /// deletions and the title and action bar timers.
     pub fn talk_tick(&mut self) -> Result<(), String> {
         collect_keys();
-        if self.talk.online_mode && self.loaded_sent {
+        if self.talk.online_mode {
             if self.talk.session.is_some() {
                 prepare_keys(false);
             }

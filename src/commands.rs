@@ -439,8 +439,9 @@ impl Tree {
                 }
                 _ => {}
             }
-            // An argument this client has no list for: the server's suggestions for it.
-            if out.len() == before && !matches!(node.ty, T_MESSAGE | T_STRING) {
+            // A registry argument this client has no list for: the server's suggestions
+            // (the server has the registries ClientSuggestionProvider would use).
+            if out.len() == before && matches!(node.ty, 12..=15 | 24 | 25 | 27 | 33 | 36 | 37 | 41 | 44..=48 | 52..=54 | 58 | 59) {
                 ask = true;
             }
         }
@@ -729,13 +730,22 @@ fn read_argument(node: &Node, input: &str, at: usize) -> ReadResult {
                     e = read_balanced(b, e)?;
                 }
                 Ok(e)
-            } else {
+            } else if node.ty == T_SCORE_HOLDER {
+                // ScoreHolderArgument: any name up to a space ("*" too).
                 let mut e = at;
                 while e < b.len() && b[e] != b' ' {
                     e += 1;
                 }
-                if e - at > 36 {
+                Ok(e)
+            } else {
+                // EntitySelectorParser.parseNameOrUUID: an unquoted string, a name or a UUID.
+                let mut e = read_unquoted(b, at);
+                if e == at {
                     return err("argument.entity.invalid", at);
+                }
+                if e - at > 16 && !(e - at == 36 && b[at..e].iter().filter(|c| **c == b'-').count() == 4) {
+                    e = at;
+                    return err("argument.entity.invalid", e);
                 }
                 Ok(e)
             }

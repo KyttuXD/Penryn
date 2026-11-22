@@ -66,6 +66,20 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   Settings (sensitivity, invert), Chat and Accessibility (view bobbing, FOV effects), laid out as
   26.3 lays them out, Esc and Done going back a screen. They are saved in `options.txt` in the data
   folder, with vanilla's key names; options Penryn has no use for yet are shown and kept.
+- **Chat as vanilla's, secure chat included**, so Penryn talks on servers that enforce secure
+  profiles (the vanilla default): the account's chat key pair (fetched by the relay from the
+  services, kept until it expires), the chat session, every message and every `message`
+  argument of a command (`/msg`, `/me`, `/say`...) signed in the session's chain (SHA256withRSA,
+  written here), the last-seen acknowledgements, and other players' messages checked against
+  their keys, with vanilla's "Not Secure" and "Modified" tags and tooltips. Text components in
+  full: colours (hex too), bold, italic, underlined, strikethrough, obfuscated, translations
+  with their arguments, keybinds, the chat types of the server's registry (`/msg`, `/me`,
+  teams), hover tooltips (text, items, entities) and click events in the open chat (commands,
+  suggestions, copying, links behind vanilla's confirmation, opened in the system's browser),
+  deleted messages, titles, subtitles and the action bar. The chat box has vanilla's command
+  suggestions from the server's command tree: the list above the input (Tab, arrows), the
+  arguments coloured, their usage, parse errors in red, the server's own suggestions; history
+  (up and down), cursor keys and the clipboard.
 - **Status effects**: their icons at the top right and beside the inventory (names, times,
   blinking as they run out), jump boost, levitation, slow falling and dolphin's grace on
   movement, blindness and darkness closing the fog in, night vision lifting the night.
@@ -93,6 +107,9 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 
 ## Not done yet
 
+- Chat: text in the uniform and alt fonts is drawn with the default glyphs; other players'
+  chat keys are not checked against the services' key list; no chat delay, narrator,
+  chat width/opacity options or saved command history yet.
 - No recipe book. The creative inventory draws potions and tipped arrows untinted and without
   the enchantment glint, and has no drag-splitting of stacks.
 - No ambient cave sounds or biome music (music.game everywhere).
@@ -129,7 +146,8 @@ which runs on 10.6), or from a path you give it.
 
 Mac OS X 10.6 cannot make the TLS 1.2 connections Microsoft, Xbox Live and Mojang require. The
 relay, `tools/relay.py` (Python 3, standard library only), runs on a newer computer on the same
-network and makes those calls for Penryn:
+network and makes those calls for Penryn (sign-in, the session join, the chat key pair for
+secure chat: `POST /certificates`):
 
 ```sh
 PENRYN_MSA_CLIENT_ID=<your client id> python3 tools/relay.py      # port 25580

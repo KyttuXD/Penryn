@@ -572,6 +572,14 @@ impl ChatUi {
             if self.list.is_none() || !self.keep {
                 self.show_list(false);
             }
+        } else if let Some(t) = g.talk.tree.as_ref() {
+            // Nothing from the server either: the usage again, errors included.
+            if self.input.starts_with('/') {
+                let p = t.parse(&self.input, 1);
+                let (node, start) = t.suggestion_context(&p, self.cursor);
+                self.usage.clear();
+                self.usage_info(g, &p, node, start);
+            }
         }
     }
 
@@ -968,45 +976,48 @@ fn confirm_buttons(gui: &Gui, c: &Confirm) -> Vec<crate::screens::Button> {
             crate::screens::Button::new(cx + 54.0, y, 100.0, crate::lang::get("gui.no")),
         ],
         Confirm::Command(..) => alloc::vec![
-            crate::screens::Button::new(cx - 154.0, y, 150.0, crate::lang::get("gui.yes")),
-            crate::screens::Button::new(cx + 4.0, y, 150.0, crate::lang::get("gui.no")),
+            crate::screens::Button::new(cx - 152.0, y, 150.0, crate::lang::get("gui.yes")),
+            crate::screens::Button::new(cx + 2.0, y, 150.0, crate::lang::get("gui.no")),
         ],
     }
 }
 
-/// ConfirmScreen's lines (title, message, warning) and where its buttons go: one column
-/// centred on the screen, 8 apart.
-fn confirm_layout(gui: &Gui, c: &Confirm) -> (Vec<(String, u32)>, f32) {
-    let mut lines: Vec<(String, u32)> = Vec::new();
+/// ConfirmScreen's layout: a column 8 apart, centred on the screen: the title, the message
+/// (wrapped at width - 50, centred), ConfirmLinkScreen's warning, then the buttons 16 lower.
+/// The lines with their y and colour, and the buttons' y.
+fn confirm_layout(gui: &Gui, c: &Confirm) -> (Vec<(String, f32, u32)>, f32) {
+    let mut blocks: Vec<Vec<(String, u32)>> = Vec::new();
     match c {
         Confirm::Url(u) => {
-            lines.push((crate::lang::get("chat.link.confirm"), 0xFFFF_FFFF));
-            for l in text::wrap(gui, &Rich::plain(u), gui.width - 50.0) {
-                lines.push((text::line_legacy(&l), 0xFFFF_FFFF));
-            }
-            lines.push((crate::lang::get("chat.link.warning"), 0xFFFF_CCCC));
+            blocks.push(alloc::vec![(crate::lang::get("chat.link.confirm"), 0xFFFF_FFFF)]);
+            blocks.push(text::wrap(gui, &Rich::plain(u), gui.width - 50.0).iter().map(|l| (text::line_legacy(l), 0xFFFF_FFFF)).collect());
+            blocks.push(alloc::vec![(crate::lang::get("chat.link.warning"), 0xFFFF_CCCC)]);
         }
         Confirm::Command(cmd, key) => {
-            lines.push((crate::lang::get("multiplayer.confirm_command.title"), 0xFFFF_FFFF));
+            blocks.push(alloc::vec![(crate::lang::get("multiplayer.confirm_command.title"), 0xFFFF_FFFF)]);
             let msg = crate::lang::format(key, &[alloc::format!("\u{a7}e{}\u{a7}r", cmd)]);
-            for l in text::wrap(gui, &Rich::from_legacy(&msg), gui.width - 50.0) {
-                lines.push((text::line_legacy(&l), 0xFFFF_FFFF));
-            }
+            blocks.push(text::wrap(gui, &Rich::from_legacy(&msg), gui.width - 50.0).iter().map(|l| (text::line_legacy(l), 0xFFFF_FFFF)).collect());
         }
     }
-    let h = lines.len() as f32 * 9.0 + 8.0 * 2.0 + 20.0;
-    let top = ((gui.height - h) / 2.0).max(4.0);
-    let y = top + lines.len() as f32 * 9.0 + 16.0;
-    (lines, y)
+    let text_h: f32 = blocks.iter().map(|b| b.len() as f32 * 9.0 + 8.0).sum();
+    let h = text_h + 16.0 + 20.0;
+    let mut y = ((gui.height - h) / 2.0).max(4.0);
+    let mut lines = Vec::new();
+    for b in blocks {
+        for (l, c) in b {
+            lines.push((l, y, c));
+            y += 9.0;
+        }
+        y += 8.0;
+    }
+    (lines, y + 16.0)
 }
 
 fn draw_confirm(gui: &mut Gui, c: &Confirm, mx: f32, my: f32) {
     crate::screens::dim(gui);
-    let (lines, by) = confirm_layout(gui, c);
-    let top = by - 16.0 - lines.len() as f32 * 9.0;
-    for (i, (l, col)) in lines.iter().enumerate() {
-        let y = top + i as f32 * 9.0 + if i > 0 { 8.0 } else { 0.0 };
-        gui.text_centered(l, gui.width / 2.0, y, *col);
+    let (lines, _) = confirm_layout(gui, c);
+    for (l, y, col) in lines.iter() {
+        gui.text_centered(l, gui.width / 2.0, *y, *col);
     }
     for b in confirm_buttons(gui, c) {
         b.draw(gui, mx, my);
