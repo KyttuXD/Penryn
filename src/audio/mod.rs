@@ -466,6 +466,14 @@ impl Audio {
         unsafe { (self.unlock)(self.device) };
     }
 
+    /// The options' volume per category (SoundSource order; master is applied to all).
+    pub fn set_volumes(&mut self, v: [f32; 11]) {
+        unsafe { (self.lock)(self.device) };
+        let mix = unsafe { &mut *MIX.load(Ordering::Acquire) };
+        mix.volumes = v;
+        unsafe { (self.unlock)(self.device) };
+    }
+
     pub fn has(&self, name: &str) -> bool {
         self.ids.contains_key(name) || self.named.contains_key(name)
     }

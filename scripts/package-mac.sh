@@ -53,7 +53,8 @@ SERVER=10.0.0.1:25565
 RELAY=10.0.0.1:25580
 # Leave empty to play signed in; a name plays offline under it (offline-mode servers only).
 NAME=
-# Chunks in each direction (2 to 16). 6 to 8 suits a Radeon HD 2600.
+# Chunks in each direction (2 to 16). 6 to 8 suits a Radeon HD 2600. Only until the game's
+# Options... screens save options.txt (here too): its render distance is used from then on.
 VIEW=8
 # yes: full screen (F11 switches too)
 FULLSCREEN=

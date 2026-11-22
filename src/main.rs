@@ -28,6 +28,7 @@ mod screens;
 mod sdl;
 mod sky;
 mod net;
+mod options;
 mod sys;
 mod wire;
 mod world;
@@ -230,6 +231,9 @@ fn selftest() -> Result<(), String> {
             }
         }
         Err(e) => say!("skip physics checks: {}", e),
+    }
+    for (what, got, want) in options::selftest() {
+        check(what, got, want);
     }
     if ok {
         Ok(())
