@@ -90,6 +90,8 @@ const USAGE: &str = "Penryn: a Minecraft Java Edition 26.3 client for old Macs
                                    (Horizon's launcher's account there, else a device code)
   penryn logout                    forget the saved sign-in
   penryn status HOST[:PORT]        the server-list ping
+  penryn add-server HOST[:PORT] [NAME]
+                                   put a server in the Multiplayer list (servers.dat)
   penryn join HOST[:PORT] [NAME]   join without a window, printing what happens (tests)
   penryn selftest                  check the built-in crypto and compression
 
@@ -149,6 +151,19 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("selftest") => selftest(),
+        Some("add-server") => {
+            let ip = args.get(2).ok_or(USAGE)?;
+            servers::address(ip).ok_or(USAGE)?;
+            let mut list = servers::List::load();
+            if list.servers.iter().any(|s| s.ip == *ip) {
+                return Ok(());
+            }
+            let name = args.get(3).cloned().unwrap_or_else(|| String::from("Minecraft Server"));
+            list.servers.push(servers::Server::new(&name, ip));
+            list.save();
+            say!("added {} ({}) to {}", name, ip, servers::path());
+            Ok(())
+        }
         Some("login") => {
             let relay = http::host_port(args.get(2).ok_or(USAGE)?, 25580);
             account::login_terminal(relay, args.get(3).map(|s| s.as_str()))

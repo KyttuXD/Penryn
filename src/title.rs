@@ -978,8 +978,9 @@ impl Front {
                 Self::click_sound(ui);
                 self.scr = Scr::Title;
             }
-            multiplayer::Act::Join(address, _pack) => {
+            multiplayer::Act::Join(address, pack) => {
                 Self::click_sound(ui);
+                crate::servers::set_join_pack(pack);
                 if let Some(mp) = self.mp.as_ref() {
                     if !mp.last_direct.is_empty() {
                         ui.menu.o.set_other("lastServer", &mp.last_direct);

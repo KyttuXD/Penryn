@@ -1190,9 +1190,13 @@ fn configure(
                 }
             }
             config::C_RESOURCE_PACK_PUSH => {
-                // Accept (we do not download it): 3 accepted, then 0 loaded.
+                // Accept (we do not download it): 3 accepted, then 0 loaded; 1 declined when
+                // the server's Resource Packs setting is Disabled (the server list's Edit).
                 let u = r.uuid().unwrap_or([0; 16]);
-                for status in [3, 0] {
+                let declined: &[i32] = &[1];
+                let accepted: &[i32] = &[3, 0];
+                let statuses = if crate::servers::join_pack() == crate::servers::Pack::Disabled { declined } else { accepted };
+                for &status in statuses {
                     let mut o = Out::new();
                     o.bytes(&u).varint(status);
                     c.send(config::S_RESOURCE_PACK, &o)?;

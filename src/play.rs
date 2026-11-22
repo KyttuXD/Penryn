@@ -359,6 +359,10 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
     }
     let mut front = crate::title::Front::new(account, relay, name, &sys::env("PENRYN_TEST_INPUT").unwrap_or_default());
     if let Some((h, p)) = server {
+        // A listed server keeps its resource pack setting when joined from the command line.
+        let list = crate::servers::List::load();
+        let listed = list.servers.iter().find(|s| crate::servers::address(&s.ip) == Some((h.clone(), p)));
+        crate::servers::set_join_pack(listed.map_or(crate::servers::Pack::Prompt, |s| s.pack));
         front.connect(&format!("{}:{}", h, p), false, view as i8);
     }
     loop {
