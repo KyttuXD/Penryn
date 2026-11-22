@@ -5,7 +5,7 @@
 #   scripts/install-mac.sh HOST [SERVER RELAY]
 #
 # HOST is an SSH destination (e.g. KT-MBA). SERVER and RELAY, when given, are written into
-# settings.txt (e.g. 10.0.0.185:25599 10.0.0.185:25580).
+# settings.txt (e.g. 192.168.1.10:25565 192.168.1.10:25580).
 set -eu
 cd "$(dirname "$0")/.."
 HOST="$1"

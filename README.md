@@ -1,13 +1,27 @@
 # Penryn
 
-A small Minecraft: Java Edition 26.3 client for old Macs: Mac OS X 10.6 Snow Leopard and later,
-64-bit Intel, OpenGL 2.1 (a 2008 Mac Pro with a Radeon HD 2600 is the target). Named after that
-Mac's CPU family. It plays on 26.3 servers (vanilla or Horizon), with your Microsoft account
-through a relay, and draws the game from your own copy of Minecraft.
+**A Rust Minecraft: Java Edition client that uses [Horizon](https://github.com/KyttuXD/horizon)
+for parity, and aims at machines older than Horizon itself can run on.**
 
-It is written in Rust with no crates and no standard library (`no_std`), so the same source builds
-for Linux, where it is developed and tested, and for Mac OS X 10.6, whose system lacks what
-Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and is made from Linux.
+Penryn plays Minecraft: Java Edition 26.3 (protocol 777) on real servers, vanilla or Horizon, signed
+in with your Microsoft account, drawing the game from your own copy of Minecraft. It is a separate
+project, not a fork of Horizon's code: it is a small, self-contained client that takes its 1:1
+behaviour from Horizon's Rust work (Horizon's protocol tables and its prepared game data, the
+launcher's sign-in) and from the vanilla game's own code, and reimplements it for very old
+hardware. Horizon needs macOS 12 and Metal; Penryn's target is a 2008 Mac Pro on **Mac OS X 10.6
+Snow Leopard** with a Radeon HD 2600 and OpenGL 2.1, and anything newer (it also runs unchanged on
+macOS 12 and on Linux). It is named after that Mac's CPU family.
+
+- **No crates, no standard library.** Penryn is `no_std` with zero dependencies, so one source builds
+  for Linux, where it is developed and tested, and for Mac OS X 10.6, whose system lacks what Rust's
+  standard library needs. Everything (TLS-free networking, zlib, AES/RSA/SHA, Ogg Vorbis, PNG, NBT,
+  the renderer) is written here. A clean release build takes seconds; a Mac build needs no Xcode and
+  no Apple SDK, and is made from Linux.
+- **Nothing from Mojang is in this repository.** The game files Penryn draws with are made on your
+  machine from your own copy of the game (see "The relay").
+- **Old systems cannot do modern HTTPS** (10.6 has no TLS 1.2), so a small relay (`tools/relay.py`)
+  on any newer computer on your network does the Microsoft sign-in, the session join and other
+  downloads, and serves the game files.
 
 ## What it does
 
