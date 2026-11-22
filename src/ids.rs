@@ -25,6 +25,7 @@ pub mod config {
     pub const C_KEEP_ALIVE: i32 = 4;
     pub const C_PING: i32 = 5;
     pub const C_REGISTRY_DATA: i32 = 7;
+    pub const C_RESOURCE_PACK_POP: i32 = 8;
     pub const C_RESOURCE_PACK_PUSH: i32 = 9;
     pub const C_SELECT_KNOWN_PACKS: i32 = 15;
     pub const C_CODE_OF_CONDUCT: i32 = 20;
@@ -75,6 +76,8 @@ pub mod play {
     pub const C_PLAYER_POSITION: i32 = 73;
     pub const C_REMOVE_ENTITIES: i32 = 78;
     pub const C_REMOVE_MOB_EFFECT: i32 = 79;
+    pub const C_RESOURCE_PACK_POP: i32 = 81;
+    pub const C_RESOURCE_PACK_PUSH: i32 = 82;
     pub const C_RESPAWN: i32 = 84;
     pub const C_ROTATE_HEAD: i32 = 85;
     pub const C_SECTION_BLOCKS_UPDATE: i32 = 86;
@@ -111,6 +114,7 @@ pub mod play {
     pub const S_MOVE_PLAYER_STATUS: i32 = 33;
     pub const S_PLAYER_ABILITIES: i32 = 40;
     pub const S_PLAYER_ACTION: i32 = 41;
+    pub const S_RESOURCE_PACK: i32 = 50;
     pub const S_PLAYER_COMMAND: i32 = 42;
     pub const S_PLAYER_INPUT: i32 = 43;
     pub const S_PLAYER_LOADED: i32 = 44;

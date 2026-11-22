@@ -351,18 +351,18 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
         particles: None,
         creative: crate::creative::Screen::new(),
     };
-    let atlas = sys::read_file(&format!("{}/atlas.bin", crate::data_dir())).ok_or("cannot read atlas.bin (see README.md)")?;
+    let atlas = sys::read_file(&crate::packs::path("atlas.bin")).ok_or("cannot read atlas.bin (see README.md)")?;
     app.r.load_atlas(&app.v.gl, &atlas)?;
     drop(atlas);
     // Particle sprites are optional: without particles.bin only block particles are drawn.
-    let pd = sys::read_file(&format!("{}/particles.bin", crate::data_dir()));
+    let pd = sys::read_file(&crate::packs::path("particles.bin"));
     app.particles = Some(crate::particles::Particles::load(&app.v.gl, pd.as_deref(), app.r.atlas_size));
     drop(pd);
-    let gui = sys::read_file(&format!("{}/gui.bin", crate::data_dir())).ok_or("cannot read gui.bin (see README.md)")?;
+    let gui = sys::read_file(&crate::packs::path("gui.bin")).ok_or("cannot read gui.bin (see README.md)")?;
     app.gui = Some(Gui::load(&app.v.gl, &gui, app.r.atlas, app.r.atlas_size)?);
     drop(gui);
     // Weather is optional: without weather.bin no rain or snow falls (the sky still greys).
-    if let Some(d) = sys::read_file(&format!("{}/weather.bin", crate::data_dir())) {
+    if let Some(d) = sys::read_file(&crate::packs::path("weather.bin")) {
         if app.weather.parse(&d, Some(&app.v.gl)).is_none() {
             say!("weather.bin is of another version: no rain or snow");
         }
@@ -379,12 +379,21 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
         a.set_volumes(app.menu.o.volumes());
     }
     // Entity models are optional: without entities.bin the world still plays, without mobs drawn.
-    if let Some(d) = sys::read_file(&format!("{}/entities.bin", crate::data_dir())) {
+    if let Some(d) = sys::read_file(&crate::packs::path("entities.bin")) {
         app.entities = Some(crate::entities::EntityTable::load(&app.v.gl, &d)?);
     }
+    // The player's own resource packs (options.txt resourcePacks), baked by the relay.
+    let mut blocks = blocks;
+    let local = crate::packs::parse_option(app.menu.o.other("resourcePacks").unwrap_or(""));
+    if !local.is_empty() {
+        if let Err(e) = crate::packs::wait_stack(&local, &[], &mut app, None, &mut blocks) {
+            say!("could not load the resource packs: {}", e);
+        }
+    }
+    app.audio.as_mut().map(|a| a.set_overlay(crate::packs::sound_overlay().as_deref()));
     let target = format!("Joining {}:{} ...", host, port);
     app.message(&[&target]);
-    let mut g = match Game::join(host, port, name, account, blocks, view as i8) {
+    let mut g = match Game::join(host, port, name, account, blocks, view as i8, local, &mut app) {
         Ok(g) => g,
         Err(e) => {
             app.wait_on(&["Could not join the server", &e, "", "Esc to quit"]);
@@ -394,6 +403,9 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
     app.v.grab_mouse(true);
     let result = app.main_loop(&mut g);
     if let Err(e) = &result {
+        // Back to the player's own packs (DownloadedPackSource.cleanupAfterDisconnect).
+        let crate::client::Game { packs, world, blocks, .. } = &mut g;
+        packs.leave(&mut app, Some(world), blocks);
         app.v.grab_mouse(false);
         let reason = g.disconnected.clone().unwrap_or_else(|| e.clone());
         app.wait_on(&["Disconnected", &reason, "", "Esc to quit"]);
@@ -420,6 +432,18 @@ impl App {
             }
             // ---- network
             g.pump()?;
+            if g.reconfigure {
+                g.reconfigure_now(self)?;
+            }
+            // Resource packs: the confirm screen holds the window until it is answered.
+            g.pack_step(self)?;
+            if g.packs.prompt.is_some() {
+                while g.packs.prompt.is_some() {
+                    g.pump()?;
+                    g.pack_step(self)?;
+                }
+                self.v.grab_mouse(self.screen == Screen::Play);
+            }
             self.particle_effects(g);
             // ---- sound
             if let Some(a) = self.audio.as_mut() {
@@ -671,6 +695,15 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     crate::options::Ev::Close => {
                         self.ui_click();
                         self.set_screen(Screen::Pause);
+                    }
+                    crate::options::Ev::Packs => {
+                        self.ui_click();
+                        let local = g.packs.local.clone();
+                        if let Some(new) = crate::packs::selection_screen(self, &local) {
+                            self.menu.o.set_other("resourcePacks", &crate::packs::option_text(&new));
+                            self.menu.o.save();
+                            g.packs.local = new;
+                        }
                     }
                     crate::options::Ev::None => {}
                 }
@@ -1751,6 +1784,110 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         gui.flush(&self.v.gl, w, h);
         self.gui = Some(gui);
         self.v.swap();
+    }
+}
+
+impl crate::packs::Host for App {
+    fn ui_frame(&mut self, draw: &mut dyn FnMut(&mut Gui, f32, f32), input: &mut Vec<crate::packs::Input>) -> bool {
+        use crate::packs::Input;
+        self.v.grab_mouse(false);
+        while let Some(e) = self.v.poll() {
+            let scale = self.gui.as_ref().map_or(1.0, |g| g.scale);
+            match e.u32_at(0) {
+                sdl::EV_QUIT => return false,
+                sdl::EV_KEYDOWN if e.i32_at(16) as usize == K_ESC => input.push(Input::Escape),
+                sdl::EV_MOUSEMOTION => self.mouse = (e.i32_at(20) as f32 / scale, e.i32_at(24) as f32 / scale),
+                sdl::EV_MOUSEDOWN if e.0[16] == 1 => {
+                    self.mouse = (e.i32_at(20) as f32 / scale, e.i32_at(24) as f32 / scale);
+                    input.push(Input::Click(self.mouse.0, self.mouse.1));
+                }
+                _ => {}
+            }
+        }
+        let (w, h) = self.v.size();
+        unsafe {
+            (self.v.gl.Viewport)(0, 0, w, h);
+            (self.v.gl.ClearColor)(0.06, 0.06, 0.06, 1.0);
+            (self.v.gl.Clear)(sdl::COLOR_BUFFER_BIT | sdl::DEPTH_BUFFER_BIT);
+        }
+        if let Some(mut gui) = self.gui.take() {
+            gui.begin(w, h);
+            draw(&mut gui, self.mouse.0, self.mouse.1);
+            gui.flush(&self.v.gl, w, h);
+            self.gui = Some(gui);
+        }
+        // PENRYN_SHOT also catches these screens (tests).
+        if let Some(shot) = self.test_shot.as_ref() {
+            if sys::now_ms() >= shot.1 {
+                let png = sdl::screenshot_png(&self.v.gl, w, h);
+                sys::write_file_private(&shot.0, &png);
+                say!("screenshot: {}", shot.0);
+                unsafe { sys::exit(0) };
+            }
+        }
+        self.v.swap();
+        true
+    }
+
+    fn reload(&mut self, names: &[String], world: Option<&mut crate::world::World>, blocks: &mut Blocks) {
+        use crate::packs::path;
+        let has = |n: &str| names.iter().any(|x| x == n);
+        let gl = &self.v.gl;
+        if has("blocks.bin") {
+            match sys::read_file(&path("blocks.bin")).and_then(|d| Blocks::parse(&d)) {
+                Some(b) => *blocks = b,
+                None => say!("{} is damaged", path("blocks.bin")),
+            }
+        }
+        if has("atlas.bin") {
+            if let Some(d) = sys::read_file(&path("atlas.bin")) {
+                unsafe { (gl.DeleteTextures)(1, &self.r.atlas) };
+                if let Err(e) = self.r.load_atlas(gl, &d) {
+                    say!("{}", e);
+                }
+            }
+        }
+        if has("atlas.bin") || has("particles.bin") {
+            let pd = sys::read_file(&path("particles.bin"));
+            self.particles = Some(crate::particles::Particles::load(gl, pd.as_deref(), self.r.atlas_size));
+        }
+        if has("atlas.bin") || has("gui.bin") {
+            if let Some(d) = sys::read_file(&path("gui.bin")) {
+                match Gui::load(gl, &d, self.r.atlas, self.r.atlas_size) {
+                    Ok(mut new) => {
+                        if let Some(old) = self.gui.take() {
+                            new.fixed_scale = old.fixed_scale;
+                            unsafe { (gl.DeleteTextures)(1, &old.texture()) };
+                        }
+                        self.gui = Some(new);
+                    }
+                    Err(e) => say!("{}", e),
+                }
+            }
+        }
+        if has("weather.bin") {
+            if let Some(d) = sys::read_file(&path("weather.bin")) {
+                let _ = self.weather.parse(&d, Some(gl));
+            }
+        }
+        if has("entities.bin") {
+            if let Some(d) = sys::read_file(&path("entities.bin")) {
+                match crate::entities::EntityTable::load(gl, &d) {
+                    Ok(t) => self.entities = Some(t),
+                    Err(e) => say!("{}", e),
+                }
+            }
+        }
+        if has("packsounds.bin") {
+            if let Some(a) = self.audio.as_mut() {
+                a.set_overlay(crate::packs::sound_overlay().as_deref());
+            }
+        }
+        if let Some(w) = world {
+            if has("blocks.bin") || has("atlas.bin") {
+                crate::packs::remesh(w, blocks);
+            }
+        }
     }
 }
 

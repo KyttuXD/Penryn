@@ -274,6 +274,180 @@ class Relay:
         return out
 
 
+# ---------------------------------------------------------- resource packs
+#
+# Penryn cannot fetch a server's resource pack itself (HTTPS) nor read zips and JSON quickly on
+# a 2008 machine, so the relay downloads the pack (as vanilla's DownloadQueue: the player's name
+# and version headers, at most 250 MB, SHA-1 checked, kept by its hash) and bakes the pack stack
+# into Penryn's game files with make_assets.py --packs. Only the files the stack changes are
+# served; Penryn keeps the rest.
+
+PACK_LIMIT = 262144000          # vanilla's limit for a server pack
+PACK_FILES = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin",
+              "effects.bin", "packsounds.bin")
+PACK_JOBS = {}                  # key -> {"state": "working" | "done" | "failed", "result": text}
+PACK_LOCK = threading.Lock()
+
+
+def pack_job(key, work, keep=True):
+    """Runs work() once in a thread for `key`: (status, text) for the client to poll."""
+    with PACK_LOCK:
+        j = PACK_JOBS.get(key)
+        if j is None or j["state"] == "failed":
+            j = PACK_JOBS[key] = {"state": "working", "result": "", "progress": ""}
+
+            def run():
+                try:
+                    r = work(j)
+                    j["result"], j["state"] = r, "done"
+                except Exception as e:  # noqa: BLE001 - reported to the client
+                    j["result"], j["state"] = str(e) or e.__class__.__name__, "failed"
+            threading.Thread(target=run, daemon=True).start()
+    if j["state"] == "working":
+        return 202, "working %s\n" % j.get("progress", "")
+    if j["state"] == "failed":
+        with PACK_LOCK:
+            PACK_JOBS.pop(key, None)
+        return 502, j["result"] + "\n"
+    if not keep:
+        with PACK_LOCK:
+            PACK_JOBS.pop(key, None)
+    return 200, j["result"]
+
+
+def download_pack(data_dir, url, want, name, uuid, job):
+    """The pack at `url` (http or https) in DATA/packs/<sha1>.zip: its SHA-1, checked against
+    `want` when the server gave one."""
+    want = (want or "").strip().lower()
+    folder = os.path.join(data_dir, "packs")
+    os.makedirs(folder, exist_ok=True)
+    if re.fullmatch(r"[0-9a-f]{40}", want) and os.path.isfile(os.path.join(folder, want + ".zip")):
+        return want
+    if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
+        raise ValueError("invalid url")
+    headers = {"User-Agent": "Minecraft Java/" + VERSION, "X-Minecraft-Username": name, "X-Minecraft-UUID": uuid,
+               "X-Minecraft-Version": VERSION, "X-Minecraft-Version-ID": VERSION, "X-Minecraft-Pack-Format": "97"}
+    req = urllib.request.Request(url, headers={k: v for k, v in headers.items() if v})
+    part = os.path.join(folder, "download.%s.part" % secrets.token_hex(4))
+    h = hashlib.sha1()
+    got = 0
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+            size = int(r.headers.get("Content-Length") or 0)
+            if size > PACK_LIMIT:
+                raise ValueError("the pack is larger than %d bytes" % PACK_LIMIT)
+            while True:
+                chunk = r.read(1 << 16)
+                if not chunk:
+                    break
+                got += len(chunk)
+                if got > PACK_LIMIT:
+                    raise ValueError("the pack is larger than %d bytes" % PACK_LIMIT)
+                h.update(chunk)
+                f.write(chunk)
+                job["progress"] = "%d %d" % (got, size)
+        sha = h.hexdigest()
+        if re.fullmatch(r"[0-9a-f]{40}", want) and sha != want:
+            raise ValueError("the pack's SHA-1 is %s, the server said %s" % (sha, want))
+        os.replace(part, os.path.join(folder, sha + ".zip"))
+        return sha
+    finally:
+        if os.path.exists(part):
+            os.remove(part)
+
+
+def local_packs(data_dir):
+    """DATA/resourcepacks: zips and folders with a pack.mcmeta, as vanilla's FolderRepositorySource.
+    (id, compatible, description) sorted by id."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import make_assets  # noqa: E402 - the same reader the bake uses
+    folder = os.path.join(data_dir, "resourcepacks")
+    out = []
+    if os.path.isdir(folder):
+        for n in sorted(os.listdir(folder)):
+            p = os.path.join(folder, n)
+            if not (os.path.isdir(p) or n.endswith(".zip")):
+                continue
+            try:
+                pk = make_assets.Pack(p)
+            except Exception:  # noqa: BLE001 - a broken zip is left out, as vanilla does
+                continue
+            if not pk.meta:
+                continue
+            d = pk.description
+            if isinstance(d, dict):
+                d = d.get("text", "") or d.get("translate", "")
+            elif isinstance(d, list):
+                d = "".join(x if isinstance(x, str) else x.get("text", "") for x in d)
+            out.append(("file/" + n, pk.compatible, str(d).replace("\n", " ").replace("\t", " ")))
+    return out
+
+
+def pack_source(data_dir, ref):
+    """A pack reference from Penryn: sha1:<hex> (a server pack downloaded here) or file/<name>."""
+    if ref.startswith("sha1:") and re.fullmatch(r"[0-9a-f]{40}", ref[5:]):
+        p = os.path.join(data_dir, "packs", ref[5:] + ".zip")
+    elif ref.startswith("file/") and "/" not in ref[5:] and ref[5:] not in ("", ".", ".."):
+        p = os.path.join(data_dir, "resourcepacks", ref[5:])
+    else:
+        raise ValueError("unknown pack %r" % ref)
+    if not os.path.exists(p):
+        raise ValueError("no pack %s" % ref)
+    return p
+
+
+def bake_packs(relay, refs, job):
+    """Bakes the stack `refs` (bottom to top): its key and the files that differ from the game's."""
+    base = relay.build_assets()
+    paths = [pack_source(relay.data_dir, r) for r in refs]
+    sig = hashlib.sha1()
+    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_assets.py")
+    sig.update(str(os.path.getmtime(tool)).encode())
+    for r, p in zip(refs, paths):
+        sig.update(r.encode() + b"\0")
+        if r.startswith("file/"):
+            # A folder or zip that may change: its files' sizes and times are its identity.
+            for root, _, files in (os.walk(p) if os.path.isdir(p) else [(os.path.dirname(p), [], [os.path.basename(p)])]):
+                for fn in sorted(files):
+                    st = os.stat(os.path.join(root, fn))
+                    sig.update(("%s %d %d\n" % (os.path.join(root, fn), st.st_size, st.st_mtime_ns)).encode())
+    key = sig.hexdigest()[:20]
+    out = os.path.join(relay.data_dir, "packs", "stack-" + key)
+    if not os.path.isfile(os.path.join(out, "changed.txt")):
+        prepared = relay.find_prepared()
+        jar = relay.find_jar()
+        if not prepared:
+            raise RuntimeError("no prepared 26.3 data")
+        tmp = out + ".part"
+        os.makedirs(tmp, exist_ok=True)
+        args = [sys.executable, "-I", tool, prepared] + (["--jar", jar] if jar else []) + ["--packs", ",".join(paths), tmp]
+        subprocess.run(args, check=True, stdout=subprocess.DEVNULL)
+        changed = []
+        for n in PACK_FILES:
+            p = os.path.join(tmp, n)
+            if not os.path.isfile(p):
+                continue
+            b = os.path.join(base, n)
+            with open(p, "rb") as f1:
+                mine = f1.read()
+            same = False
+            if os.path.isfile(b) and os.path.getsize(b) == len(mine):
+                with open(b, "rb") as f2:
+                    same = f2.read() == mine
+            if same:
+                os.remove(p)
+            else:
+                changed.append("%s %d" % (n, len(mine)))
+        with open(os.path.join(tmp, "changed.txt"), "w") as f:
+            f.write("\n".join(changed) + "\n")
+        if os.path.isdir(out):
+            import shutil
+            shutil.rmtree(out)
+        os.replace(tmp, out)
+    with open(os.path.join(out, "changed.txt")) as f:
+        return key + "\n" + f.read()
+
+
 TEXTURE_URL = re.compile(r"^https?://textures\.minecraft\.net/texture/([0-9a-f]{16,128})$")
 
 
@@ -389,6 +563,19 @@ def make_handler(relay):
                     return self.reply(404 if e.code == 404 else 502, "textures.minecraft.net: %d" % e.code)
                 except Exception as e:  # noqa: BLE001 - reported to the client
                     return self.reply(502, str(e))
+            if self.path == "/pack/list":
+                try:
+                    rows = local_packs(relay.data_dir)
+                    return self.reply(200, "".join("%s\t%d\t%s\n" % (i, c, d) for i, c, d in rows))
+                except Exception as e:  # noqa: BLE001 - reported to the client
+                    return self.reply(500, str(e))
+            m = re.fullmatch(r"/pack/files/([0-9a-f]{20})/([a-z]+\.bin)", self.path)
+            if m and m.group(2) in PACK_FILES:
+                p = os.path.join(relay.data_dir, "packs", "stack-" + m.group(1), m.group(2))
+                if not os.path.isfile(p):
+                    return self.reply(404, "no such file")
+                with open(p, "rb") as f:
+                    return self.reply(200, f.read(), "application/octet-stream")
             if self.path == "/":
                 return self.reply(200, "penryn-relay for Minecraft %s\n" % VERSION)
             self.reply(404, "no such thing")
@@ -423,6 +610,17 @@ def make_handler(relay):
                 if self.path == "/join":
                     st, r = relay.join(a[0].strip(), a[1].strip(), a[2].strip())
                     return self.reply(204 if st == 204 else 502, "" if st == 204 else json.dumps(r))
+                if self.path == "/pack/download":
+                    # url, hash, player name, player uuid: 202 while it downloads, then the SHA-1.
+                    url, want = a[0].strip(), (a[1].strip() if len(a) > 1 else "")
+                    who = (a[2].strip() if len(a) > 2 else "", a[3].strip() if len(a) > 3 else "")
+                    st, text = pack_job("dl " + url + " " + want,
+                                        lambda job: download_pack(relay.data_dir, url, want, who[0], who[1], job))
+                    return self.reply(st, text)
+                if self.path == "/pack/bake":
+                    refs = [x.strip() for x in a if x.strip()]
+                    st, text = pack_job("bake " + " ".join(refs), lambda job: bake_packs(relay, refs, job), keep=False)
+                    return self.reply(st, text)
                 if self.path == "/assets/download":
                     relay.build_assets(token=a[0].strip())
                     return self.reply(200, "ready\n")

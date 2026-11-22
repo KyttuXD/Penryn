@@ -116,11 +116,13 @@ pub struct BlockEntities {
     mesh: RefCell<TextMesh>,
     /// signs.bin: not tried yet, missing (None), or loaded.
     pictures: Option<Option<Pictures>>,
+    /// The resource pack reload the pictures were loaded at (packs::generation).
+    pictures_of: u32,
 }
 
 impl BlockEntities {
     pub fn new() -> BlockEntities {
-        BlockEntities { signs: BTreeMap::new(), open_request: None, editor: None, version: 0, mesh: RefCell::new(TextMesh::default()), pictures: None }
+        BlockEntities { signs: BTreeMap::new(), open_request: None, editor: None, version: 0, mesh: RefCell::new(TextMesh::default()), pictures: None, pictures_of: 0 }
     }
 
     /// Everything goes (a new dimension or level).
@@ -714,7 +716,7 @@ pub fn done_button(gui: &Gui) -> crate::screens::Button {
 }
 
 fn load_pictures(gl: &Gl) -> Option<Pictures> {
-    let d = crate::sys::read_file(&alloc::format!("{}/signs.bin", crate::data_dir()))?;
+    let d = crate::sys::read_file(&crate::packs::path("signs.bin"))?;
     if d.get(..4)? != SIGNS_MAGIC {
         return None;
     }
@@ -799,7 +801,8 @@ fn draw_picture(gl: &Gl, gui: &Gui, pics: &Pictures, ed: &Editor, cx: f32, cy: f
 /// far is drawn first, so the picture (its own texture) lies under the text.
 pub fn draw_editor(gui: &mut Gui, gl: &Gl, w: i32, h: i32, g: &mut Game, mx: f32, my: f32) {
     let be = &mut g.block_entities;
-    if be.pictures.is_none() {
+    if be.pictures.is_none() || be.pictures_of != crate::packs::generation() {
+        be.pictures_of = crate::packs::generation();
         be.pictures = Some(load_pictures(gl));
     }
     let Some(ed) = be.editor.as_ref() else { return };

@@ -284,6 +284,16 @@ impl Settings {
     pub fn set(&mut self, o: O, v: f64) {
         self.v[o as usize] = v;
     }
+    /// An option Penryn keeps as text (resourcePacks...).
+    pub fn other(&self, key: &str) -> Option<&str> {
+        self.other.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+    pub fn set_other(&mut self, key: &str, v: &str) {
+        match self.other.iter_mut().find(|(k, _)| k == key) {
+            Some(e) => e.1 = String::from(v),
+            None => self.other.push((String::from(key), String::from(v))),
+        }
+    }
 
     /// The mixer's gain per category (SoundSource order).
     pub fn volumes(&self) -> [f32; 11] {
@@ -637,6 +647,8 @@ pub enum Ev {
     Click,
     /// Done or Escape on the first screen: back to the pause menu.
     Close,
+    /// Resource Packs...: the pack selection screen (packs.rs).
+    Packs,
 }
 
 fn ceil(x: f32) -> f32 {
@@ -951,6 +963,7 @@ impl Menu {
                 self.open(page);
                 Ev::Click
             }
+            W::Off("options.resourcepack", _) => Ev::Packs,
             W::Off(..) => Ev::None,
             W::Opt(O::GuiScale) => {
                 let n = self.max_gui_scale.max(1) + 1;
@@ -1049,7 +1062,8 @@ impl Menu {
                         Some(v) => lang::format("options.generic_value", &[lang::get(key), lang::get(v)]),
                         None => lang::get(key),
                     };
-                    button(gui, &t, p, false, false);
+                    let on = key == "options.resourcepack";
+                    button(gui, &t, p, on, on && hover);
                 }
             }
         }

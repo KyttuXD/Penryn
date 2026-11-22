@@ -163,6 +163,46 @@ pub struct Audio {
     decoder: Option<Decoder>,
     /// Milliseconds spent decoding sound in this second (PENRYN_PERF).
     pub busy_ms: f64,
+    /// The resource packs' sounds (packsounds.bin, packs.rs): its files, and sounds.bin's own
+    /// event tables while the overlay's replace them.
+    overlay: Option<(sys::File, Vec<(u64, u32)>)>,
+    base_tables: Option<Tables>,
+}
+
+type Tables = (Vec<Vec<Entry>>, BTreeMap<String, Vec<Entry>>, BTreeMap<String, u32>);
+
+/// An entry's file with this bit set is one of the overlay's.
+const OVERLAY_FILE: u32 = 0x8000_0000;
+
+/// packsounds.bin's tables parse (penryn selftest).
+pub fn overlay_selftest() -> Vec<(&'static str, String, &'static str)> {
+    let mut d = Vec::new();
+    d.extend_from_slice(&1u32.to_le_bytes());
+    d.extend_from_slice(&1u16.to_le_bytes());
+    d.push(b'x');
+    d.extend_from_slice(&100u64.to_le_bytes());
+    d.extend_from_slice(&5u32.to_le_bytes());
+    d.extend_from_slice(&1u32.to_le_bytes()); // one registry event
+    d.extend_from_slice(&2u16.to_le_bytes());
+    for f in [OVERLAY_FILE, 3] {
+        d.extend_from_slice(&f.to_le_bytes());
+        d.extend_from_slice(&1.0f32.to_bits().to_le_bytes());
+        d.extend_from_slice(&1.0f32.to_bits().to_le_bytes());
+        d.extend_from_slice(&1u16.to_le_bytes());
+        d.extend_from_slice(&[0, 16]);
+    }
+    d.extend_from_slice(&0u32.to_le_bytes());
+    d.extend_from_slice(&0u32.to_le_bytes());
+    let got = match Audio::parse(&d) {
+        Some((files, events, _, _)) => alloc::format!("{} {} {:x} {}", files.len(), events[0].len(), events[0][0].file, events[0][1].file),
+        None => String::from("unreadable"),
+    };
+    let mut out = alloc::vec![("sound overlay tables", got, "1 2 80000000 3")];
+    // The packs' overlay in the data folder, when a pack stack with sounds is in use.
+    if let Some(head) = sys::read_head(&alloc::format!("{}/pack-packsounds.bin", crate::data_dir()), 4) {
+        out.push(("pack-packsounds.bin magic", String::from_utf8_lossy(&head).into_owned(), "PNSO"));
+    }
+    out
 }
 
 fn u16_at(d: &[u8], o: usize) -> Option<u16> {
@@ -249,6 +289,8 @@ impl Audio {
                 yaw: 0.0,
                 decoder: None,
                 busy_ms: 0.0,
+                overlay: None,
+                base_tables: None,
             })
         }
     }
@@ -316,13 +358,51 @@ impl Audio {
         list.last().copied()
     }
 
+    /// Puts the resource packs' sounds (packsounds.bin, "PNSO") over sounds.bin, or with None
+    /// goes back to sounds.bin's own.
+    pub fn set_overlay(&mut self, path: Option<&str>) {
+        if let Some((ev, named, ids)) = self.base_tables.take() {
+            self.events = ev;
+            self.named = named;
+            self.ids = ids;
+        }
+        self.overlay = None;
+        self.cache.retain(|k, _| k & OVERLAY_FILE == 0);
+        let Some(path) = path else { return };
+        let Some(f) = sys::File::open(path) else { return };
+        if f.read_at(0, 4).as_deref() != Some(&b"PNSO"[..]) {
+            return;
+        }
+        let mut size = 1 << 20;
+        let parsed = loop {
+            let Some(d) = f.read_at(4, size).or_else(|| f.read_at(4, size / 2)) else { return };
+            if let Some(t) = Self::parse(&d) {
+                break t;
+            }
+            if size > 64 << 20 {
+                return;
+            }
+            size *= 2;
+        };
+        let (files, events, named, ids) = parsed;
+        let base = (core::mem::replace(&mut self.events, events), core::mem::replace(&mut self.named, named), core::mem::replace(&mut self.ids, ids));
+        self.base_tables = Some(base);
+        self.overlay = Some((f, files));
+    }
+
     fn samples(&mut self, file: u32) -> Option<&'static [i16]> {
         if let Some(s) = self.cache.get(&file) {
             return Some(s);
         }
-        let &(off, size) = self.files.get(file as usize)?;
         let t0 = sys::now();
-        let bytes = self.pack.read_at(off, size as usize)?;
+        let bytes = if file & OVERLAY_FILE != 0 {
+            let (f, files) = self.overlay.as_ref()?;
+            let &(off, size) = files.get((file & !OVERLAY_FILE) as usize)?;
+            f.read_at(off, size as usize)?
+        } else {
+            let &(off, size) = self.files.get(file as usize)?;
+            self.pack.read_at(off, size as usize)?
+        };
         let pcm = ogg::ogg(&bytes)?.mono()?;
         self.busy_ms += (sys::now() - t0) * 1000.0;
         let s: &'static [i16] = Box::leak(pcm.into_boxed_slice());
@@ -392,8 +472,15 @@ impl Audio {
 
     /// Starts a streamed sound (music, records) in place of the one playing.
     fn start_music(&mut self, file: u32, gain: f32) {
-        let Some(&(off, size)) = self.files.get(file as usize) else { return };
-        let Some(bytes) = self.pack.read_at(off, size as usize) else { return };
+        let bytes = if file & OVERLAY_FILE != 0 {
+            let Some((f, files)) = self.overlay.as_ref() else { return };
+            let Some(&(off, size)) = files.get((file & !OVERLAY_FILE) as usize) else { return };
+            f.read_at(off, size as usize)
+        } else {
+            let Some(&(off, size)) = self.files.get(file as usize) else { return };
+            self.pack.read_at(off, size as usize)
+        };
+        let Some(bytes) = bytes else { return };
         let Some(stream) = ogg_stream::OggStream::open(bytes) else { return };
         let (rate, channels) = (stream.rate, stream.channels as usize);
         self.decoder = Some(Decoder { stream, rate, channels, t: 0.0 });

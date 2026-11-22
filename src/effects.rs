@@ -139,7 +139,7 @@ struct Icons {
 }
 
 fn load_icons(gl: &Gl) -> Option<Icons> {
-    let d = crate::sys::read_file(&format!("{}/effects.bin", crate::data_dir()))?;
+    let d = crate::sys::read_file(&crate::packs::path("effects.bin"))?;
     if d.get(..4)? != crate::account::EFFECTS_MAGIC || d.len() < 10 {
         return None;
     }
@@ -197,11 +197,13 @@ pub struct Effects {
     pub list: Vec<Effect>,
     icons: Option<Icons>,
     icons_tried: bool,
+    /// The resource pack reload the icons were loaded at (packs::generation).
+    icons_of: u32,
 }
 
 impl Effects {
     pub fn new() -> Effects {
-        Effects { list: Vec::new(), icons: None, icons_tried: false }
+        Effects { list: Vec::new(), icons: None, icons_tried: false, icons_of: 0 }
     }
 
     /// A new player (login, respawn, another dimension): the server sends the effects again.
@@ -303,8 +305,9 @@ impl Effects {
     }
 
     fn icon_uv(&mut self, gl: &Gl, id: u16) -> Option<(u32, [f32; 4])> {
-        if !self.icons_tried {
+        if !self.icons_tried || self.icons_of != crate::packs::generation() {
             self.icons_tried = true;
+            self.icons_of = crate::packs::generation();
             self.icons = load_icons(gl);
         }
         let i = self.icons.as_ref()?;

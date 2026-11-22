@@ -51,34 +51,327 @@ TILE = 16
 
 # ------------------------------------------------------------------ files
 
-class Assets:
-    """assets/minecraft/... from a jar or a folder."""
+RESOURCE_FORMAT = (97, 1)  # 26.3's pack_version.resource_major/minor
 
-    def __init__(self, jar, folder):
-        self.zip = zipfile.ZipFile(jar) if jar else None
-        self.folder = folder
 
-    def read(self, rel):
+def pack_format_value(v):
+    """A pack.mcmeta format: an int (major) or [major, minor]."""
+    if isinstance(v, list):
+        return (int(v[0]) if v else 0, int(v[1]) if len(v) > 1 else 0)
+    return (int(v), 0)
+
+
+def formats_include(spec, fmt=RESOURCE_FORMAT, minor_max=False):
+    """Whether an overlay's or a pack's formats (int, [min, max], {min_inclusive, max_inclusive},
+    or min_format / max_format) take in 26.3's format."""
+    if spec is None:
+        return False
+    if isinstance(spec, dict) and ("min_format" in spec or "max_format" in spec):
+        lo = pack_format_value(spec.get("min_format", 0))
+        hi = spec.get("max_format")
+        hi = pack_format_value(hi) if hi is not None else (1 << 30, 0)
+        if not isinstance(spec.get("max_format"), list):
+            hi = (hi[0], 1 << 30)  # an int max takes every minor version of it
+        return lo <= fmt <= hi
+    if isinstance(spec, dict):
+        lo, hi = spec.get("min_inclusive", 0), spec.get("max_inclusive", 1 << 30)
+    elif isinstance(spec, list):
+        lo, hi = (spec[0], spec[-1]) if spec else (0, -1)
+    else:
+        lo = hi = spec
+    return int(lo) <= fmt[0] <= int(hi)
+
+
+class Pack:
+    """One resource pack (a zip or a folder) as vanilla's pack stack sees it: pack.mcmeta, its
+    overlays that apply to 26.3 (later entries on top), and its filter, which hides the files of
+    the packs below it."""
+
+    def __init__(self, path):
+        import re
+        self.path = path
+        self.zip = zipfile.ZipFile(path) if os.path.isfile(path) else None
+        meta = self._raw("pack.mcmeta")
+        try:
+            meta = json.loads(meta.decode("utf-8-sig")) if meta else {}
+        except ValueError:
+            meta = {}
+        self.meta = meta
+        pk = meta.get("pack", {}) if isinstance(meta, dict) else {}
+        self.description = pk.get("description", "")
+        fmt = pk.get("pack_format")
+        if "min_format" in pk or "max_format" in pk:
+            self.compatible = formats_include(pk)
+        else:
+            sup = pk.get("supported_formats")
+            self.compatible = formats_include(sup if sup is not None else fmt)
+        self.roots = [""]
+        for e in (meta.get("overlays", {}) or {}).get("entries", []) if isinstance(meta, dict) else []:
+            d = e.get("directory", "")
+            if not re.match(r"^[a-z0-9_.-]+$", d or ""):
+                continue
+            if formats_include(e if ("min_format" in e or "max_format" in e) else e.get("formats")):
+                self.roots.append(d + "/")
+        self.filters = []
+        for f in ((meta.get("filter", {}) or {}).get("block", []) if isinstance(meta, dict) else []):
+            try:
+                self.filters.append((re.compile(f["namespace"]) if f.get("namespace") is not None else None,
+                                     re.compile(f["path"]) if f.get("path") is not None else None))
+            except (re.error, KeyError, TypeError):
+                pass
+        self._names = None
+
+    def _raw(self, name):
         if self.zip:
             try:
-                return self.zip.read("assets/minecraft/" + rel)
+                return self.zip.read(name)
             except KeyError:
                 return None
-        p = os.path.join(self.folder, "assets", "minecraft", rel)
+        p = os.path.join(self.path, *name.split("/"))
         try:
             with open(p, "rb") as f:
                 return f.read()
         except OSError:
             return None
 
+    def read(self, full):
+        for root in reversed(self.roots):
+            d = self._raw(root + full)
+            if d is not None:
+                return d
+        return None
+
+    def names(self):
+        """Every assets/... file it has (overlay folders folded in)."""
+        if self._names is None:
+            raw = []
+            if self.zip:
+                raw = self.zip.namelist()
+            else:
+                for r, _, files in os.walk(self.path):
+                    for fn in files:
+                        raw.append(os.path.relpath(os.path.join(r, fn), self.path).replace(os.sep, "/"))
+            out = set()
+            for n in raw:
+                for root in self.roots:
+                    if root and n.startswith(root):
+                        n = n[len(root):]
+                        break
+                if n.startswith("assets/") and not n.endswith("/"):
+                    out.add(n)
+            self._names = out
+        return self._names
+
+    def hides(self, full):
+        """The pack's filter hides `full` (assets/ns/path) of the packs below it."""
+        parts = full.split("/", 2)
+        if len(parts) < 3:
+            return False
+        ns, p = parts[1], parts[2]
+        for nre, pre in self.filters:
+            if (nre is None or nre.fullmatch(ns)) and (pre is None or pre.fullmatch(p)):
+                return True
+        return False
+
+
+def full_name(rel):
+    """textures/block/stone.png -> assets/minecraft/textures/block/stone.png; a namespaced
+    reference kept in the path (textures/custom:item/x.png) -> assets/custom/textures/item/x.png."""
+    i = rel.find(":")
+    if i < 0:
+        return "assets/minecraft/" + rel
+    j = rel.rfind("/", 0, i) + 1
+    return "assets/%s/%s%s" % (rel[j:i], rel[:j], rel[i + 1:])
+
+
+def nsref(s):
+    """A resource location as the asset reader takes it: minecraft's without its namespace,
+    others' with it (custom:block/x)."""
+    if not isinstance(s, str):
+        return s
+    return s[len("minecraft:"):] if s.startswith("minecraft:") else s
+
+
+class Assets:
+    """assets/... from a jar or a folder, with resource packs layered over it as vanilla's pack
+    stack does: `packs` bottom to top, the last one's files winning."""
+
+    def __init__(self, jar, folder, packs=()):
+        self.zip = zipfile.ZipFile(jar) if jar else None
+        self.folder = folder
+        self.packs = [Pack(p) for p in packs]
+
+    def base(self, full):
+        if self.zip:
+            try:
+                return self.zip.read(full)
+            except KeyError:
+                return None
+        p = os.path.join(self.folder, *full.split("/"))
+        try:
+            with open(p, "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def layers(self, full):
+        """The file in each layer that has it, bottom (the game) to top, as getResourceStack."""
+        out = []
+        for pk in reversed(self.packs):
+            d = pk.read(full)
+            if d is not None:
+                out.append(d)
+            if pk.hides(full):
+                return out[::-1]
+        d = self.base(full)
+        if d is not None:
+            out.append(d)
+        return out[::-1]
+
+    def read(self, rel):
+        full = full_name(rel)
+        for pk in reversed(self.packs):
+            d = pk.read(full)
+            if d is not None:
+                return d
+            if pk.hides(full):
+                return None
+        return self.base(full)
+
+    def meta(self, rel):
+        """`rel`'s .mcmeta from the layer `rel` itself comes from (vanilla reads a resource's
+        metadata from its own pack): None when that layer has none."""
+        full = full_name(rel)
+        for pk in reversed(self.packs):
+            if pk.read(full) is not None:
+                return pk.read(full + ".mcmeta")
+            if pk.hides(full):
+                return None
+        return self.base(full + ".mcmeta")
+
+    def from_pack(self, rel):
+        """The top pack's own copy of `rel` (None: the game's, or nobody's)."""
+        full = full_name(rel)
+        for pk in reversed(self.packs):
+            d = pk.read(full)
+            if d is not None:
+                return d
+            if pk.hides(full):
+                return None
+        return None
+
     def json(self, rel):
         d = self.read(rel)
         if d is None:
             return None
         try:
-            return json.loads(d)
+            return json.loads(d.decode("utf-8-sig"))
         except ValueError:
             return None
+
+    def json_stack(self, rel):
+        out = []
+        for d in self.layers(full_name(rel)):
+            try:
+                out.append(json.loads(d.decode("utf-8-sig")))
+            except ValueError:
+                pass
+        return out
+
+    def image(self, rel):
+        """A PNG, first frame chosen by its animation (.mcmeta frames[0]); a pack's higher
+        resolution copy of a game texture scaled down to the game's size (Penryn draws the
+        game's sizes)."""
+        if not isinstance(rel, str):
+            return None
+        own = self.from_pack(rel) if self.packs else None
+        img = png_decode(self.read(rel))
+        if img is None:
+            return None
+        k = 1
+        if own is not None:
+            base = self.base(full_name(rel))
+            bimg = png_header(base) if base else None
+            w, h, px = img
+            if bimg and (bimg[0], bimg[1]) != (w, h) and w % bimg[0] == 0 and h % bimg[1] == 0 \
+                    and w // bimg[0] == h // bimg[1]:
+                k = w // bimg[0]
+                img = scale_down(img, k)
+        if rel.endswith(".png"):
+            meta = self.meta(rel)
+            anim = None
+            if meta:
+                try:
+                    anim = json.loads(meta.decode("utf-8-sig")).get("animation")
+                except (ValueError, AttributeError):
+                    anim = None
+            if isinstance(anim, dict):
+                img = first_frame(img, anim, k)
+        return img
+
+    def names(self):
+        """Every assets/... file of the stack."""
+        out = set(self.zip.namelist()) if self.zip else set()
+        if not self.zip:
+            base = os.path.join(self.folder, "assets")
+            for r, _, files in os.walk(base):
+                for fn in files:
+                    out.add("assets/" + os.path.relpath(os.path.join(r, fn), base).replace(os.sep, "/"))
+        for pk in self.packs:
+            if pk.filters:
+                out = set(n for n in out if not pk.hides(n))
+            out |= pk.names()
+        return sorted(out)
+
+
+def png_header(data):
+    """(width, height) of a PNG without decoding it."""
+    if not data or data[:8] != b"\x89PNG\r\n\x1a\n" or len(data) < 24:
+        return None
+    return struct.unpack(">II", data[16:24])
+
+
+def first_frame(img, anim, k=1):
+    """The frame an .mcmeta animation shows first (frames[0], else frame 0), as SpriteContents:
+    frames of width x height (default: square, the shorter side), left to right, top to bottom."""
+    w, h, px = img
+    side = min(w, h)
+    fw = max(1, int(anim.get("width", side * k)) // k)
+    fh = max(1, int(anim.get("height", side * k)) // k)
+    if "width" in anim and "height" not in anim:
+        fh = h
+    if "height" in anim and "width" not in anim:
+        fw = w
+    fw, fh = min(fw, w), min(fh, h)
+    cols, rows = max(1, w // fw), max(1, h // fh)
+    frames = anim.get("frames") or [0]
+    first = frames[0].get("index", 0) if isinstance(frames[0], dict) else frames[0]
+    try:
+        first = int(first)
+    except (TypeError, ValueError):
+        first = 0
+    if not 0 <= first < cols * rows:
+        first = 0
+    if (fw, fh) == (w, h):
+        return img
+    x0, y0 = (first % cols) * fw, (first // cols) * fh
+    out = bytearray()
+    for y in range(fh):
+        o = ((y0 + y) * w + x0) * 4
+        out += px[o:o + fw * 4]
+    return fw, fh, bytes(out)
+
+
+def scale_down(img, k):
+    w, h, px = img
+    nw, nh = w // k, h // k
+    out = bytearray(nw * nh * 4)
+    for y in range(nh):
+        row = (y * k) * w
+        for x in range(nw):
+            o = (row + x * k) * 4
+            out[(y * nw + x) * 4:(y * nw + x) * 4 + 4] = px[o:o + 4]
+    return nw, nh, bytes(out)
 
 
 def png_decode(data):
@@ -433,7 +726,7 @@ class Models:
 
     def load(self, ref, depth=0):
         """(textures, elements) with parents resolved."""
-        ref = ref.split(":", 1)[-1]
+        ref = nsref(ref)
         if ref in self.cache:
             return self.cache[ref]
         m = self.a.json("models/" + ref + ".json") or {}
@@ -456,7 +749,7 @@ def resolve_tex(tex, v):
         if not isinstance(v, str):
             return None
         if not v.startswith("#"):
-            return v.split(":", 1)[-1]
+            return nsref(v)
         v = tex.get(v[1:])
     return None
 
@@ -528,9 +821,9 @@ def make_particles(assets, res, out_dir, block_tiles, atlas_w, atlas_h):
         d = assets.json("particles/" + t.split(":", 1)[1] + ".json") or {}
         ids = []
         for ref in d.get("textures", []):
-            ref = ref.split(":", 1)[-1]
+            ref = nsref(ref)
             if ref not in sprite_index:
-                img = png_decode(assets.read("textures/particle/" + ref + ".png") or b"")
+                img = assets.image(("textures/particle/" + ref + ".png") or b"")
                 if img is None:
                     continue
                 sprite_index[ref] = len(sprites)
@@ -873,9 +1166,16 @@ def main():
         i = args.index("--jar")
         jar = args[i + 1]
         del args[i:i + 2]
+    # --packs A,B,...: resource packs (zips or folders) over the game, bottom to top. Only the
+    # files they change are worth serving; sounds.bin is then a small overlay (packsounds.bin).
+    packs = []
+    if "--packs" in args:
+        i = args.index("--packs")
+        packs = [p for p in args[i + 1].split(",") if p]
+        del args[i:i + 2]
     res, out_dir = args[0], args[1]
     os.makedirs(out_dir, exist_ok=True)
-    assets = Assets(jar, res)
+    assets = Assets(jar, res, packs)
     models = Models(assets)
 
     beh = json.load(open(os.path.join(res, "block-behaviours.json")))["blocks"]
@@ -925,7 +1225,7 @@ def main():
     def texture(path):
         if path in tile_index:
             return tile_index[path]
-        img = png_decode(assets.read("textures/" + path + ".png"))
+        img = assets.image(("textures/" + path + ".png"))
         if img is None:
             missing.add(path)
             path = "__missing__"
@@ -956,7 +1256,7 @@ def main():
     def big_texture(path):
         if path in big:
             return big[path]
-        img = png_decode(assets.read("textures/" + path + ".png"))
+        img = assets.image(("textures/" + path + ".png"))
         if img is None:
             return None
         w, h, px = img
@@ -1203,13 +1503,13 @@ def main():
 
     def parents(ref):
         out = []
-        ref = ref.split(":", 1)[-1]
+        ref = nsref(ref)
         for _ in range(16):
             out.append(ref)
             m = assets.json("models/" + ref + ".json") or {}
             if "parent" not in m:
                 break
-            ref = m["parent"].split(":", 1)[-1]
+            ref = nsref(m["parent"])
         return out
 
     def display(ref, ctx, default):
@@ -1300,7 +1600,7 @@ def main():
 
     # ---- biome colours
     def colormap(path):
-        img = png_decode(assets.read("textures/colormap/%s.png" % path))
+        img = assets.image(("textures/colormap/%s.png" % path))
         return img
 
     grass_map, foliage_map = colormap("grass"), colormap("foliage")
@@ -1418,7 +1718,7 @@ def main():
     sprites = {}  # name -> (w, h, rgba, nine-slice or None)
 
     def add_sprite(name, rel, crop=None):
-        img = png_decode(assets.read("textures/" + rel + ".png"))
+        img = assets.image(("textures/" + rel + ".png"))
         if img is None:
             return
         w, h, px = img
@@ -1429,7 +1729,7 @@ def main():
                 out += px[(y * w) * 4:(y * w + cw) * 4]
             w, h, px = cw, ch, bytes(out)
         nine = None
-        meta = assets.read("textures/" + rel + ".png.mcmeta")
+        meta = assets.meta("textures/" + rel + ".png")
         if meta:
             try:
                 sc = json.loads(meta).get("gui", {}).get("scaling", {})
@@ -1441,12 +1741,7 @@ def main():
                 pass
         sprites[name] = (w, h, px, nine)
 
-    listing = assets.zip.namelist() if assets.zip else []
-    if not assets.zip:
-        base = os.path.join(res, "assets", "minecraft", "textures")
-        for root, _, files in os.walk(os.path.join(base, "gui", "sprites")):
-            for fn in files:
-                listing.append("assets/minecraft/textures/" + os.path.relpath(os.path.join(root, fn), base).replace(os.sep, "/"))
+    listing = assets.names()
     for full in listing:
         for folder in ("hud/", "widget/", "tooltip/", "container/slot/", "container/inventory/", "container/furnace/",
                        "container/blast_furnace/", "container/smoker/", "container/creative_inventory/"):
@@ -1495,8 +1790,10 @@ def main():
     font_pages = []
 
     def font_refs(ref, out, depth=0):
-        d = assets.json("font/" + ref.split(":", 1)[-1] + ".json")
-        for pr in (d or {}).get("providers", []):
+        # Every pack's font file, the top pack's providers first (a glyph comes from the first
+        # provider that has it), as FontManager's resource stack.
+        stack = assets.json_stack("font/" + nsref(ref) + ".json")
+        for pr in [p for d in reversed(stack) for p in (d or {}).get("providers", [])]:
             if pr.get("type") == "reference" and depth < 4:
                 if pr.get("filter", {}).get("uniform") is True:
                     continue
@@ -1512,8 +1809,8 @@ def main():
             continue
         if pr.get("type") != "bitmap":
             continue
-        rel = "textures/" + pr["file"].split(":", 1)[-1]
-        img = png_decode(assets.read(rel))
+        rel = "textures/" + nsref(pr["file"])
+        img = assets.image((rel))
         if img is None:
             continue
         w, h, px = img
@@ -1600,7 +1897,11 @@ def main():
         f.write(struct.pack("<I", len(item_hands)))
         for rot, tr, sc in item_hands:
             f.write(struct.pack("<9f", *(list(rot) + list(tr) + list(sc))))
-        lang = assets.json("lang/en_us.json") or {}
+        # Every pack's en_us.json over the game's, later keys winning (ClientLanguage).
+        lang = {}
+        for d in assets.json_stack("lang/en_us.json"):
+            if isinstance(d, dict):
+                lang.update({k: v for k, v in d.items() if isinstance(v, str)})
         f.write(struct.pack("<I", len(lang)))
         for k, v in sorted(lang.items()):
             kb, vb = k.encode()[:65535], v.encode()[:65535]
@@ -1629,7 +1930,10 @@ def main():
              sum(1 for i in item_icons if i[0] == 1), sum(1 for i in item_icons if i[0] == 2)))
     make_signs(assets, names, out_dir)
     make_effects(assets, out_dir, reg, facts)
-    make_sounds(res, out_dir, sound_names)
+    if packs:
+        make_pack_sounds(res, assets, out_dir, sound_names)
+    else:
+        make_sounds(res, out_dir, sound_names)
     make_weather(res, assets, out_dir, reg)
     print("blocks.bin: %d states, %d blocks, %d quads; atlas %dx%d with %d textures%s"
           % (len(state_rows), len(blocks_out), len(quads), width, height, len(tiles),
@@ -1644,7 +1948,7 @@ def make_weather(res, assets, out_dir, reg):
     bolt = reg["minecraft:entity_type"]["entries"]["minecraft:lightning_bolt"]["protocol_id"]
     out = bytearray(b"PNW1" + struct.pack("<H", bolt))
     for name in ("rain", "snow"):
-        img = png_decode(assets.read("textures/environment/%s.png" % name))
+        img = assets.image(("textures/environment/%s.png" % name))
         if img is None:
             print("weather.bin: environment/%s.png missing: no weather" % name)
             return
@@ -1689,7 +1993,7 @@ def make_signs(assets, block_names, out_dir):
         at = []
         for kind, (w, h), (x, y) in (("signs", (24, 26), ((i % 21) * 24, (i // 21) * 26)),
                                       ("hanging_signs", (16, 16), ((i % 32) * 16, 52 + (i // 32) * 16))):
-            img = png_decode(assets.read("textures/gui/%s/%s.png" % (kind, wood)))
+            img = assets.image(("textures/gui/%s/%s.png" % (kind, wood)))
             if img is None or img[0] != w or img[1] != h or y + h > height:
                 at.append((0xFFFF, 0xFFFF))
                 continue
@@ -1718,7 +2022,7 @@ def make_effects(assets, out_dir, reg, facts):
              sorted(reg["minecraft:mob_effect"]["entries"].items(), key=lambda kv: kv[1]["protocol_id"])]
     imgs = []
     for n in names:
-        img = png_decode(assets.read("textures/mob_effect/%s.png" % n) or b"")
+        img = assets.image(("textures/mob_effect/%s.png" % n) or b"")
         imgs.append(img if img and img[0] <= 255 and img[1] <= 255 else None)
     cols = 16
     cell = max([18] + [max(i[0], i[1]) for i in imgs if i])
@@ -1805,22 +2109,14 @@ def make_entities(res, assets, reg, out_dir):
                                                       key=lambda kv: kv[1]["protocol_id"])]
 
     # Every entity texture.
-    if assets.zip:
-        ent_files = [x[len("assets/minecraft/textures/"):-4] for x in assets.zip.namelist()
-                     if x.startswith("assets/minecraft/textures/entity/") and x.endswith(".png")]
-    else:
-        ent_files = []
-        base = os.path.join(res, "assets", "minecraft", "textures")
-        for root, _, files in os.walk(os.path.join(base, "entity")):
-            for fn in files:
-                if fn.endswith(".png"):
-                    ent_files.append(os.path.relpath(os.path.join(root, fn), base)[:-4].replace(os.sep, "/"))
+    ent_files = [x[len("assets/minecraft/textures/"):-4] for x in assets.names()
+                 if x.startswith("assets/minecraft/textures/entity/") and x.endswith(".png")]
     ent_set = set(ent_files)
     sprites = {}
     for tex in sorted(ent_files):
         if any(tex[len("entity/"):].startswith(s) for s in ENTITY_TEX_SKIP):
             continue
-        img = png_decode(assets.read("textures/" + tex + ".png"))
+        img = assets.image(("textures/" + tex + ".png"))
         if img:
             sprites[tex] = img
 
@@ -1920,7 +2216,7 @@ def make_entities(res, assets, reg, out_dir):
     shown = {}
 
     def third(ref):
-        ref = ref.split(":", 1)[-1]
+        ref = nsref(ref)
         start = ref
         if start in shown:
             return shown[start]
@@ -1933,7 +2229,7 @@ def make_entities(res, assets, reg, out_dir):
                 break
             if "parent" not in m:
                 break
-            ref = m["parent"].split(":", 1)[-1]
+            ref = nsref(m["parent"])
         shown[start] = out
         return out
 
@@ -2152,6 +2448,156 @@ def make_sounds(res, out_dir, sound_names):
             with open(p, "rb") as src:
                 f.write(src.read())
     print("sounds.bin: %d files, %d events, %.0f MB" % (len(files), len(reg_entries) + len(extra), off / 1e6))
+
+
+def sound_entries(events, sound_names, file_of):
+    """Per registry sound event and per other sounds.json event: (file, volume, pitch, weight,
+    stream, attenuation) entries, nested "event" entries followed as SoundManager does."""
+    def entries(ev, depth=0):
+        out = []
+        key = ev[len("minecraft:"):] if ev.startswith("minecraft:") else ev
+        for e in (events.get(key) or {}).get("sounds", []):
+            if isinstance(e, str):
+                e = {"name": e}
+            if not isinstance(e, dict) or "name" not in e:
+                continue
+            if e.get("type") == "event":
+                if depth < 4:
+                    out.extend(entries(e["name"], depth + 1))
+                continue
+            fi = file_of(e["name"])
+            if fi is None:
+                continue
+            out.append((fi, float(e.get("volume", 1.0)), float(e.get("pitch", 1.0)), int(e.get("weight", 1)),
+                        1 if e.get("stream") else 0, int(e.get("attenuation_distance", 16))))
+        return out
+
+    reg_entries = [entries(n) for n in sound_names]
+    named = set(n.split(":", 1)[-1] for n in sound_names)
+    extra = [(k, entries(k)) for k in sorted(events) if k not in named]
+    return reg_entries, extra
+
+
+SOUND_OVERLAY = 0x80000000
+
+
+def make_pack_sounds(res, assets, out_dir, sound_names):
+    """packsounds.bin, "PNSO": the packs' sounds over sounds.bin, laid out as sounds.bin
+    (make_sounds) but holding only the packs' own .ogg files; an entry's file with the top bit
+    set is one of them, else sounds.bin's file of that index. The event tables are complete:
+    the game's sounds.json with every pack's sounds.json merged in (an event with "replace"
+    replaces, else its sounds are added), as SoundManager's preparations. Not written when no
+    pack has sounds."""
+    path = os.path.join(out_dir, "packsounds.bin")
+    if os.path.exists(path):
+        os.remove(path)
+    pack_names = [n for pk in assets.packs for n in pk.names()]
+    has_json = [n for n in pack_names if n.endswith("/sounds.json") and n.count("/") == 2]
+    has_ogg = any(n.endswith(".ogg") and "/sounds/" in n for n in pack_names)
+    if not has_json and not has_ogg:
+        return
+    index_path, objects = find_objects()
+    prepared_index = os.path.join(res, "asset-index.json")
+    if os.path.isfile(prepared_index):
+        index_path = prepared_index
+    if not index_path or not objects:
+        print("packsounds.bin: no installed game sounds: skipped")
+        return
+    objs = json.load(open(index_path)).get("objects", {})
+
+    def obj_path(key):
+        o = objs.get(key)
+        if not o:
+            return None
+        q = os.path.join(objects, o["hash"][:2], o["hash"])
+        return q if os.path.isfile(q) else None
+
+    sj = obj_path("minecraft/sounds.json")
+    base_events = json.load(open(sj)) if sj else {}
+    # sounds.bin's file numbering, made again the way make_sounds made it.
+    base_index = {}
+
+    def base_file(name):
+        name = name.split(":", 1)[-1]
+        if name in base_index:
+            return base_index[name]
+        if not obj_path("minecraft/sounds/" + name + ".ogg"):
+            return None
+        base_index[name] = len(base_index)
+        return base_index[name]
+
+    sound_entries(base_events, sound_names, base_file)
+    events = {k: dict(v) for k, v in base_events.items()}
+    for full in sorted(set(has_json)):
+        ns = full.split("/")[1]
+        for d in assets.json_stack(ns + ":sounds.json" if ns != "minecraft" else "sounds.json"):
+            if not isinstance(d, dict):
+                continue
+            for k, v in d.items():
+                if not isinstance(v, dict):
+                    continue
+                key = k if ns == "minecraft" else ns + ":" + k
+                sounds = [dict(e, name=(e["name"] if ":" in e["name"] or ns == "minecraft" else ns + ":" + e["name"]))
+                          if isinstance(e, dict) and "name" in e else
+                          (e if not isinstance(e, str) or ":" in e or ns == "minecraft" else ns + ":" + e)
+                          for e in v.get("sounds", [])]
+                if v.get("replace") or key not in events:
+                    events[key] = dict(v, sounds=sounds)
+                else:
+                    events[key] = dict(events[key], sounds=list(events[key].get("sounds", [])) + sounds)
+    files, file_index = [], {}
+
+    def file_of(name):
+        rel = "sounds/" + nsref(name) + ".ogg" if ":" not in nsref(name) else \
+            nsref(name).split(":", 1)[0] + ":sounds/" + nsref(name).split(":", 1)[1] + ".ogg"
+        if rel in file_index:
+            return file_index[rel]
+        own = assets.from_pack(rel)
+        if own is not None:
+            file_index[rel] = len(files) | SOUND_OVERLAY
+            files.append((nsref(name), own))
+            return file_index[rel]
+        if ":" in nsref(name):
+            return None
+        return base_index.get(nsref(name))
+
+    reg_entries, extra = sound_entries(events, sound_names, file_of)
+    head = bytearray()
+    head += struct.pack("<I", len(files))
+    rows = []
+    for name, data in files:
+        nb = name.encode()
+        head += struct.pack("<H", len(nb)) + nb
+        rows.append(len(head))
+        head += struct.pack("<QI", 0, len(data))
+
+    def ent_bytes(lst):
+        b = struct.pack("<H", len(lst))
+        for fi, vol, pit, w, st, att in lst:
+            b += struct.pack("<IffHBB", fi, vol, pit, min(65535, w), st, min(255, att))
+        return b
+
+    head += struct.pack("<I", len(reg_entries))
+    for lst in reg_entries:
+        head += ent_bytes(lst)
+    head += struct.pack("<I", len(extra))
+    for name, lst in extra:
+        nb = name.encode()
+        head += struct.pack("<H", len(nb)) + nb + ent_bytes(lst)
+    head += struct.pack("<I", len(sound_names))
+    for n in sound_names:
+        nb = n.split(":", 1)[-1].encode()
+        head += struct.pack("<H", len(nb)) + nb
+    off = 4 + len(head)
+    for at, (_, data) in zip(rows, files):
+        head[at:at + 8] = struct.pack("<Q", off)
+        off += len(data)
+    with open(path, "wb") as f:
+        f.write(b"PNSO")
+        f.write(head)
+        for _, data in files:
+            f.write(data)
+    print("packsounds.bin: %d sounds of the packs, %d events" % (len(files), len(reg_entries) + len(extra)))
 
 
 if __name__ == "__main__":

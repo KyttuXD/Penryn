@@ -98,6 +98,10 @@ pub struct Game {
     /// The synced variant registries (mob textures), and the tab list's player names.
     pub variants: crate::mobs::Variants,
     pub player_names: alloc::collections::BTreeMap<[u8; 16], String>,
+    /// The server's resource packs (packs.rs).
+    pub packs: crate::packs::Packs,
+    /// The server started a configuration phase: the window runs it (reconfigure).
+    pub reconfigure: bool,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -181,7 +185,16 @@ fn random_bytes(n: usize) -> Vec<u8> {
 
 impl Game {
     /// Connects and logs in, through configuration, to the start of play.
-    pub fn join(host: &str, port: u16, name: &str, account: Option<&Account>, blocks: Blocks, view: i8) -> Result<Game, String> {
+    pub fn join(
+        host: &str,
+        port: u16,
+        name: &str,
+        account: Option<&Account>,
+        mut blocks: Blocks,
+        view: i8,
+        local_packs: Vec<String>,
+        ui: &mut dyn crate::packs::Host,
+    ) -> Result<Game, String> {
         let mut c = Conn::open(host, port)?;
         handshake(&mut c, host, port, 2)?;
         let (name, uuid) = match account {
@@ -263,7 +276,8 @@ impl Game {
         let mut biomes: Vec<String> = Vec::new();
         let mut creative = crate::creative::Sync::new();
         let mut variants = crate::mobs::Variants::default();
-        configure(&mut c, view, &mut biomes, &mut creative.registries, &mut variants)?;
+        let mut packs = crate::packs::Packs::new(host, port, &name, &final_uuid, local_packs);
+        configure(&mut c, view, &mut biomes, &mut creative.registries, &mut variants, &mut packs, ui, None, &mut blocks)?;
         let block_bits = blocks.global_bits();
         let mut world = World::new(block_bits, crate::blocks::ceil_log2(biomes.len().max(1)));
         world.set_biomes(&biomes, &blocks);
@@ -312,13 +326,33 @@ impl Game {
             creative,
             variants,
             player_names: alloc::collections::BTreeMap::new(),
+            packs,
+            reconfigure: false,
         })
+    }
+
+    /// The configuration phase the server started from play (ClientboundStartConfiguration).
+    pub fn reconfigure_now(&mut self, ui: &mut dyn crate::packs::Host) -> Result<(), String> {
+        self.reconfigure = false;
+        let mut b: Vec<String> = Vec::new();
+        configure(&mut self.conn, 8, &mut b, &mut self.creative.registries, &mut self.variants, &mut self.packs, ui, Some(&mut self.world), &mut self.blocks)?;
+        if !b.is_empty() {
+            self.world.biome_bits = crate::blocks::ceil_log2(b.len());
+            self.world.set_biomes(&b, &self.blocks);
+        }
+        Ok(())
+    }
+
+    /// The resource packs' work for this frame (packs.rs): statuses, downloads, reloads.
+    pub fn pack_step(&mut self, ui: &mut dyn crate::packs::Host) -> Result<(), String> {
+        self.packs.step(&mut self.conn, play::S_RESOURCE_PACK, ui, Some(&mut self.world), &mut self.blocks)
     }
 
     /// Handles every packet that has arrived, without waiting.
     pub fn pump(&mut self) -> Result<(), String> {
         let mut n = 0;
-        while let Some(p) = self.conn.recv(0)? {
+        while !self.reconfigure {
+            let Some(p) = self.conn.recv(0)? else { break };
             self.handle(p)?;
             n += 1;
             if n > 2000 {
@@ -330,6 +364,9 @@ impl Game {
 
     /// Waits up to `ms` for packets, handling them.
     pub fn wait(&mut self, ms: i32) -> Result<(), String> {
+        if self.reconfigure {
+            return Ok(());
+        }
         if let Some(p) = self.conn.recv(ms)? {
             self.handle(p)?;
         }
@@ -924,13 +961,14 @@ impl Game {
             }
             play::C_START_CONFIGURATION => {
                 self.conn.send(play::S_CONFIGURATION_ACKNOWLEDGED, &Out::new())?;
-                let mut b: Vec<String> = Vec::new();
-                configure(&mut self.conn, 8, &mut b, &mut self.creative.registries, &mut self.variants)?;
-                if !b.is_empty() {
-                    self.world.biome_bits = crate::blocks::ceil_log2(b.len());
-                    self.world.set_biomes(&b, &self.blocks);
-                }
+                // The rest is configuration: run by reconfigure_now, with the window.
+                self.reconfigure = true;
             }
+            play::C_RESOURCE_PACK_PUSH => {
+                self.packs.on_push(&mut r);
+                self.packs.flush(&mut self.conn, play::S_RESOURCE_PACK)?;
+            }
+            play::C_RESOURCE_PACK_POP => self.packs.on_pop(&mut r),
             _ => {}
         }
         Ok(())
@@ -1108,16 +1146,31 @@ impl Game {
 }
 
 /// The configuration phase, until the server finishes it. Counts the biomes it sends.
+#[allow(clippy::too_many_arguments)]
 fn configure(
     c: &mut Conn,
     view: i8,
     biomes: &mut Vec<String>,
     regs: &mut Vec<(String, Vec<String>)>,
     variants: &mut crate::mobs::Variants,
+    packs: &mut crate::packs::Packs,
+    ui: &mut dyn crate::packs::Host,
+    mut world: Option<&mut World>,
+    blocks: &mut Blocks,
 ) -> Result<(), String> {
     c.send(config::S_CLIENT_INFORMATION, &crate::options::client_information(view))?;
+    let mut heard = crate::sys::now_ms();
     loop {
-        let p = next(c)?;
+        // The server waits on the resource packs (ServerResourcePackConfigurationTask): their
+        // prompt, download and reload run between packets.
+        packs.step(c, config::S_RESOURCE_PACK, ui, world.as_deref_mut(), blocks)?;
+        let Some(p) = c.recv(if packs.busy() { 15 } else { 200 })? else {
+            if crate::sys::now_ms() > heard + 30000 && !packs.busy() {
+                return Err(String::from("the server stopped answering"));
+            }
+            continue;
+        };
+        heard = crate::sys::now_ms();
         let mut r = p.reader();
         match p.id {
             config::C_DISCONNECT => {
@@ -1178,15 +1231,8 @@ fn configure(
                     crate::mobs::registry_data(&id, &mut r2, variants);
                 }
             }
-            config::C_RESOURCE_PACK_PUSH => {
-                // Accept (we do not download it): 3 accepted, then 0 loaded.
-                let u = r.uuid().unwrap_or([0; 16]);
-                for status in [3, 0] {
-                    let mut o = Out::new();
-                    o.bytes(&u).varint(status);
-                    c.send(config::S_RESOURCE_PACK, &o)?;
-                }
-            }
+            config::C_RESOURCE_PACK_PUSH => packs.on_push(&mut r),
+            config::C_RESOURCE_PACK_POP => packs.on_pop(&mut r),
             config::C_CODE_OF_CONDUCT => {
                 let text = r.string().unwrap_or_default();
                 crate::say!("server code of conduct:\n{}", text);
