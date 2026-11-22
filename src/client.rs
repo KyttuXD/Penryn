@@ -585,7 +585,8 @@ impl Game {
             play::C_CONTAINER_SET_CONTENT => {
                 let id = r.varint().unwrap_or(-1);
                 let state = r.varint().unwrap_or(0);
-                let n = r.varint().unwrap_or(0).max(0) as usize;
+                // Every slot takes at least a byte: a count past the packet's end is a bad one.
+                let n = (r.varint().unwrap_or(0).max(0) as usize).min(r.left());
                 let mut ok = true;
                 let mut got: Vec<Option<(i32, i32)>> = Vec::with_capacity(n);
                 let mut patches: Vec<Vec<u8>> = Vec::with_capacity(n);

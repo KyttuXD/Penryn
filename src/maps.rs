@@ -337,7 +337,8 @@ pub fn draw_frames(
         if p[0] * p[0] + p[1] * p[1] + p[2] * p[2] > 64.0 * 64.0 {
             continue;
         }
-        let dir = e.data.get(&SPAWN_DATA).copied().unwrap_or(3).clamp(0, 5) as usize;
+        // HangingEntity.DATA_DIRECTION (index 8) once synced, else the spawn packet's.
+        let dir = e.data.get(&8).or(e.data.get(&SPAWN_DATA)).copied().unwrap_or(3).clamp(0, 5) as usize;
         let st = STEPS[dir];
         let (xr, yr) = if dir >= 2 {
             let yrot = [0.0, 0.0, 180.0, 0.0, 90.0, 270.0][dir];
@@ -358,7 +359,8 @@ pub fn draw_frames(
             }
         }
         let Some((item, _)) = e.item else { continue };
-        let rot = e.data.get(&9).copied().unwrap_or(0) as f64;
+        // ItemFrame.DATA_ROTATION is index 10 (8 is the direction, 9 the item).
+        let rot = (e.data.get(&10).copied().unwrap_or(0) & 7) as f64;
         let im = m.t(0.0, 0.0, if invisible { 0.5 } else { 0.4375 });
         if let Some(id) = map {
             let mm = im.r(2, (rot as i64 % 4 * 2) as f64 * 45.0).r(2, 180.0).s(0.0078125, 0.0078125, 0.0078125).t(-64.0, -64.0, 0.0).t(0.0, 0.0, -1.0);

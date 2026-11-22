@@ -116,7 +116,7 @@ pub fn load(gl: &Gl) {
 
 /// The tables of containers.bin, and where its pixels start.
 pub fn parse(d: &[u8]) -> Option<(Assets, usize)> {
-    if d.get(..4)? != MAGIC {
+    if d.get(..4)? != MAGIC || d.len() < 8 {
         return None;
     }
     let (w, h) = (rd16(d, 4) as usize, rd16(d, 6) as usize);
@@ -1657,7 +1657,7 @@ pub fn text(g: &mut Game, s: &str) -> Result<(), String> {
     }
     let before = g.menus.name.clone();
     for ch in s.chars() {
-        if g.menus.name.chars().count() < 50 && ch != '\u{a7}' && ch >= ' ' {
+        if g.menus.name.chars().count() < 50 && ch != '\u{a7}' && ch >= ' ' && ch != '\u{7f}' {
             g.menus.name.push(ch);
         }
     }
@@ -1724,8 +1724,8 @@ pub fn drag(gui: &Gui, g: &mut Game, mx: f32, my: f32) {
             }
         }
         STONECUTTER | LOOM => {
-            let y0 = top + if c.menu == LOOM { 13.0 } else { 14.0 };
-            g.menus.scroll = ((my - y0 - 7.5) / (56.0 - 15.0)).clamp(0.0, 1.0);
+            let (y0, bar) = if c.menu == LOOM { (top + 13.0, 56.0) } else { (top + 14.0, 54.0) };
+            g.menus.scroll = ((my - y0 - 7.5) / (bar - 15.0)).clamp(0.0, 1.0);
         }
         _ => {}
     }
@@ -1751,14 +1751,16 @@ pub fn click(gui: &Gui, g: &mut Game, win: &Window, mx: f32, my: f32, button_no:
         CRAFTER => {
             // CrafterScreen.slotClicked: an empty grid slot with nothing on the cursor toggles.
             if let Some(i) = screens::slot_at(gui, win, mx, my) {
-                if (0..9).contains(&i) && slot(c, i as usize).is_none() && g.carried.is_none() && (button_no == 1 || button_no == 3) {
-                    let disabled = g.menus.data[i as usize] == 1;
+                let disabled = (0..9).contains(&i) && g.menus.data[i as usize] == 1;
+                // A disabled slot is enabled by any click; an enabled one disabled only with
+                // nothing on the cursor. The click still goes to the server as a slot click.
+                if (0..9).contains(&i) && slot(c, i as usize).is_none() && g.game_mode != 3 && (button_no == 1 || button_no == 3) && (disabled || g.carried.is_none()) {
                     g.menus.data[i as usize] = if disabled { 0 } else { 1 };
                     let mut o = Out::new();
                     o.varint(i as i32).varint(cid).bool(disabled);
                     g.conn.send(S_CONTAINER_SLOT_STATE_CHANGED, &o)?;
                     g.sounds.push(Sound { sound: SoundRef::Name(String::from("ui.button.click")), pos: None, volume: 0.4, pitch: if disabled { 1.0 } else { 0.75 }, source: 10 });
-                    return Ok(true);
+                    return Ok(false);
                 }
             }
         }
@@ -1832,7 +1834,7 @@ pub fn click(gui: &Gui, g: &mut Game, win: &Window, mx: f32, my: f32, button_no:
             let (total, rows, x0, y0, cw, ch, cells) = if menu == LOOM {
                 (if loom_shows(g, a, c) { loom_patterns(g, a, c).len() } else { 0 }, 4, 60.0, 13.0, 14.0, 14.0, 16)
             } else {
-                (stonecutter_recipes(g, c).len(), 3, 52.0, 16.0, 16.0, 18.0, 12)
+                (stonecutter_recipes(g, c).len(), 3, 52.0, 14.0, 16.0, 18.0, 12)
             };
             let start = rows_scroll(total, rows, g.menus.scroll);
             for j in 0..cells {
@@ -1847,7 +1849,7 @@ pub fn click(gui: &Gui, g: &mut Game, win: &Window, mx: f32, my: f32, button_no:
                     return Ok(true);
                 }
             }
-            let (sx, sy) = (left + 119.0, top + if menu == LOOM { 13.0 } else { 9.0 });
+            let (sx, sy) = (left + 119.0, top + 9.0);
             if hit(mx, my, sx, sy, 12.0, if menu == LOOM { 56.0 } else { 54.0 }) && ((total + 3) / 4) > rows {
                 g.menus.dragging = true;
                 drag(gui, g, mx, my);
@@ -1906,6 +1908,15 @@ pub fn selftest(data: Option<&[u8]>) -> Vec<(&'static str, String, &'static str)
     rec.varint(0).varint(1).varint(2).varint(1).varint(5).varint(10).varint(2).varint(0).varint(0);
     let got = read_recipes(&mut In::new(&rec.b)).map(|v| format!("{:?} {:?}", v[0].0, v[0].1));
     v.push(("stonecutter recipe from UpdateRecipes", got.unwrap_or_default(), "[1] (10, 2)"));
+    // ClientboundMerchantOffers' list: 1 offer (12 emeralds with no components -> 1 item 5 of
+    // 1, no second cost), in stock, uses 0 of 12, xp 2, special price 0, multiplier 0.05,
+    // demand 0; the level, xp and the two flags follow it.
+    let mut mo = Out::new();
+    mo.varint(1).varint(800).varint(12).varint(0).varint(1).varint(5).varint(0).varint(0).bool(false).bool(false);
+    mo.i32(0).i32(12).i32(2).i32(0).f32(0.05).i32(0).varint(3).varint(70).bool(true).bool(true);
+    let mut r = In::new(&mo.b);
+    let got = read_offers(&mut r).map(|o| format!("{} {:?} {:?} {} {:?}", o.len(), o[0].cost_a(), o[0].result, o[0].xp, (r.varint(), r.varint(), r.bool(), r.bool(), r.left())));
+    v.push(("merchant offers layout", got.unwrap_or_default(), "1 (800, 12) (5, 1) 2 (Some(3), Some(70), Some(true), Some(true), 0)"));
     match data.and_then(parse) {
         Some((a, _)) => {
             let need = ["bg/anvil", "bg/beacon", "bg/villager", "bg/book", "container/villager/trade_arrow", "container/beacon/button", "map/background", "banner/stripe_top", "block/item_frame"];

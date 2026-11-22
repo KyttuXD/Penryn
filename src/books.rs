@@ -379,13 +379,13 @@ pub fn key(g: &mut Game, b: &mut Book, sc: usize) -> Result<bool, String> {
     Ok(false)
 }
 
-/// Typed text: into the title while signing (16 characters), else the page, while it still
+/// Typed text: into the title while signing (15 characters, BookSignScreen's box), else the page, while it still
 /// fits on the page (1024 characters, 14 lines).
 pub fn text(gui: &Gui, b: &mut Book, s: &str) {
     let Some(e) = b.edit.as_mut() else { return };
-    for ch in s.chars().filter(|c| *c >= ' ' && *c != '\u{a7}') {
+    for ch in s.chars().filter(|c| *c >= ' ' && *c != '\u{a7}' && *c != '\u{7f}') {
         if e.signing {
-            if e.title.chars().count() < 16 {
+            if e.title.chars().count() < 15 {
                 e.title.push(ch);
             }
             continue;
