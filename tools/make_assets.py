@@ -1390,7 +1390,8 @@ def make_entities(res, assets, reg, out_dir):
         if t == "minecraft:model":
             return m.get("model")
         if t == "minecraft:special":
-            return m.get("base")
+            # Drawn by a special renderer (shields, banners, heads, chests...): no flat model.
+            return "special"
         for key in ("fallback", "on_false", "on_true", "model"):
             if isinstance(m.get(key), dict):
                 r = find_model(m[key], depth + 1)
@@ -1430,7 +1431,10 @@ def make_entities(res, assets, reg, out_dir):
         asset = asset_index.get(eq.get("asset_id"), 0xFFFF)
         d = assets.json("items/" + it.split(":", 1)[1] + ".json")
         ref = find_model(d.get("model")) if d else None
-        rot, tr, sc = third(ref) if ref else ([0, 0, 0], [0, 3, 1], [0.55, 0.55, 0.55])
+        if ref == "special":
+            rot, tr, sc = [0, 0, 0], [0, 0, 0], [0, 0, 0]  # not drawn in a hand
+        else:
+            rot, tr, sc = third(ref) if ref else ([0, 0, 0], [0, 3, 1], [0.55, 0.55, 0.55])
         item_rows.append((slot, asset, list(rot) + list(tr) + list(sc)))
 
     # Shelf-pack the textures, tallest first.

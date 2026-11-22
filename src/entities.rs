@@ -459,7 +459,7 @@ impl EntityTable {
 
     /// The model pose of every part (LivingEntityRenderer: position, body turn, the death
     /// fall, the species' scale; the parts' setupAnim), in pixels from the model's origin.
-    fn pose(&self, m: &Model, e: &Entity, partial: f32, at: [f64; 3], held: [bool; 2]) -> Vec<M> {
+    fn pose(&self, m: &Model, e: &Entity, partial: f32, at: [f64; 3], held: [bool; 2], mats: &mut Vec<M>) {
         let ty = self.types.get(e.kind as usize);
         let name = ty.map_or("", |t| t.name.as_str());
         let mut base = mul(&tr(at[0], at[1], at[2]), &rot(1, math::to_rad((180.0 - e.body_yaw) as f64)));
@@ -468,6 +468,10 @@ impl EntityTable {
             let f = math::sqrt(((e.death_time as f64 + partial as f64 - 1.0) / 20.0 * 1.6).max(0.0)).min(1.0);
             let flip = if matches!(name, "spider" | "cave_spider" | "silverfish" | "endermite") { 180.0 } else { 90.0 };
             base = mul(&base, &rot(2, math::to_rad(f * flip)));
+        }
+        // LivingEntityRenderer.isEntityUpsideDown: named Dinnerbone or Grumm.
+        if matches!(e.custom_name.as_deref(), Some("Dinnerbone" | "Grumm")) {
+            base = mul(&mul(&base, &tr(0.0, self.dims(e).1 as f64 + 0.1, 0.0)), &rot(2, math::PI));
         }
         base = mul(&base, &sc(-1.0, -1.0, 1.0));
         match name {
@@ -493,7 +497,7 @@ impl EntityTable {
         let head_x = math::to_rad(e.pitch as f64);
         let zombie = zombie_arms(name);
         let age = e.age as f64 + partial as f64;
-        let mut mats: Vec<M> = Vec::with_capacity(m.parts.len());
+        mats.clear();
         for p in m.parts.iter() {
             let parent = if p.parent >= 0 { mats[p.parent as usize] } else { base };
             let q = p.pose;
@@ -540,7 +544,6 @@ impl EntityTable {
             t = mul(&t, &sc(q[6] as f64, q[7] as f64, q[8] as f64));
             mats.push(t);
         }
-        mats
     }
 
     fn emit(&self, out: &mut Vec<V>, m: &Model, mats: &[M], rect: [u16; 4], tint: [u8; 3], red: bool) {
@@ -573,7 +576,8 @@ impl EntityTable {
 
     /// The draws of an entity, from the cache while nothing they depend on changed.
     fn looks(&self, id: i32, e: &Entity, cx: &DrawCx) -> Vec<Draw> {
-        let angry = e.data.get(&22).map_or(0, |&t| (t > cx.game_time) as u32);
+        // A wolf's or a bee's anger running out changes its texture.
+        let angry = [19u8, 22].iter().any(|i| e.data.get(i).map_or(false, |&t| t > cx.game_time)) as u32;
         let key = e.version.wrapping_mul(2) | angry;
         let mut cache = self.cache.borrow_mut();
         if let Some((k, v)) = cache.get(&id) {
@@ -602,6 +606,7 @@ impl EntityTable {
         let (yr, pr) = (math::to_rad(cx.yaw as f64), math::to_rad(cx.pitch as f64));
         let dir = [-math::sin(yr) * math::cos(pr), -math::sin(pr), math::cos(yr) * math::cos(pr)];
         let picked = self.pick(ents, eye, dir, cx.reach, skip).map(|h| h.0);
+        let (mut mats, mut body): (Vec<M>, Vec<M>) = (Vec::new(), Vec::new());
         for (&id, e) in ents.iter() {
             if id == skip || e.item.is_some() {
                 continue;
@@ -616,31 +621,30 @@ impl EntityTable {
             let red = e.hurt > 0 || e.death_time > 0;
             let held = [e.equipment[0].is_some(), e.equipment[1].is_some()];
             let looks = self.looks(id, e, cx);
-            let mut first: Option<(usize, Vec<M>)> = None;
+            let mut first: Option<usize> = None;
             for dr in looks.iter() {
                 if invisible && !dr.worn {
                     continue;
                 }
                 let Some(m) = self.models.get(dr.model as usize) else { continue };
-                let mats = self.pose(m, e, partial, p, held);
+                self.pose(m, e, partial, p, held, &mut mats);
                 self.emit(&mut v, m, &mats, dr.rect, rgb(dr.tint), red);
                 if first.is_none() {
-                    first = Some((dr.model as usize, mats));
+                    first = Some(dr.model as usize);
+                    body.clear();
+                    body.extend_from_slice(&mats);
                 }
             }
             // ItemInHandLayer: the items in the arms of a humanoid model.
             if held[0] || held[1] {
-                let (mi, mats) = match first {
-                    Some(f) => f,
-                    None => match looks.first() {
-                        Some(dr) => {
-                            let m = &self.models[dr.model as usize];
-                            (dr.model as usize, self.pose(m, e, partial, p, held))
-                        }
-                        None => (usize::MAX, Vec::new()),
-                    },
-                };
-                if let Some(m) = self.models.get(mi) {
+                if first.is_none() {
+                    if let Some(dr) = looks.first() {
+                        self.pose(&self.models[dr.model as usize], e, partial, p, held, &mut body);
+                        first = Some(dr.model as usize);
+                    }
+                }
+                let mats = &body;
+                if let Some(m) = first.and_then(|mi| self.models.get(mi)) {
                     let left_handed = e.kind != self.player_type && e.d(15) & 2 != 0;
                     for (slot, arm) in [(0usize, "right_arm"), (1, "left_arm")] {
                         let Some((item, _)) = e.equipment[slot] else { continue };
@@ -704,6 +708,9 @@ impl EntityTable {
     /// third-person transform (mirrored in the left hand).
     fn held_item(&self, out: &mut Vec<V>, arm: &M, item: i32, left: bool, cx: &DrawCx) {
         let d = self.item_third.get(item as usize).copied().unwrap_or([0.0, 0.0, 0.0, 0.0, 3.0, 1.0, 0.55, 0.55, 0.55]);
+        if d[6] == 0.0 {
+            return; // a special renderer's item (shield, banner, head...): not drawn here
+        }
         let k = if left { -1.0 } else { 1.0 };
         // The arm's pose is in pixels: back to blocks first.
         let mut m = mul(arm, &sc(16.0, 16.0, 16.0));

@@ -353,6 +353,22 @@ pub fn look(t: &EntityTable, e: &Entity, vs: &Variants, game_time: i64) -> Vec<D
             rect = tb(&format!("entity/panda/{}panda", GENES[g as usize])).or(rect);
         }
         "sniffer" if baby => rect = tx("entity/sniffer/snifflet").or(rect),
+        // BeeRenderer: angry (its anger end ahead), carrying nectar (flag 8).
+        "bee" => {
+            let angry = if d(19) > game_time { "_angry" } else { "" };
+            let nectar = if d(18) & 8 != 0 { "_nectar" } else { "" };
+            rect = tb(&format!("entity/bee/bee{}{}", angry, nectar)).or(rect);
+        }
+        // StriderRenderer: cold out of lava (DATA_SUFFOCATING).
+        "strider" if d(19) != 0 => rect = tb("entity/strider/strider_cold").or(rect),
+        // GhastRenderer: shooting (DATA_IS_CHARGING), VexRenderer: charging (flag 1).
+        "ghast" if d(16) != 0 => rect = tx("entity/ghast/ghast_shooting").or(rect),
+        "vex" if d(16) & 1 != 0 => rect = tx("entity/illager/vex_charging").or(rect),
+        // CopperGolemRenderer: its weathering.
+        "copper_golem" => {
+            const STATES: [&str; 4] = ["", "_exposed", "_weathered", "_oxidized"];
+            rect = tx(&format!("entity/copper_golem/copper_golem{}", STATES[d(16).clamp(0, 3) as usize])).or(rect);
+        }
         "salmon" => {
             model = match d(17) {
                 0 => m("salmon_small#main"),
@@ -448,6 +464,18 @@ pub fn look(t: &EntityTable, e: &Entity, vs: &Variants, game_time: i64) -> Vec<D
         "stray" => push(&mut out, m("stray#outer"), tx("entity/skeleton/stray_overlay"), white),
         "bogged" if d(16) == 0 => push(&mut out, m("bogged#outer"), tx("entity/skeleton/bogged_overlay"), white),
         "slime" => push(&mut out, m("slime#outer"), tx("entity/slime/slime"), white),
+        // IronGolemCrackinessLayer: cracks below 75%, 50% and 25% of its 100 health.
+        "iron_golem" => {
+            let f = e.health.unwrap_or(100.0) / 100.0;
+            let level = if f < 0.25 { "high" } else if f < 0.5 { "medium" } else if f < 0.75 { "low" } else { "" };
+            if !level.is_empty() {
+                push(&mut out, body_model, tx(&format!("entity/iron_golem/iron_golem_crackiness_{}", level)), white);
+            }
+        }
+        "copper_golem" => {
+            const STATES: [&str; 4] = ["", "_exposed", "_weathered", "_oxidized"];
+            push(&mut out, body_model, tx(&format!("entity/copper_golem/copper_golem_eyes{}", STATES[d(16).clamp(0, 3) as usize])), white);
+        }
         _ => {}
     }
     // ---- equipment: the body slot (horse armour, wolf armour, llama carpets), the saddle
