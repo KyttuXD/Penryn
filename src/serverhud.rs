@@ -43,6 +43,8 @@ struct State {
     /// The links screen: its scroll, and the link being confirmed.
     scroll: f32,
     confirm: Option<usize>,
+    /// The sidebar's rows for (objective, ServerUi.version), made again only when they change.
+    sidebar: Option<(String, u32, Vec<(String, String)>)>,
 }
 
 struct Main(UnsafeCell<Option<State>>);
@@ -283,7 +285,11 @@ pub fn sidebar_rows(ui: &ServerUi, objective: &str) -> Vec<(String, String)> {
 }
 
 fn sidebar(gui: &mut Gui, ui: &ServerUi, objective: &str, title: &str) {
-    let rows = sidebar_rows(ui, objective);
+    let s = st();
+    if s.sidebar.as_ref().map_or(true, |c| c.0 != objective || c.1 != ui.version) {
+        s.sidebar = Some((String::from(objective), ui.version, sidebar_rows(ui, objective)));
+    }
+    let rows = &s.sidebar.as_ref().unwrap().2;
     let tw = gui.text_width(title);
     let colon = gui.text_width(": ");
     let mut width = tw;

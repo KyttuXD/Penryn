@@ -460,7 +460,11 @@ pub struct ServerUi {
 }
 
 impl ServerUi {
-    pub fn new(common: Common) -> ServerUi {
+    pub fn new(mut common: Common) -> ServerUi {
+        // Tests: PENRYN_TEST_LINKS="label|url;label|url" stands in for the server's links.
+        if let (true, Some(t)) = (common.links.is_empty(), crate::sys::env("PENRYN_TEST_LINKS")) {
+            common.links = t.split(';').filter_map(|l| l.split_once('|')).map(|(a, b)| (String::from(a), String::from(b))).collect();
+        }
         ServerUi {
             common,
             players: BTreeMap::new(),

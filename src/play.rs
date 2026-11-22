@@ -1120,6 +1120,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     self.set_screen(Screen::Options);
                 } else if p == "pause" {
                     self.set_screen(Screen::Pause);
+                } else if p == "links" {
+                    crate::serverhud::open_links();
+                    self.set_screen(Screen::Links);
                 }
             }
         }
