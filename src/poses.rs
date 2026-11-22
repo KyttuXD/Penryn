@@ -165,3 +165,38 @@ pub fn part(name: &str, e: &Entity, partial: f32, part: &str, pos: &mut [f64; 3]
         }
     }
 }
+
+/// Checks: a swimmer's and a glider's body lie along the look, a sleeper flat, a crouching
+/// player sits 2/16 lower; a rider's legs reach forward; a rowing paddle turns.
+pub fn selftest() -> alloc::vec::Vec<(&'static str, alloc::string::String, &'static str)> {
+    use alloc::format;
+    let mut v = alloc::vec::Vec::new();
+    let id: M = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
+    let up = |m: &M| [m[0][1], m[1][1], m[2][1]];
+    let mut e = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    e.data.insert(6, SWIMMING);
+    e.data.insert(0, 0x10);
+    let m = setup_rotations("player", &e, 0.0, id);
+    let u = up(&m);
+    v.push(("swimming body", format!("{:.2} {:.2} {:.2}", u[0], u[1], u[2]), "0.00 0.00 -1.00"));
+    e.data.insert(6, CROUCHING);
+    let m = setup_rotations("player", &e, 0.0, id);
+    v.push(("crouching offset", format!("{:.3}", m[1][3]), "-0.125"));
+    e.data.insert(6, FALL_FLYING);
+    e.data.insert(crate::riding::D_FLY_TICKS, 20);
+    e.pitch = 0.0;
+    let m = setup_rotations("player", &e, 0.0, id);
+    let u = up(&m);
+    v.push(("gliding body", format!("{:.2} {:.2} {:.2}", u[0], u[1], u[2]), "0.00 0.00 -1.00"));
+    e.data.insert(6, 0);
+    e.data.insert(crate::riding::D_RIDING, 1);
+    let (mut pos, mut r) = ([0.0; 3], [0.0; 3]);
+    part("player", &e, 0.0, "right_leg", &mut pos, &mut r);
+    v.push(("riding legs", format!("{:.4} {:.4} {:.4}", r[0], r[1], r[2]), "-1.4137 0.3142 0.0785"));
+    let mut b = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    b.data.insert(crate::riding::D_PADDLE_LEFT, (core::f32::consts::PI / 2.0).to_bits() as i64);
+    let mut r = [0.0; 3];
+    part("oak_boat", &b, 1.0, "left_paddle", &mut pos, &mut r);
+    v.push(("rowing paddle", format!("{:.4} {:.4}", r[0], r[1]), "-1.0472 -0.4243"));
+    v
+}

@@ -494,6 +494,9 @@ impl App {
                         if self.mover.on_ground { " ground" } else { "" },
                         if self.mover.horizontal_collision { " wall" } else { "" }
                     );
+                    if self.special.pose != 0 || self.special.swimming || self.special.fall_flying {
+                        say!("perf: pose {}, swimming {}, gliding {}, in water {}", self.special.pose, self.special.swimming, self.special.fall_flying, self.special.in_water);
+                    }
                     if self.mover.horizontal_collision {
                         // What is around the player at feet and head height.
                         let (bx, by, bz) = (math::ifloor(p[0]), math::ifloor(p[1]), math::ifloor(p[2]));
@@ -1135,9 +1138,12 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             g.command(if sprint { 1 } else { 2 })?;
         }
         inp.sprint = self.sprinting;
+        // PENRYN_TEST_INPUT "J": jump held 10 ticks out of every 40 (a horse's jump bar, an
+        // elytra's start).
+        let pulse = self.test_keys.contains('J') && g.game_time % 40 < 10;
         // Swimming, the pose's box, crawling, a glide starting (special.rs).
         let on_vehicle = g.riding.vehicle_of.contains_key(&g.entity_id);
-        self.special.before(g, &mut self.mover, &mut inp, k(K_SPACE), shift, on_vehicle)?;
+        self.special.before(g, &mut self.mover, &mut inp, k(K_SPACE) || pulse, shift, on_vehicle)?;
         if inp.sneak && !g.flying {
             inp.forward *= 0.3;
             inp.strafe *= 0.3;
@@ -1153,8 +1159,6 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.last_input = flags;
             g.send_input(flags)?;
         }
-        // PENRYN_TEST_INPUT "J": jump held 10 ticks out of every 40 (a horse's jump bar).
-        let pulse = self.test_keys.contains('J') && g.game_time % 40 < 10;
         let keys = crate::riding::Keys { forward: k(K_W), back: k(K_S), left: k(K_A), right: k(K_D), jump: k(K_SPACE) || pulse, shift, sprint: self.sprinting };
         let riding = match self.entities.as_ref() {
             Some(t) => self.ride.tick(g, t, keys, &mut self.mover)?,
