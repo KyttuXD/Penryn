@@ -246,8 +246,14 @@ pub fn draw_window(gui: &mut Gui, g: &Game, win: &Window, mx: f32, my: f32) {
         gui.item(&g.blocks, item, count, mx - 8.0, my - 8.0);
     } else if let Some(idx) = hover {
         if let Some((item, _)) = slot_item(g, win, idx) {
-            let id = g.blocks.items.get(item as usize).cloned().unwrap_or_default();
-            tooltip(gui, &[lang::item_name(&id)], mx, my);
+            // The stack's full tooltip from its components (tooltip.rs).
+            let patch = if win.container_id == 0 {
+                g.creative.patches.get(idx as usize)
+            } else {
+                g.container.as_ref().and_then(|c| c.patches.get(idx as usize))
+            };
+            let lines = crate::tooltip::stack_lines(g, gui, item, patch.map_or(&[][..], |p| &p[..]));
+            crate::tooltip::draw(gui, &lines, mx, my);
         }
     }
 }
@@ -310,24 +316,30 @@ impl Button {
 /// down), placed a quarter of the way down: 0 back to the game, 1 leave, 2 Options..., then
 /// what Penryn has no screen for yet (advancements, statistics, world options). The row of
 /// icon buttons (feedback, bugs, friends, reporting) keeps its place but is not drawn.
-pub fn pause_buttons(gui: &Gui) -> [Button; 6] {
+/// With the server's links, their button takes a row of its own above Options...
+/// (serverhud::links_button), and the grid is a row taller.
+pub fn pause_buttons(gui: &Gui, links: bool) -> [Button; 6] {
+    let extra = if links { 24.0 } else { 0.0 };
     let gx = ((gui.width - 212.0) / 2.0).floor() + 4.0;
-    let top = ((gui.height - 166.0) * 0.25).floor();
+    let top = ((gui.height - 166.0 - extra) * 0.25).floor();
     [
         Button::new(gx, top + 50.0, 204.0, lang::get("menu.returnToGame")),
-        Button::new(gx, top + 146.0, 204.0, lang::get("menu.disconnect")),
-        Button::new(gx, top + 122.0, 98.0, lang::get("menu.options")),
+        Button::new(gx, top + 146.0 + extra, 204.0, lang::get("menu.disconnect")),
+        Button::new(gx, top + 122.0 + extra, 98.0, lang::get("menu.options")),
         Button::new(gx, top + 74.0, 98.0, lang::get("gui.advancements")).off(),
         Button::new(gx + 106.0, top + 74.0, 98.0, lang::get("gui.stats")).off(),
-        Button::new(gx + 106.0, top + 122.0, 98.0, lang::get("options.worldOptions.button")).off(),
+        Button::new(gx + 106.0, top + 122.0 + extra, 98.0, lang::get("options.worldOptions.button")).off(),
     ]
 }
 
-pub fn draw_pause(gui: &mut Gui, mx: f32, my: f32) {
+pub fn draw_pause(gui: &mut Gui, mx: f32, my: f32, links: Option<&Button>) {
     dim(gui);
     let cx = gui.width / 2.0;
     gui.text_centered(&lang::get("menu.game"), cx, 40.0, WHITE);
-    for b in pause_buttons(gui).iter() {
+    for b in pause_buttons(gui, links.is_some()).iter() {
+        b.draw(gui, mx, my);
+    }
+    if let Some(b) = links {
         b.draw(gui, mx, my);
     }
 }
@@ -336,23 +348,6 @@ pub fn death_buttons(gui: &Gui) -> [Button; 2] {
     let x = gui.width / 2.0 - 100.0;
     let y = gui.height / 4.0 + 72.0;
     [Button::new(x, y, 200.0, lang::get("deathScreen.respawn")), Button::new(x, y + 24.0, 200.0, lang::get("menu.disconnect"))]
-}
-
-pub fn draw_death(gui: &mut Gui, mx: f32, my: f32, message: &str) {
-    let (w, h) = (gui.width, gui.height);
-    // fillGradient(0x60500000 .. 0xA0803030), as two bands
-    gui.fill(0.0, 0.0, w, h / 2.0, 0x6050_0000);
-    gui.fill(0.0, h / 2.0, w, h, 0xA080_3030);
-    let cx = w / 2.0;
-    // The title at twice the size: drawn twice as wide by drawing each glyph scaled is not
-    // available, so it is drawn at the normal size, centred, as on small GUI scales.
-    gui.text_centered(&lang::get("deathScreen.title"), cx, 30.0, WHITE);
-    if !message.is_empty() {
-        gui.text_centered(message, cx, 85.0, WHITE);
-    }
-    for b in death_buttons(gui).iter() {
-        b.draw(gui, mx, my);
-    }
 }
 
 /// The in-game HUD (Gui.render): crosshair, hotbar, hearts, food, experience, held item name.

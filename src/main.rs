@@ -30,6 +30,10 @@ mod play;
 mod render;
 mod screens;
 mod sdl;
+mod serverhud;
+mod serverui;
+mod gamemode;
+mod tooltip;
 mod skins;
 mod signs;
 mod sky;
@@ -260,6 +264,10 @@ fn selftest() -> Result<(), String> {
         check(what, got, want);
     }
     for (what, got, want) in options::selftest() {
+        check(what, got, want);
+    }
+    // The server-driven HUD, tooltips and game modes (serverui.bin when present).
+    for (what, got, want) in serverui::selftest().into_iter().chain(tooltip::selftest()).chain(serverhud::selftest()).chain(gamemode::selftest()) {
         check(what, got, want);
     }
     // The creative inventory's tabs, search and clicks (needs gui.bin and blocks.bin).

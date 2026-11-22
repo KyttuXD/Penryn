@@ -98,6 +98,8 @@ pub struct Game {
     /// The synced variant registries (mob textures), and the tab list's player names.
     pub variants: crate::mobs::Variants,
     pub player_names: alloc::collections::BTreeMap<[u8; 16], String>,
+    /// The tab list, scoreboard, teams, boss bars, titles, world border... (serverui.rs).
+    pub ui: crate::serverui::ServerUi,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -121,6 +123,8 @@ pub struct Container {
     pub menu: i32,
     pub title: String,
     pub slots: Vec<Option<(i32, i32)>>,
+    /// Each slot's component patch (creative.rs's delimited form), for tooltips.
+    pub patches: Vec<Vec<u8>>,
     pub state: i32,
 }
 
@@ -182,8 +186,51 @@ fn random_bytes(n: usize) -> Vec<u8> {
 impl Game {
     /// Connects and logs in, through configuration, to the start of play.
     pub fn join(host: &str, port: u16, name: &str, account: Option<&Account>, blocks: Blocks, view: i8) -> Result<Game, String> {
+        Game::join_with(host, port, name, account, blocks, view, crate::serverui::Common::default(), false)
+    }
+
+    /// `join`, carrying what a transfer keeps (the cookies); `transferred` says so in the
+    /// handshake (ClientIntent.TRANSFER). A transfer during the configuration connects again.
+    pub fn join_with(
+        host: &str,
+        port: u16,
+        name: &str,
+        account: Option<&Account>,
+        blocks: Blocks,
+        view: i8,
+        mut common: crate::serverui::Common,
+        mut transferred: bool,
+    ) -> Result<Game, String> {
+        let (mut host, mut port) = (String::from(host), port);
+        loop {
+            common.transfer = None;
+            match Game::connect(&host, port, name, account, view, &mut common, transferred) {
+                Ok((c, final_uuid, name, biomes, creative, variants)) => {
+                    return Ok(Game::start(c, final_uuid, name, biomes, creative, variants, blocks, common));
+                }
+                Err(e) => match common.transfer.take() {
+                    Some((h, p)) => {
+                        crate::say!("transferred to {}:{}", h, p);
+                        (host, port, transferred) = (h, p, true);
+                    }
+                    None => return Err(e),
+                },
+            }
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn connect(
+        host: &str,
+        port: u16,
+        name: &str,
+        account: Option<&Account>,
+        view: i8,
+        common: &mut crate::serverui::Common,
+        transferred: bool,
+    ) -> Result<(Conn, [u8; 16], String, Vec<String>, crate::creative::Sync, crate::mobs::Variants), String> {
         let mut c = Conn::open(host, port)?;
-        handshake(&mut c, host, port, 2)?;
+        handshake(&mut c, host, port, if transferred { 3 } else { 2 })?;
         let (name, uuid) = match account {
             Some(a) => (a.name.clone(), uuid_bytes(&a.uuid)),
             None => (String::from(name), crate::md5::offline_uuid(name)),
@@ -242,18 +289,15 @@ impl Game {
                     o.varint(id).bool(false);
                     c.send(login::S_CUSTOM_QUERY_ANSWER, &o)?;
                 }
-                login::C_COOKIE_REQUEST => {
-                    let key = r.string().unwrap_or_default();
-                    let mut o = Out::new();
-                    o.string(&key).bool(false);
-                    c.send(login::S_COOKIE_RESPONSE, &o)?;
-                }
+                login::C_COOKIE_REQUEST => crate::serverui::login_cookie(&mut c, &mut r, common)?,
                 login::C_FINISHED => {
                     let u = r.uuid().unwrap_or([0; 16]);
                     final_uuid = u;
                     let n = r.string().unwrap_or_default();
                     crate::say!("logged in as {} ({})", n, uuid_text(&u));
                     c.send(login::S_ACKNOWLEDGED, &Out::new())?;
+                    // ClientHandshakePacketListenerImpl: the brand goes first in the configuration.
+                    crate::serverui::send_brand(&mut c)?;
                     break;
                 }
                 other => return Err(format!("unexpected login packet {}", other)),
@@ -263,11 +307,27 @@ impl Game {
         let mut biomes: Vec<String> = Vec::new();
         let mut creative = crate::creative::Sync::new();
         let mut variants = crate::mobs::Variants::default();
-        configure(&mut c, view, &mut biomes, &mut creative.registries, &mut variants)?;
+        configure(&mut c, view, &mut biomes, &mut creative.registries, &mut variants, common)?;
+        Ok((c, final_uuid, name, biomes, creative, variants))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        c: Conn,
+        final_uuid: [u8; 16],
+        name: String,
+        biomes: Vec<String>,
+        creative: crate::creative::Sync,
+        variants: crate::mobs::Variants,
+        blocks: Blocks,
+        common: crate::serverui::Common,
+    ) -> Game {
+        let mut ui = crate::serverui::ServerUi::new(common);
+        ui.online = c.cipher.is_some();
         let block_bits = blocks.global_bits();
         let mut world = World::new(block_bits, crate::blocks::ceil_log2(biomes.len().max(1)));
         world.set_biomes(&biomes, &blocks);
-        Ok(Game {
+        Game {
             conn: c,
             world,
             blocks,
@@ -312,7 +372,8 @@ impl Game {
             creative,
             variants,
             player_names: alloc::collections::BTreeMap::new(),
-        })
+            ui,
+        }
     }
 
     /// Handles every packet that has arrived, without waiting.
@@ -337,6 +398,9 @@ impl Game {
     }
 
     fn handle(&mut self, p: Packet) -> Result<(), String> {
+        if crate::serverui::handle(self, &p)? {
+            return Ok(());
+        }
         let mut r = p.reader();
         match p.id {
             play::C_KEEP_ALIVE => {
@@ -614,9 +678,13 @@ impl Game {
                     if c.slots.len() < n {
                         c.slots.resize(n, None);
                     }
+                    if c.patches.len() < n {
+                        c.patches.resize(n, Vec::new());
+                    }
                     let own = n.saturating_sub(36);
                     for (i, it) in got.into_iter().enumerate() {
                         c.slots[i] = it;
+                        c.patches[i] = patches.get(i).cloned().unwrap_or_default();
                         // The player's own rows at the bottom of every container.
                         if i >= own {
                             let k = i - own;
@@ -649,6 +717,10 @@ impl Game {
                             c.slots.resize(i as usize + 1, None);
                         }
                         c.slots[i as usize] = item;
+                        if c.patches.len() <= i as usize {
+                            c.patches.resize(i as usize + 1, Vec::new());
+                        }
+                        c.patches[i as usize] = patch;
                     }
                 }
             }
@@ -661,7 +733,7 @@ impl Game {
                 let id = r.varint().unwrap_or(0);
                 let menu = r.varint().unwrap_or(0);
                 let title = nbt::text(&mut r);
-                self.container = Some(Container { id, menu, title, slots: Vec::new(), state: 0 });
+                self.container = Some(Container { id, menu, title, slots: Vec::new(), patches: Vec::new(), state: 0 });
             }
             play::C_CONTAINER_CLOSE => {
                 let id = r.varint().unwrap_or(0);
@@ -807,8 +879,6 @@ impl Game {
                     e.hurt = 10;
                 }
             }
-            play::C_PLAYER_INFO_UPDATE => crate::skins::player_info(&mut r, self.uuid),
-            play::C_PLAYER_INFO_REMOVE => crate::skins::player_remove(&mut r),
             play::C_SET_ENTITY_DATA => {
                 let id = r.varint().unwrap_or(0);
                 if let Some(e) = self.entities.get_mut(&id) {
@@ -821,12 +891,6 @@ impl Game {
                 if let Some(e) = self.entities.get_mut(&id) {
                     crate::mobs::equipment(&mut r, e, slot);
                 }
-            }
-            crate::mobs::C_PLAYER_INFO_UPDATE => {
-                crate::mobs::player_info(&mut r, &mut self.player_names);
-            }
-            crate::mobs::C_PLAYER_INFO_REMOVE => {
-                crate::mobs::player_info_remove(&mut r, &mut self.player_names);
             }
             crate::mobs::C_ENTITY_EVENT => {
                 // 3: LivingEntity.handleEntityEvent's death (health to 0, it falls over).
@@ -925,7 +989,7 @@ impl Game {
             play::C_START_CONFIGURATION => {
                 self.conn.send(play::S_CONFIGURATION_ACKNOWLEDGED, &Out::new())?;
                 let mut b: Vec<String> = Vec::new();
-                configure(&mut self.conn, 8, &mut b, &mut self.creative.registries, &mut self.variants)?;
+                configure(&mut self.conn, 8, &mut b, &mut self.creative.registries, &mut self.variants, &mut self.ui.common)?;
                 if !b.is_empty() {
                     self.world.biome_bits = crate::blocks::ceil_log2(b.len());
                     self.world.set_biomes(&b, &self.blocks);
@@ -1114,6 +1178,7 @@ fn configure(
     biomes: &mut Vec<String>,
     regs: &mut Vec<(String, Vec<String>)>,
     variants: &mut crate::mobs::Variants,
+    common: &mut crate::serverui::Common,
 ) -> Result<(), String> {
     c.send(config::S_CLIENT_INFORMATION, &crate::options::client_information(view))?;
     loop {
@@ -1132,11 +1197,6 @@ fn configure(
                 let mut o = Out::new();
                 o.i32(r.i32().unwrap_or(0));
                 c.send(config::S_PONG, &o)?;
-            }
-            config::C_COOKIE_REQUEST => {
-                let mut o = Out::new();
-                o.string(&r.string().unwrap_or_default()).bool(false);
-                c.send(config::S_COOKIE_RESPONSE, &o)?;
             }
             config::C_SELECT_KNOWN_PACKS => {
                 // We know no packs: the server sends every registry entry in full.
@@ -1196,7 +1256,9 @@ fn configure(
                 c.send(config::S_FINISH, &Out::new())?;
                 return Ok(());
             }
-            _ => {}
+            _ => {
+                crate::serverui::config_packet(c, &p, common)?;
+            }
         }
     }
 }
@@ -1239,7 +1301,7 @@ fn lp_vec3(r: &mut In) {
 
 /// Entity data values: bytes and VarInts kept by index, an item stack taken (a dropped
 /// item's DATA_ITEM). Stops at a value it cannot read past.
-fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option<()> {
+pub(crate) fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option<()> {
     loop {
         let index = r.u8()?;
         if index == 0xFF {
@@ -1457,7 +1519,8 @@ pub(crate) fn skip_component(kind: i32, r: &mut In) -> Option<()> {
             r.varint()?;
             nbt::skip_root(r)
         }
-        _ => None,
+        // Every other component's codec (tooltip.rs).
+        _ => crate::tooltip::skip(kind, r),
     }
 }
 

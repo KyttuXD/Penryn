@@ -32,6 +32,7 @@ const K_RETURN: usize = 40;
 const K_ESC: usize = 41;
 const K_BACKSPACE: usize = 42;
 const K_SPACE: usize = 44;
+const K_TAB: usize = 43;
 const K_SLASH: usize = 56;
 const K_F3: usize = 60;
 const K_F11: usize = 68;
@@ -74,6 +75,8 @@ enum Screen {
     Sign,
     /// The options screens (options.rs), from the pause menu.
     Options,
+    /// The server's links (serverhud.rs), from the pause menu.
+    Links,
 }
 
 /// Items used over time while the button is held (eaten, drunk, drawn, raised), and for how
@@ -632,6 +635,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             sdl::EV_MOUSEWHEEL => {
                 if let (Screen::Options, Some(gui)) = (&self.screen, self.gui.as_ref()) {
                     self.menu.wheel(gui.width, gui.height, e.i32_at(20));
+                } else if self.screen == Screen::Links {
+                    crate::serverhud::links_wheel(e.i32_at(20));
                 } else if self.screen == Screen::Play {
                     let y = e.i32_at(20);
                     if y != 0 {
@@ -651,7 +656,14 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let (mx, my) = self.mouse;
         match self.screen {
             Screen::Pause if button == 1 => {
-                let b = screens::pause_buttons(gui);
+                let links = !g.ui.common.links.is_empty();
+                let b = screens::pause_buttons(gui, links);
+                if links && crate::serverhud::links_button(gui).hit(mx, my) {
+                    self.ui_click();
+                    crate::serverhud::open_links();
+                    self.set_screen(Screen::Links);
+                    return Ok(false);
+                }
                 if b[0].hit(mx, my) {
                     self.ui_click();
                     self.set_screen(Screen::Play);
@@ -675,8 +687,16 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     crate::options::Ev::None => {}
                 }
             }
+            Screen::Links if button == 1 => match crate::serverhud::links_click(gui, g, mx, my) {
+                crate::serverhud::LinkAct::Click => self.ui_click(),
+                crate::serverhud::LinkAct::Close => {
+                    self.ui_click();
+                    self.set_screen(Screen::Pause);
+                }
+                crate::serverhud::LinkAct::None => {}
+            },
             Screen::Dead if button == 1 => {
-                let b = screens::death_buttons(gui);
+                let b = crate::serverhud::death_buttons(gui, &g.ui);
                 if b[0].hit(mx, my) {
                     self.ui_click();
                     g.respawn()?;
@@ -811,6 +831,13 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             Screen::Options => {
                 if sc == K_ESC && self.menu.back() {
                     self.set_screen(Screen::Pause);
+                }
+            }
+            Screen::Links => {
+                if sc == K_ESC {
+                    if let crate::serverhud::LinkAct::Close = crate::serverhud::links_escape() {
+                        self.set_screen(Screen::Pause);
+                    }
                 }
             }
             Screen::Pause => match sc {
@@ -948,6 +975,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
     }
 
     fn tick(&mut self, g: &mut Game) -> Result<(), String> {
+        g.ui.tick();
+        let own = g.name.clone();
+        g.ui.refresh_tags(&own);
         let eye = [self.mover.pos[0], self.mover.pos[1] + self.eye_height(), self.mover.pos[2]];
         self.weather.tick(g, eye);
         // Screens follow what the server does: containers it opens or closes, death, respawn.
@@ -982,7 +1012,16 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.respawn_sent = true;
             g.respawn()?;
         }
-        if g.dead && self.screen != Screen::Dead {
+        if !g.dead {
+            g.ui.death_message = None;
+        }
+        // The immediate_respawn game rule: no death screen (LocalPlayer.respawn straight away).
+        if g.dead && g.ui.immediate_respawn {
+            if !self.respawn_sent {
+                self.respawn_sent = true;
+                g.respawn()?;
+            }
+        } else if g.dead && self.screen != Screen::Dead {
             self.respawn_sent = false;
             self.set_screen(Screen::Dead);
         } else if !g.dead && self.screen == Screen::Dead {
@@ -1143,7 +1182,12 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         if g.world.loaded(math::ifloor(self.mover.pos[0]), math::ifloor(self.mover.pos[2])) && g.loaded_sent {
             let fluid = self.fluid_at(g);
             self.mover.effects = g.effects.movement();
-            self.mover.tick(&g.world, &g.blocks, &inp, g.player.yaw, g.flying, fluid);
+            if g.game_mode == crate::gamemode::SPECTATOR {
+                crate::gamemode::spectator_tick(&mut self.mover, &inp, g.player.yaw);
+            } else {
+                self.mover.tick(&g.world, &g.blocks, &inp, g.player.yaw, g.flying, fluid);
+                crate::serverhud::collide(&mut self.mover, self.prev_pos, &g.ui);
+            }
             // LocalPlayer.aiStep: landing ends flight (except in spectator mode).
             if g.flying && self.mover.on_ground && g.game_mode != 3 {
                 g.set_flying(false)?;
@@ -1230,7 +1274,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 g.dig(DIG_ABORT, m.pos[0], m.pos[1], m.pos[2], 0)?;
             }
         }
-        if self.left_down && play {
+        if self.left_down && play && g.game_mode != crate::gamemode::SPECTATOR {
             self.dig_tick(g, hit)?;
         }
         // Using an item: food finishes on its own, then starts again while the button is held.
@@ -1262,7 +1306,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             };
             if block_used {
                 g.punch()?;
-            } else {
+            } else if g.game_mode != crate::gamemode::SPECTATOR {
                 g.use_item()?;
                 if let Some(d) = usable {
                     self.using = Some((0, d));
@@ -1340,6 +1384,13 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             return Ok(());
         }
         let face = h.face as u8;
+        // Player.blockActionRestricted: adventure mode breaks only what can_break allows.
+        if !crate::tooltip::may_break(g, g.world.get(h.pos[0], h.pos[1], h.pos[2])) {
+            if let Some(m) = self.mining.take() {
+                g.dig(DIG_ABORT, m.pos[0], m.pos[1], m.pos[2], face)?;
+            }
+            return Ok(());
+        }
         let creative = g.game_mode == 1;
         if creative {
             let held = g.held().and_then(|(i, _)| g.blocks.items.get(i as usize)).cloned().unwrap_or_default();
@@ -1519,7 +1570,24 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         None
     }
 
+    /// A frame, from the camera entity's eyes while spectating one (ClientboundSetCameraPacket).
     fn draw(&mut self, g: &mut Game, partial: f64) {
+        let cam = g.ui.camera.and_then(|id| g.entities.get(&id)).map(|e| {
+            let player = self.entities.as_ref().map_or(true, |t| t.types.get(e.kind as usize).map_or(true, |ty| ty.name == "player"));
+            let eye = if player { physics::EYE } else { self.entities.as_ref().and_then(|t| t.types.get(e.kind as usize)).map_or(1.62, |t| t.size.1 as f64 * 0.85) };
+            (e.prev, e.pos, e.yaw, e.pitch, eye)
+        });
+        let Some((prev, pos, yaw, pitch, eye)) = cam else { return self.draw_view(g, partial) };
+        let saved = (self.prev_pos, self.mover.pos, g.player.yaw, g.player.pitch);
+        let lift = eye - self.eye_height();
+        self.prev_pos = [prev[0], prev[1] + lift, prev[2]];
+        self.mover.pos = [pos[0], pos[1] + lift, pos[2]];
+        (g.player.yaw, g.player.pitch) = (yaw, pitch);
+        self.draw_view(g, partial);
+        (self.prev_pos, self.mover.pos, g.player.yaw, g.player.pitch) = saved;
+    }
+
+    fn draw_view(&mut self, g: &mut Game, partial: f64) {
         let (w, h) = self.v.size();
         let lerp = |a: f64, b: f64| a + (b - a) * partial;
         let eye = [
@@ -1558,9 +1626,14 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         // Blindness and darkness: a near, dark fog and no sky.
         let fog = g.effects.fog((self.view as f32 + 1.0) * 16.0, partial as f32);
         let sky = g.effects.sky(sky, (self.view as f32 + 1.0) * 16.0, partial as f32);
+        // Boss bars: world fog (as the nether's) and the darkened sky (FogRenderer).
+        let far = (self.view as f32 + 1.0) * 16.0;
+        let fog = fog.or_else(|| g.ui.boss_fog().then(|| crate::effects::Fog { start: far * 0.05, end: far.min(192.0) * 0.5, darkness: 0.0 }));
+        let dk = 1.0 - 0.3 * g.ui.darken_at(partial as f32);
+        let sky = [sky[0] * dk, sky[1] * dk, sky[2] * dk];
         let ents = self.entities.as_ref();
         let gl = &self.v.gl;
-        let own = g.entity_id;
+        let own = g.ui.camera.unwrap_or(g.entity_id);
         let pf = partial as f32;
         let entities = &g.entities;
         let icons = self.gui.as_ref().map(|gui| &gui.icons[..]).unwrap_or(&[]);
@@ -1572,7 +1645,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let sky_ref = &self.sky;
         let ent_cx = crate::entities::DrawCx {
             variants: &g.variants,
-            names: &g.player_names,
+            names: &g.ui.tag_names,
+            below: &g.ui.below_names,
             game_time: g.game_time,
             icons,
             blocks: &g.blocks,
@@ -1626,6 +1700,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         );
         // Rain, snow and lightning, over the water (vanilla: after the translucent terrain).
         self.weather.draw(&self.v.gl, &world_view, &g.world, &g.blocks, eye, pf, rain, 0.2 + 0.8 * rain_light);
+        // The world border's wall (WorldBorderRenderer), after the weather.
+        crate::serverhud::draw_wall(&self.v.gl, &world_view, eye, &g.ui, partial, self.view, (self.view as f64 + 1.0) * 16.0);
         let hit = if self.screen == Screen::Play { self.pick(g) } else { None };
         if let Some(hh) = hit {
             let s = g.world.get(hh.pos[0], hh.pos[1], hh.pos[2]);
@@ -1639,8 +1715,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 self.r.draw_cracks(&self.v.gl, eye_o, g.player.yaw, g.player.pitch, hh.pos, &boxes, g.blocks.crack_uv[stage]);
             }
         }
-        // ---- the hand
-        if let Some(gui) = self.gui.as_ref() {
+        // ---- the hand (not a spectator's)
+        if let Some(gui) = self.gui.as_ref().filter(|_| g.game_mode != crate::gamemode::SPECTATOR) {
             let swing = if self.swing_ticks >= 0 { ((self.swing_ticks as f64 + partial) / 6.0) as f32 } else { 0.0 };
             let equip = self.prev_equip + (self.equip - self.prev_equip) * partial as f32;
             let walk = self.prev_walk_dist + (self.walk_dist - self.prev_walk_dist) * partial as f32;
@@ -1668,6 +1744,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.v.swap();
             return;
         };
+        crate::serverhud::vignette(&self.v.gl, w, h, &g.ui, eye[0], eye[2]);
         gui.begin(w, h);
         let (gw, gh) = (gui.width, gui.height);
         // Night darkens the view, unless night vision; brightness lifts it.
@@ -1690,11 +1767,19 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         } else {
             None
         };
-        screens::hud(&mut gui, g, self.screen == Screen::Play && !self.debug, held_name);
+        // Spectators have no hotbar, health or crosshair (Hud: the spectator GUI instead).
+        if g.game_mode != crate::gamemode::SPECTATOR {
+            screens::hud(&mut gui, g, self.screen == Screen::Play && !self.debug, held_name);
+        }
         g.effects.draw_hud(&self.v.gl, &mut gui, self.screen == Screen::Inventory && g.container.is_none());
+        crate::serverhud::hud(&mut gui, &self.v.gl, g, partial as f32);
         let now = sys::now_ms();
         if self.screen != Screen::Inventory && self.screen != Screen::Creative && self.screen != Screen::Dead {
             screens::chat(&mut gui, g, self.screen == Screen::Chat, now, &self.chat_line, (now / 300) % 2 == 0);
+        }
+        // The player list while Tab is held (PENRYN_TEST_INPUT "P" holds it).
+        if (self.keys[K_TAB] || self.test_keys.contains('P')) && self.screen == Screen::Play {
+            crate::serverhud::tab_list(&mut gui, &self.v.gl, g);
         }
         if self.debug {
             let p = self.mover.pos;
@@ -1723,7 +1808,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         let (mx, my) = self.mouse;
         match self.screen {
-            Screen::Pause => screens::draw_pause(&mut gui, mx, my),
+            Screen::Pause => {
+                let links = (!g.ui.common.links.is_empty()).then(|| crate::serverhud::links_button(&gui));
+                screens::draw_pause(&mut gui, mx, my, links.as_ref())
+            }
+            Screen::Links => crate::serverhud::draw_links(&mut gui, g, mx, my),
             Screen::Options => self.menu.draw(&mut gui, mx, my),
             Screen::Inventory => {
                 let win = screens::window(g);
@@ -1744,7 +1833,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             }
             Screen::Dead => {
                 let msg = g.chat.last().map(|c| c.0.clone()).unwrap_or_default();
-                screens::draw_death(&mut gui, mx, my, &msg);
+                crate::serverhud::draw_death(&mut gui, g, &msg, mx, my);
             }
             _ => {}
         }

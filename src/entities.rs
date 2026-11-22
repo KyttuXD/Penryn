@@ -211,8 +211,11 @@ struct V {
 /// What drawing entities needs from the rest of the game.
 pub struct DrawCx<'a> {
     pub variants: &'a crate::mobs::Variants,
-    /// Player names by UUID (the tab list).
+    /// Player names by UUID (the tab list) as their name tags show them (teams' prefixes and
+    /// colours; empty when the team hides it).
     pub names: &'a BTreeMap<[u8; 16], String>,
+    /// The below-name objective's line per player (serverui.rs).
+    pub below: &'a BTreeMap<[u8; 16], String>,
     pub game_time: i64,
     pub icons: &'a [crate::gui::Icon],
     pub blocks: &'a crate::blocks::Blocks,
@@ -673,8 +676,13 @@ impl EntityTable {
                 } else {
                     None
                 };
-                if let (Some(n), true) = (name, dist2 < range * range) {
-                    let h = self.dims(e).1 as f64 + 0.5;
+                if let (Some(n), true) = (name.filter(|n| !n.is_empty()), dist2 < range * range) {
+                    let mut h = self.dims(e).1 as f64 + 0.5;
+                    // AvatarRenderer: the below-name score within 10 blocks, the name above it.
+                    if let (Some(b), true) = (cx.below.get(&e.uuid), e.kind == self.player_type && dist2 < 100.0) {
+                        tags.push(([p[0], p[1] + h, p[2]], b.as_str(), discrete));
+                        h += 9.0 * 1.15 * 0.025;
+                    }
                     tags.push(([p[0], p[1] + h, p[2]], n, discrete));
                 }
             }
