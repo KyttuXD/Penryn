@@ -1,6 +1,7 @@
 //! Drawing with OpenGL 1.5 fixed function: the world's sections (meshed on worker threads by
 //! mesher.rs, kept on the card by terrain.rs, culled by occlusion.rs), fog, the sky pass, the
 //! block outline and cracks.
+
 use crate::blocks::Blocks;
 use crate::font;
 use crate::math;
