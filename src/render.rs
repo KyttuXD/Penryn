@@ -2,11 +2,12 @@
 //! water apart), coloured faces with ambient occlusion instead of textures, fog, the block
 //! outline and a 2D layer for the HUD.
 
-use crate::blocks::{self, Blocks};
+use crate::blocks::Blocks;
 use crate::font;
 use crate::math;
 use crate::sdl::*;
 use crate::world::World;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::c_void;
@@ -34,7 +35,7 @@ pub struct CV {
 }
 
 
-fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
+pub fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
     CV {
         p: [(p[0] * 1024.0) as i16, (p[1] * 1024.0) as i16, (p[2] * 1024.0) as i16],
         _pad: 0,
@@ -43,7 +44,7 @@ fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
     }
 }
 
-use crate::terrain::{Terrain, RUNS, TRANSLUCENT};
+use crate::terrain::{Terrain, RUNS};
 
 pub struct Renderer {
     /// The meshed sections, on the card (terrain.rs).
@@ -53,8 +54,13 @@ pub struct Renderer {
     /// A section's quads by run while it is meshed: facing down, up, north, south, west, east,
     /// any (solid and cut-out together), then translucent.
     runs: [Vec<CV>; RUNS],
+    /// Sections being meshed on the worker threads, and the number of their newest job.
+    inflight: BTreeMap<(i32, i32, i32), u64>,
+    gen: u64,
+    done: Vec<crate::mesher::Done>,
     /// Cave culling.
     pub graph: crate::occlusion::Graph,
+    eye_in_opaque: bool,
     vis_stack: Vec<u16>,
     pub ui: Vec<V>,
     pub sections_drawn: u32,
@@ -71,7 +77,7 @@ pub struct Renderer {
 
 /// Faces: normal, the four corners (0 min, 1 max per axis, counter-clockwise from outside),
 /// brightness.
-const FACES: [([i32; 3], [[u8; 3]; 4], f32); 6] = [
+pub const FACES: [([i32; 3], [[u8; 3]; 4], f32); 6] = [
     ([0, 1, 0], [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]], 1.0),
     ([0, -1, 0], [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]], 0.5),
     ([1, 0, 0], [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]], 0.6),
@@ -79,14 +85,14 @@ const FACES: [([i32; 3], [[u8; 3]; 4], f32); 6] = [
     ([0, 0, 1], [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], 0.8),
     ([0, 0, -1], [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]], 0.8),
 ];
-const AO: [f32; 4] = [0.5, 0.68, 0.84, 1.0];
+pub const AO: [f32; 4] = [0.5, 0.68, 0.84, 1.0];
 
 const P: i32 = 18; // padded section side
-fn ci(x: i32, y: i32, z: i32) -> usize {
+pub fn ci(x: i32, y: i32, z: i32) -> usize {
     (((y + 1) * P + (z + 1)) * P + (x + 1)) as usize
 }
 
-fn shade(c: [u8; 3], k: f32, a: u8) -> [u8; 4] {
+pub fn shade(c: [u8; 3], k: f32, a: u8) -> [u8; 4] {
     let f = |v: u8| (v as f32 * k).min(255.0) as u8;
     [f(c[0]), f(c[1]), f(c[2]), a]
 }
@@ -98,7 +104,11 @@ impl Renderer {
             epoch: 0,
             cache: alloc::vec![0; (P * P * P) as usize],
             runs: Default::default(),
+            inflight: BTreeMap::new(),
+            gen: 0,
+            done: Vec::new(),
             graph: crate::occlusion::Graph::new(),
+            eye_in_opaque: false,
             vis_stack: Vec::new(),
             ui: Vec::new(),
             sections_drawn: 0,
@@ -167,17 +177,55 @@ impl Renderer {
         Ok(())
     }
 
-    /// Meshes the dirty sections nearest the camera, for up to `budget_ms`.
+    /// Meshes the dirty sections nearest the camera: hands them to the worker threads and
+    /// puts what they finished on the card (for up to `budget_ms`), or without threads meshes
+    /// them here for up to `budget_ms`.
     pub fn update(&mut self, gl: &Gl, world: &mut World, b: &Blocks, eye: [f64; 3], budget_ms: u64) {
         if world.epoch != self.epoch {
             self.epoch = world.epoch;
+            crate::mesher::cancel_and_wait();
+            self.inflight.clear();
+            self.done.clear();
             self.terrain.clear(gl);
             self.graph.clear();
         }
+        // Vanilla turns cave culling off for a spectator inside a full block (LevelRenderer
+        // .setupRender): the camera then sees through the ground.
+        self.eye_in_opaque = b.opaque_cube(world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2])));
         let start = crate::sys::now_ms();
+        let threaded = crate::mesher::threaded();
+        if threaded {
+            crate::mesher::collect(&mut self.done);
+            let mut used = 0;
+            for d in self.done.iter_mut() {
+                if used > 0 && crate::sys::now_ms() - start > budget_ms {
+                    break;
+                }
+                used += 1;
+                if self.inflight.get(&d.key) != Some(&d.gen) {
+                    continue; // its blocks changed again: a newer job is on the way
+                }
+                self.inflight.remove(&d.key);
+                self.graph.set(d.key, d.vis);
+                if d.first[RUNS] == 0 {
+                    self.terrain.remove(gl, d.key);
+                } else {
+                    self.terrain.put(gl, d.key, core::mem::take(&mut d.data), d.first);
+                }
+            }
+            self.done.drain(..used);
+        }
         let (ex, ey, ez) = (eye[0] as i32 >> 4, (eye[1] as i32 - world.min_y) >> 4, eye[2] as i32 >> 4);
+        let most = crate::mesher::workers() as usize * 3 + 2;
         loop {
-            if world.dirty.is_empty() || crate::sys::now_ms() - start > budget_ms {
+            if world.dirty.is_empty() {
+                break;
+            }
+            if threaded {
+                if crate::mesher::pending() >= most {
+                    break;
+                }
+            } else if crate::sys::now_ms() - start > budget_ms {
                 break;
             }
             // The nearest dirty section.
@@ -192,13 +240,57 @@ impl Renderer {
             }
             let k = best.unwrap();
             world.dirty.remove(&k);
-            if world.columns.contains_key(&(k.0, k.2)) {
-                self.build(gl, world, b, k);
+            let Some(job) = self.job(gl, world, b, k) else { continue };
+            if threaded {
+                self.inflight.insert(k, job.gen);
+                crate::mesher::submit(job);
             } else {
-                self.terrain.remove(gl, k);
-                self.graph.set(k, crate::occlusion::ALL);
+                let d = crate::mesher::mesh(&job, &mut self.runs, &mut self.vis_stack);
+                self.graph.set(k, d.vis);
+                if d.first[RUNS] == 0 {
+                    self.terrain.remove(gl, k);
+                } else {
+                    self.terrain.put(gl, k, d.data, d.first);
+                }
             }
         }
+    }
+
+    /// What meshing section `k` needs, or None when it has nothing to draw (then it is
+    /// dropped here).
+    fn job(&mut self, gl: &Gl, world: &World, b: &Blocks, k: (i32, i32, i32)) -> Option<crate::mesher::Job> {
+        if !world.columns.contains_key(&(k.0, k.2)) || !self.fill_cache(world, k) {
+            self.inflight.remove(&k);
+            self.terrain.remove(gl, k);
+            self.graph.set(k, crate::occlusion::ALL);
+            return None;
+        }
+        // The biome ids of the 20 x 20 columns around, per 4-block layer (as World::biome).
+        let mut cols: [[Option<&crate::world::Column>; 3]; 3] = [[None; 3]; 3];
+        for dz in 0..3 {
+            for dx in 0..3 {
+                cols[dz][dx] = world.columns.get(&(k.0 + dx as i32 - 1, k.2 + dz as i32 - 1));
+            }
+        }
+        let mut ids = alloc::vec![0u16; 1600];
+        for layer in 0..4 {
+            let ly = (k.1 * 16 + layer * 4 + 2).clamp(0, world.height - 1);
+            let (sec, cy) = ((ly >> 4) as usize, (ly & 15) >> 2);
+            for gz in 0..20 {
+                let wz = k.2 * 16 + gz - 2;
+                let (cz, lz) = (((wz >> 4) - k.2 + 1) as usize, wz & 15);
+                for gx in 0..20 {
+                    let wx = k.0 * 16 + gx - 2;
+                    let (cx, lx) = (((wx >> 4) - k.0 + 1) as usize, wx & 15);
+                    ids[(layer * 400 + gz * 20 + gx) as usize] = match cols[cz][cx] {
+                        Some(c) => c.biomes[sec][((cy * 4 + (lz >> 2)) * 4 + (lx >> 2)) as usize],
+                        None => u16::MAX,
+                    };
+                }
+            }
+        }
+        self.gen += 1;
+        Some(crate::mesher::Job { key: k, gen: self.gen, cache: self.cache.clone(), ids, colours: world.biome_colours.clone(), blocks: b as *const Blocks })
     }
 
     fn fill_cache(&mut self, world: &World, (cx, sy, cz): (i32, i32, i32)) -> bool {
@@ -249,194 +341,6 @@ impl Renderer {
             }
         }
         true
-    }
-
-    /// Meshes section `k` and hands it to the terrain store.
-    fn build(&mut self, gl: &Gl, world: &World, b: &Blocks, k: (i32, i32, i32)) {
-        if !self.fill_cache(world, k) {
-            self.graph.set(k, crate::occlusion::ALL);
-            self.terrain.remove(gl, k);
-            return;
-        }
-        {
-            let cache = &self.cache;
-            let solid = |i: usize| b.opaque_cube(cache[ci((i & 15) as i32, (i >> 8) as i32, ((i >> 4) & 15) as i32)]);
-            let vis = crate::occlusion::section_vis(&solid, &mut self.vis_stack);
-            self.graph.set(k, vis);
-        }
-        for r in self.runs.iter_mut() {
-            r.clear();
-        }
-        // Biome colours for this section, made on first need: per 4-block layer, the biome ids
-        // of a 20 x 20 area, blended over 5 x 5 (vanilla's default biome blend).
-        let mut tints: Option<Vec<[[u8; 3]; 3]>> = None;
-        let section_y = world.min_y + k.1 * 16;
-        let make_tints = || -> Vec<[[u8; 3]; 3]> {
-            let mut out = alloc::vec![[[0u8; 3]; 3]; 4 * 256];
-            for layer in 0..4 {
-                let y = section_y + layer * 4 + 2;
-                let mut ids = [0u16; 400];
-                for gz in 0..20 {
-                    for gx in 0..20 {
-                        ids[gz * 20 + gx] = world.biome(k.0 * 16 + gx as i32 - 2, y, k.2 * 16 + gz as i32 - 2);
-                    }
-                }
-                for z in 0..16 {
-                    for x in 0..16 {
-                        let mut acc = [[0u32; 3]; 3];
-                        let mut n = 0;
-                        for dz in 0..5 {
-                            for dx in 0..5 {
-                                if let Some(c) = world.biome_colours.get(ids[(z + dz) * 20 + x + dx] as usize) {
-                                    for kind in 0..3 {
-                                        acc[kind][0] += c[kind] >> 16 & 255;
-                                        acc[kind][1] += c[kind] >> 8 & 255;
-                                        acc[kind][2] += c[kind] & 255;
-                                    }
-                                    n += 1;
-                                }
-                            }
-                        }
-                        let mut col = [[0x91, 0xBD, 0x59], [0x77, 0xAB, 0x2F], [0x3F, 0x76, 0xE4]];
-                        if n > 0 {
-                            for kind in 0..3 {
-                                col[kind] = [(acc[kind][0] / n) as u8, (acc[kind][1] / n) as u8, (acc[kind][2] / n) as u8];
-                            }
-                        }
-                        out[layer as usize * 256 + z * 16 + x] = col;
-                    }
-                }
-            }
-            out
-        };
-        let cache = &self.cache;
-        let at = |x: i32, y: i32, z: i32| cache[ci(x, y, z)];
-        let occ = |x: i32, y: i32, z: i32| b.opaque_cube(at(x, y, z));
-        const DIR: [[i32; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
-        for y in 0..16 {
-            for z in 0..16 {
-                for x in 0..16 {
-                    let s = at(x, y, z);
-                    if s == 0 {
-                        continue;
-                    }
-                    let blk = b.of_state(s);
-                    let kind = blk.kind;
-                    if kind == blocks::AIR || kind == blocks::INVISIBLE_SOLID {
-                        continue;
-                    }
-                    let (fx, fy, fz) = (x as f32, y as f32, z as f32);
-                    if kind == blocks::WATER || kind == blocks::LAVA {
-                        let water = kind == blocks::WATER;
-                        let same = |s2: u16| b.kind(s2) == kind;
-                        let top = if same(at(x, y + 1, z)) { 1.0 } else { 0.875 };
-                        let r = if water { b.water_uv } else { b.lava_uv };
-                        let tint = if water {
-                            let t = tints.get_or_insert_with(&make_tints);
-                            t[((y >> 2) * 256 + z * 16 + x) as usize][2]
-                        } else {
-                            [255, 255, 255]
-                        };
-                        let corner_uv = [[r[0], r[1]], [r[0], r[3]], [r[2], r[3]], [r[2], r[1]]];
-                        for (nrm, corners, light) in FACES.iter() {
-                            let (nx, ny, nz) = (x + nrm[0], y + nrm[1], z + nrm[2]);
-                            if same(at(nx, ny, nz)) || occ(nx, ny, nz) {
-                                continue;
-                            }
-                            let c = shade(tint, *light, if water { 190 } else { 255 });
-                            let mut quad = [cv([0.0; 3], [0.0; 2], c); 4];
-                            for (i, cr) in corners.iter().enumerate() {
-                                let p = [fx + cr[0] as f32, fy + if cr[1] == 1 { top } else { 0.0 }, fz + cr[2] as f32];
-                                quad[i] = cv(p, corner_uv[i], c);
-                            }
-                            let run = if water { TRANSLUCENT } else { facing(&quad) };
-                            self.runs[run].extend_from_slice(&quad);
-                        }
-                        continue;
-                    }
-                    // Grass, foliage and water take their biome's colour; birch, spruce,
-                    // redstone and stems keep their fixed ones.
-                    let tint = match blk.tint {
-                        1 | 2 | 5 => {
-                            let t = tints.get_or_insert_with(&make_tints);
-                            t[((y >> 2) * 256 + z * 16 + x) as usize][match blk.tint { 1 => 0, 2 => 1, _ => 2 }]
-                        }
-                        0 => [255, 255, 255],
-                        n => blocks::tint_colour(n),
-                    };
-                    let glassy = kind == blocks::CUTOUT && !blk.name.ends_with("leaves");
-                    // Plants, bamboo and dripstone stand at their random offset (getOffset).
-                    let off = b.offset_at(s, k.0 * 16 + x, k.2 * 16 + z);
-                    let off = [(off[0] * 1024.0) as i16, (off[1] * 1024.0) as i16, (off[2] * 1024.0) as i16];
-                    for q in b.model(s) {
-                        if q.cull < 6 {
-                            let d = DIR[q.cull as usize];
-                            let ns = at(x + d[0], y + d[1], z + d[2]);
-                            if b.opaque_cube(ns) || (glassy && b.state(ns).block == b.state(s).block) {
-                                continue;
-                            }
-                        }
-                        let base = if q.flags & blocks::Q_TINTED != 0 { tint } else { [255, 255, 255] };
-                        let light = q.light as f32 / 255.0;
-                        // The face's outward direction, for ambient occlusion on boundary faces.
-                        let edge = q.flags & blocks::Q_ON_EDGE != 0 && q.cull < 6;
-                        let mut quad = [cv([0.0; 3], [0.0; 2], [0; 4]); 4];
-                        for i in 0..4 {
-                            let p = q.pos[i];
-                            let (px, py, pz) = (p[0] as f32 / 1024.0, p[1] as f32 / 1024.0, p[2] as f32 / 1024.0);
-                            let mut k = light;
-                            if edge {
-                                let n = DIR[q.cull as usize];
-                                let (nx, ny, nz) = (x + n[0], y + n[1], z + n[2]);
-                                let cr = [px > 0.5, py > 0.5, pz > 0.5];
-                                let mut t = [0i32; 3];
-                                for a in 0..3 {
-                                    if n[a] == 0 {
-                                        t[a] = if cr[a] { 1 } else { -1 };
-                                    }
-                                }
-                                let mut sides = [false; 2];
-                                let mut j = 0;
-                                for a in 0..3 {
-                                    if t[a] != 0 && j < 2 {
-                                        let mut dd = [nx, ny, nz];
-                                        dd[a] += t[a];
-                                        sides[j] = occ(dd[0], dd[1], dd[2]);
-                                        j += 1;
-                                    }
-                                }
-                                let c = occ(nx + t[0], ny + t[1], nz + t[2]);
-                                let ao = if sides[0] && sides[1] { 0 } else { 3 - (sides[0] as usize + sides[1] as usize + c as usize) };
-                                k *= AO[ao];
-                            }
-                            quad[i] = CV {
-                                p: [
-                                    (x * 1024) as i16 + q.pos[i][0] + off[0],
-                                    (y * 1024) as i16 + q.pos[i][1] + off[1],
-                                    (z * 1024) as i16 + q.pos[i][2] + off[2],
-                                ],
-                                _pad: 0,
-                                uv: [(q.uv[i][0] >> 1) as i16, (q.uv[i][1] >> 1) as i16],
-                                c: shade(base, k, 255),
-                            };
-                        }
-                        let run = if q.flags & blocks::Q_TRANSLUCENT != 0 { TRANSLUCENT } else { facing(&quad) };
-                        self.runs[run].extend_from_slice(&quad);
-                    }
-                }
-            }
-        }
-        let mut first = [0u32; RUNS + 1];
-        let total: usize = self.runs.iter().map(|r| r.len()).sum();
-        let mut data: Vec<CV> = Vec::with_capacity(total);
-        for (i, r) in self.runs.iter().enumerate() {
-            first[i] = (data.len() / 4) as u32;
-            for v in r.iter() {
-                data.push(CV { p: crate::terrain::to_region(k, v.p), ..*v });
-            }
-        }
-        first[RUNS] = (data.len() / 4) as u32;
-        self.terrain.put(gl, k, data, first);
     }
 
     /// Draws the world from `eye` looking along yaw/pitch (degrees, Minecraft's convention).
@@ -513,7 +417,7 @@ impl Renderer {
         let maxd = (view_chunks as f64 + 1.0) * 16.0;
         let layers = world.height / 16;
         let cam = (math::ifloor(eye[0]) >> 4, (math::ifloor(eye[1]) - world.min_y) >> 4, math::ifloor(eye[2]) >> 4);
-        self.graph.update(cam, view_chunks + 1, layers);
+        self.graph.update(cam, view_chunks + 1, layers, !self.eye_in_opaque);
         let graph = &self.graph;
         let mut keep = |k: (i32, i32, i32), lo: [f64; 3]| {
             let (cx, cz) = (lo[0] + 8.0, lo[2] + 8.0);
@@ -722,7 +626,7 @@ fn faces_seen(lo: [f64; 3]) -> u8 {
 
 /// Which facing run a quad goes in: its normal (from the diagonals, counter-clockwise front)
 /// when it lies along an axis, else 6.
-fn facing(q: &[CV; 4]) -> usize {
+pub fn facing(q: &[CV; 4]) -> usize {
     let d = |a: usize, b: usize| [q[b].p[0] as i32 - q[a].p[0] as i32, q[b].p[1] as i32 - q[a].p[1] as i32, q[b].p[2] as i32 - q[a].p[2] as i32];
     let (a, b) = (d(0, 2), d(1, 3));
     let n = [

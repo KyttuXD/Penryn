@@ -5,7 +5,6 @@
 //! event offsets are VoxelRust's (src/sys/sdl.rs, gl.rs; MIT, same author).
 
 use crate::sys;
-use alloc::boxed::Box;
 use alloc::string::String;
 use core::ffi::{c_char, c_int, c_void};
 
@@ -74,6 +73,8 @@ api! { Sdl, "", "C",
     SDL_GL_SwapWindow(*mut c_void);
     SDL_GL_GetProcAddress(*const c_char) -> *mut c_void;
     SDL_PollEvent(*mut Event) -> c_int;
+    SDL_PumpEvents();
+    SDL_PeepEvents(*mut Event, c_int, c_int, u32, u32) -> c_int;
     SDL_SetRelativeMouseMode(c_int) -> c_int;
     SDL_StartTextInput();
     SDL_StopTextInput();
@@ -152,7 +153,6 @@ pub const UNPACK_ALIGNMENT: u32 = 0x0CF5;
 pub const PACK_ALIGNMENT: u32 = 0x0D05;
 pub const VERSION: u32 = 0x1F02;
 pub const TRIANGLES: u32 = 4;
-pub const UNSIGNED_SHORT: u32 = 0x1403;
 pub const UNSIGNED_INT: u32 = 0x1405;
 pub const ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 
@@ -193,6 +193,7 @@ api! { Gl, "gl", "system",
     AlphaFunc(u32, f32);
     PixelStorei(u32, i32);
     Finish();
+    Color4ub(u8, u8, u8, u8);
     DrawElements(u32, i32, u32, *const c_void);
     MultiDrawElements(u32, *const i32, u32, *const *const c_void, i32);
 }
@@ -287,9 +288,25 @@ impl Video {
     }
 
     pub fn poll(&self) -> Option<Event> {
-        let mut e = Box::new(Event([0; 64]));
-        if unsafe { (self.sdl.SDL_PollEvent)(&mut *e) } != 0 {
-            Some(*e)
+        let mut e = Event([0; 64]);
+        if unsafe { (self.sdl.SDL_PollEvent)(&mut e) } != 0 {
+            Some(e)
+        } else {
+            None
+        }
+    }
+
+    /// Gathers the system's events once (SDL_PollEvent does it on every call, which on a Mac
+    /// runs the Cocoa event loop each time); `next_event` then takes them one by one.
+    pub fn pump(&self) {
+        unsafe { (self.sdl.SDL_PumpEvents)() }
+    }
+
+    pub fn next_event(&self) -> Option<Event> {
+        let mut e = Event([0; 64]);
+        // SDL_GETEVENT, every type.
+        if unsafe { (self.sdl.SDL_PeepEvents)(&mut e, 1, 2, 0, 0xFFFF) } > 0 {
+            Some(e)
         } else {
             None
         }

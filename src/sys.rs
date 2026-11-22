@@ -96,6 +96,14 @@ extern "C" {
     /// The skin download thread (skins.rs). pthread_t is 8 bytes on both systems.
     pub fn pthread_create(t: *mut usize, attr: *const c_void, f: extern "C" fn(*mut c_void) -> *mut c_void, arg: *mut c_void) -> c_int;
     pub fn pthread_detach(t: usize) -> c_int;
+    /// The processor count, for the meshing threads (mesher.rs).
+    fn sysconf(name: c_int) -> i64;
+}
+
+/// Processors online (sysconf _SC_NPROCESSORS_ONLN: 58 on Mac OS X, 84 on Linux), at least 1.
+pub fn processors() -> u32 {
+    let name = if cfg!(target_os = "macos") { 58 } else { 84 };
+    unsafe { sysconf(name) }.clamp(1, 64) as u32
 }
 
 // The prebuilt `alloc` was compiled with unwinding; with panic = "abort" nothing ever unwinds,

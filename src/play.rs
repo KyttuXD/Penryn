@@ -394,6 +394,8 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
     };
     app.v.grab_mouse(true);
     let result = app.main_loop(&mut g);
+    // The meshing threads read the block table: let them finish before it goes.
+    crate::mesher::cancel_and_wait();
     if let Err(e) = &result {
         app.v.grab_mouse(false);
         let reason = g.disconnected.clone().unwrap_or_else(|| e.clone());
@@ -408,7 +410,8 @@ impl App {
         loop {
             // ---- events
             let mut quit = false;
-            while let Some(e) = self.v.poll() {
+            self.v.pump();
+            while let Some(e) = self.v.next_event() {
                 if self.event(g, &e)? {
                     quit = true;
                 }

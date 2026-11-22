@@ -171,16 +171,19 @@ impl Graph {
         self.vis.get(&k).copied().unwrap_or(ALL)
     }
 
-    /// Walks again if the camera changed section or a section's openings changed.
-    pub fn update(&mut self, cam: (i32, i32, i32), radius: i32, layers: i32) {
-        if !self.changed && cam == self.centre && radius == self.radius && layers == self.layers {
+    /// Walks again if the camera changed section or a section's openings changed. `cull`
+    /// false turns cave culling off (vanilla: a spectator inside a full block sees through
+    /// everything).
+    pub fn update(&mut self, cam: (i32, i32, i32), radius: i32, layers: i32, cull: bool) {
+        let active = cull && cam.1 >= 0 && cam.1 < layers;
+        if !self.changed && cam == self.centre && radius == self.radius && layers == self.layers && active == self.active {
             return;
         }
         self.changed = false;
         self.centre = cam;
         self.radius = radius;
         self.layers = layers;
-        self.active = cam.1 >= 0 && cam.1 < layers;
+        self.active = active;
         if !self.active {
             return;
         }
@@ -288,13 +291,13 @@ pub fn selftest() -> Vec<(&'static str, alloc::string::String, &'static str)> {
             }
         }
     }
-    g.update((0, 5, 0), 3, 8);
+    g.update((0, 5, 0), 3, 8, true);
     check("occlusion walk", format!("{} {} {} {}", g.visible((0, 3, 0)), g.visible((2, 3, -1)), g.visible((0, 2, 0)), g.visible((3, 7, 3))), "true true false true");
     // A shaft opened down through the ground under the camera: the cave below shows.
     for y in 0..4 {
         g.set((0, y, 0), ALL);
     }
-    g.update((0, 5, 0), 3, 8);
+    g.update((0, 5, 0), 3, 8, true);
     check("occlusion shaft", format!("{} {} {}", g.visible((0, 0, 0)), g.visible((1, 1, 0)), g.visible((2, 2, 2))), "true true false");
     out
 }

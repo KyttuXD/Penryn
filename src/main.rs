@@ -22,6 +22,7 @@ mod ids;
 mod lang;
 mod math;
 mod md5;
+mod mesher;
 mod moving;
 mod mobs;
 mod nbt;
@@ -238,7 +239,7 @@ fn selftest() -> Result<(), String> {
     for (what, got, want) in skins::selftest() {
         check(what, got, want);
     }
-    for (what, got, want) in occlusion::selftest().into_iter().chain(render::selftest()).chain(terrain::selftest()) {
+    for (what, got, want) in occlusion::selftest().into_iter().chain(render::selftest()).chain(terrain::selftest()).chain(sky::selftest()) {
         check(what, got, want);
     }
     // Movement against vanilla's collision, in a made-up world (needs blocks.bin).
