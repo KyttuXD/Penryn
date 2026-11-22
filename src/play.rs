@@ -540,10 +540,21 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
 }
 
 /// A position packet moved the player: take it over.
-    fn teleported(&mut self, g: &Game) -> bool {
-        self.mover.reset([g.player.x, g.player.y, g.player.z]);
+    fn teleported(&mut self, g: &mut Game) -> bool {
+        let to = [g.player.x, g.player.y, g.player.z];
+        let jump = (0..3).map(|i| (to[i] - self.prev_pos[i]) * (to[i] - self.prev_pos[i])).sum::<f64>();
+        // A long jump (a teleport): every mesh is rebuilt, as F3+A does, so none stays stale.
+        if jump > 64.0 * 64.0 {
+            self.r.reload(&self.v.gl, &mut g.world);
+        }
+        self.mover.reset(to);
         self.prev_pos = self.mover.pos;
         true
+    }
+
+    /// F3+A: rebuild every chunk mesh (vanilla's debug reload).
+    fn reload_chunks(&mut self, g: &mut Game) {
+        self.r.reload(&self.v.gl, &mut g.world);
     }
 
     fn event(&mut self, g: &mut Game, e: &sdl::Event) -> Result<bool, String> {
@@ -876,6 +887,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
                 K_E => self.open_inventory(g, 'e'),
                 K_F3 => self.debug = !self.debug,
+                K_A if self.keys[K_F3] => self.reload_chunks(g),
                 K_F11 => {
                     let f = !self.fullscreen;
                     self.menu.set(crate::options::O::Fullscreen, f as i32 as f64);

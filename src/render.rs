@@ -186,6 +186,21 @@ impl Renderer {
         }
     }
 
+    /// Rebuilds every chunk mesh (vanilla's F3+A, and after a long teleport): every loaded
+    /// section is dirty again and its old mesh goes, so nothing stale stays on screen.
+    pub fn reload(&mut self, gl: &Gl, world: &mut World) {
+        for (_, m) in core::mem::take(&mut self.meshes) {
+            Self::drop_mesh(gl, m);
+        }
+        let n = world.height / 16;
+        let cols: alloc::vec::Vec<(i32, i32)> = world.columns.keys().copied().collect();
+        for (x, z) in cols {
+            for sy in 0..n {
+                world.dirty.insert((x, sy, z));
+            }
+        }
+    }
+
     /// Meshes the dirty sections nearest the camera, for up to `budget_ms`.
     pub fn update(&mut self, gl: &Gl, world: &mut World, b: &Blocks, eye: [f64; 3], budget_ms: u64) {
         if world.epoch != self.epoch {
