@@ -564,6 +564,8 @@ pub struct Front {
     /// PENRYN_TEST_INPUT's menu steps (mclick=X:Y, mtype=TEXT, mkey=NAME), one each half second.
     test: Vec<String>,
     test_next: u64,
+    /// Whether SDL's text input is on (only switched when it changes).
+    text_on: Option<bool>,
 }
 
 fn is_menu_step(t: &str) -> bool {
@@ -593,6 +595,7 @@ impl Front {
             music_delay: 20,
             test: test_keys.split(',').filter(|t| is_menu_step(t)).map(String::from).collect(),
             test_next: sys::now_ms() + 1500,
+            text_on: None,
         }
     }
 
@@ -676,6 +679,7 @@ impl Front {
             st().easter = random_u32() % 10000 == 0;
         }
         ui.v.grab_mouse(false);
+        self.text_on = None;
         let mut next_tick = sys::now_ms();
         let mut frame_at = 0u64;
         loop {
@@ -1096,7 +1100,11 @@ impl Front {
         let (gw, gh) = (gui.width, gui.height);
         let cx = fl(gw / 2.0);
         // Text fields want the text input on.
-        ui.v.text_input(matches!(self.scr, Scr::Multiplayer) && self.mp.as_ref().map_or(false, |m| m.in_text()));
+        let want = matches!(self.scr, Scr::Multiplayer) && self.mp.as_ref().map_or(false, |m| m.in_text());
+        if self.text_on != Some(want) {
+            self.text_on = Some(want);
+            ui.v.text_input(want);
+        }
         match &self.scr {
             Scr::Title => {
                 panorama(gl, w, h, speed);

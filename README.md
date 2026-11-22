@@ -105,6 +105,9 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 
 ## Not done yet
 
+- Menus: no Singleplayer, Realms, friends list, language or credits screens; server addresses
+  are not looked up as SRV records; no server resource pack download (the Resource Packs setting
+  only declines them when Disabled).
 - No recipe book. The creative inventory draws potions and tipped arrows untinted and without
   the enchantment glint, and has no drag-splitting of stacks.
 - No ambient cave sounds or biome music (music.game everywhere).
