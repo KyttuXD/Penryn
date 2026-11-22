@@ -122,10 +122,20 @@ class Pack:
         self._names = None
 
     def _raw(self, name):
+        # Server packs are untrusted: no path out of the pack, no member that inflates past
+        # PACK_MEMBER_LIMIT (a zip bomb).
+        if not safe_name(name):
+            return None
         if self.zip:
             try:
-                return self.zip.read(name)
+                info = self.zip.getinfo(name)
             except KeyError:
+                return None
+            if info.file_size > PACK_MEMBER_LIMIT:
+                return None
+            try:
+                return self.zip.read(info)
+            except (zipfile.BadZipFile, NotImplementedError, RuntimeError, OSError, EOFError):
                 return None
         p = os.path.join(self.path, *name.split("/"))
         try:
@@ -174,6 +184,16 @@ class Pack:
         return False
 
 
+PACK_MEMBER_LIMIT = 64 << 20   # bytes of one file of a pack, inflated
+PACK_IMAGE_LIMIT = 4096 * 4096  # pixels of one PNG of a pack
+
+
+def safe_name(name):
+    """A file name inside a pack or the game: no empty, "." or ".." part, nothing absolute."""
+    return isinstance(name, str) and "\\" not in name and "\0" not in name and \
+        all(p not in ("", ".", "..") for p in name.split("/"))
+
+
 def full_name(rel):
     """textures/block/stone.png -> assets/minecraft/textures/block/stone.png; a namespaced
     reference kept in the path (textures/custom:item/x.png) -> assets/custom/textures/item/x.png."""
@@ -202,6 +222,8 @@ class Assets:
         self.packs = [Pack(p) for p in packs]
 
     def base(self, full):
+        if not safe_name(full):
+            return None
         if self.zip:
             try:
                 return self.zip.read(full)
@@ -214,7 +236,7 @@ class Assets:
         except OSError:
             return None
 
-    def layers(self, full):
+    def layers(self, full, with_base=True):
         """The file in each layer that has it, bottom (the game) to top, as getResourceStack."""
         out = []
         for pk in reversed(self.packs):
@@ -223,7 +245,7 @@ class Assets:
                 out.append(d)
             if pk.hides(full):
                 return out[::-1]
-        d = self.base(full)
+        d = self.base(full) if with_base else None
         if d is not None:
             out.append(d)
         return out[::-1]
@@ -269,9 +291,9 @@ class Assets:
         except ValueError:
             return None
 
-    def json_stack(self, rel):
+    def json_stack(self, rel, packs_only=False):
         out = []
-        for d in self.layers(full_name(rel)):
+        for d in self.layers(full_name(rel), with_base=not packs_only):
             try:
                 out.append(json.loads(d.decode("utf-8-sig")))
             except ValueError:
@@ -285,7 +307,12 @@ class Assets:
         if not isinstance(rel, str):
             return None
         own = self.from_pack(rel) if self.packs else None
-        img = png_decode(self.read(rel))
+        data = self.read(rel)
+        size = png_header(data)
+        if own is not None and size and size[0] * size[1] > PACK_IMAGE_LIMIT:
+            print("%s: %dx%d is too large: left out" % (rel, size[0], size[1]))
+            return None
+        img = png_decode(data)
         if img is None:
             return None
         k = 1
@@ -2530,7 +2557,7 @@ def make_pack_sounds(res, assets, out_dir, sound_names):
     events = {k: dict(v) for k, v in base_events.items()}
     for full in sorted(set(has_json)):
         ns = full.split("/")[1]
-        for d in assets.json_stack(ns + ":sounds.json" if ns != "minecraft" else "sounds.json"):
+        for d in assets.json_stack(ns + ":sounds.json" if ns != "minecraft" else "sounds.json", packs_only=True):
             if not isinstance(d, dict):
                 continue
             for k, v in d.items():

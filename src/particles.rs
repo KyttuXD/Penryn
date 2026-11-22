@@ -343,6 +343,11 @@ impl Particles {
         Some(())
     }
 
+    /// The sprite sheet's texture (0: none), to free when the particles are loaded again.
+    pub fn sheet(&self) -> u32 {
+        self.sheet
+    }
+
     pub fn count(&self) -> usize {
         self.list.len()
     }

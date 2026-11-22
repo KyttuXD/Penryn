@@ -453,6 +453,8 @@ pub struct Packs {
     /// The stack in use, bottom to top.
     applied: Vec<String>,
     reload: Option<Reload>,
+    /// The stack whose last reload failed.
+    failed: Option<Vec<String>>,
     next_poll: u64,
     /// Feedback sent, for tests (PENRYN_DEBUG prints them).
     pub sent: Vec<i32>,
@@ -487,6 +489,7 @@ impl Packs {
             applied: local.clone(),
             local,
             reload: None,
+            failed: None,
             next_poll: 0,
             sent: Vec::new(),
         }
@@ -528,12 +531,12 @@ impl Packs {
         if self.setting == Setting::Prompt || (required && self.setting == Setting::Disabled) {
             // addOrUpdatePackPrompt: one screen for every request so far.
             match self.prompt.as_mut() {
+                // PackConfirmScreen.update: a new screen with every request so far, and the
+                // latest push's required flag and prompt.
                 Some(p) => {
                     p.requests.push(req);
-                    p.required |= required;
-                    if message.is_some() {
-                        p.message = message;
-                    }
+                    p.required = required;
+                    p.message = message;
                 }
                 None => self.prompt = Some(Prompt { requests: alloc::vec![req], required, message, shown_at: sys::now_ms() }),
             }
@@ -665,9 +668,10 @@ impl Packs {
             }
         }
         if failed {
-            // onDownload with failures: the failed ones and the others waiting are dropped.
+            // onDownload with failures: every pack not in use goes (setRemovalReasonIfNotSet),
+            // the failed ones as DOWNLOAD_FAILED, the others as DISCARDED.
             for p in self.packs.iter_mut() {
-                if p.activation != Activation::Active && p.accepted && p.removed.is_none() {
+                if p.activation != Activation::Active && p.removed.is_none() {
                     p.removed = Some(if p.download == Download::Failed { Removal::DownloadFailed } else { Removal::Discarded });
                 }
             }
@@ -680,33 +684,44 @@ impl Packs {
         busy
     }
 
-    fn wanted(&self) -> (Vec<String>, Vec<[u8; 16]>) {
+    /// The stack wanted, the packs it loads (vanilla's packsToLoad: the active ones that stay
+    /// too) and whether one of them is not active yet.
+    fn wanted(&self) -> (Vec<String>, Vec<[u8; 16]>, bool) {
         let mut refs = self.local.clone();
-        let mut activating = Vec::new();
+        let mut load = Vec::new();
+        let mut new = false;
         for p in self.packs.iter() {
             if let (true, None, Download::Done(sha)) = (p.accepted, p.removed, &p.download) {
                 refs.push(format!("sha1:{}", sha));
-                if p.activation == Activation::Inactive {
-                    activating.push(p.id);
-                }
+                load.push(p.id);
+                new |= p.activation == Activation::Inactive;
             }
         }
-        (refs, activating)
+        (refs, load, new)
+    }
+
+    /// triggerReloadIfNeeded's first half: the reload to make, if one is needed.
+    fn begin_reload(&mut self) -> bool {
+        if self.reload.is_some() {
+            return true;
+        }
+        let (refs, activating, new) = self.wanted();
+        let leaving = self.packs.iter().any(|p| p.activation == Activation::Active && p.removed.is_some());
+        if !new && !leaving && (refs == self.applied || Some(&refs) == self.failed.as_ref()) {
+            return false;
+        }
+        for p in self.packs.iter_mut() {
+            if activating.contains(&p.id) && p.activation != Activation::Active {
+                p.activation = Activation::Pending;
+            }
+        }
+        self.reload = Some(Reload { refs, activating });
+        true
     }
 
     fn trigger_reload(&mut self, host: &mut dyn Host, world: Option<&mut World>, blocks: &mut Blocks) {
-        if self.reload.is_none() {
-            let (refs, activating) = self.wanted();
-            let leaving = self.packs.iter().any(|p| p.activation == Activation::Active && p.removed.is_some());
-            if activating.is_empty() && !leaving && refs == self.applied {
-                return;
-            }
-            for p in self.packs.iter_mut() {
-                if activating.contains(&p.id) {
-                    p.activation = Activation::Pending;
-                }
-            }
-            self.reload = Some(Reload { refs, activating });
+        if !self.begin_reload() {
+            return;
         }
         let refs = self.reload.as_ref().map(|r| r.refs.clone()).unwrap_or_default();
         let result = if refs == self.applied {
@@ -718,11 +733,20 @@ impl Packs {
                 Err(e) => Some(Err(e)),
             }
         };
-        let Some(result) = result else { return };
+        if let Some(result) = result {
+            self.finish_reload(result);
+        }
+    }
+
+    /// The reload's onSuccess / onFailure.
+    fn finish_reload(&mut self, result: Result<(), String>) {
         let r = self.reload.take().unwrap_or(Reload { refs: Vec::new(), activating: Vec::new() });
         match result {
             Ok(()) => {
+                // onSuccess: every pack loaded is active and answered APPLIED (again, for the
+                // ones that were active already), the unloaded ones are inactive.
                 self.applied = r.refs;
+                self.failed = None;
                 for p in self.packs.iter_mut() {
                     if r.activating.contains(&p.id) {
                         p.activation = Activation::Active;
@@ -737,15 +761,21 @@ impl Packs {
                 }
             }
             Err(e) => {
+                // onFailure: the packs being loaded failed, the inactive ones are discarded; the
+                // game's files were not replaced, so the active ones stay.
                 crate::warn!("could not load the resource packs: {}", e);
                 for p in self.packs.iter_mut() {
-                    if r.activating.contains(&p.id) {
+                    if p.activation == Activation::Pending {
                         p.activation = Activation::Inactive;
                         p.removed.get_or_insert(Removal::ActivationFailed);
+                    } else if p.activation == Activation::Inactive {
+                        p.removed.get_or_insert(Removal::Discarded);
                     } else if p.removed.is_some() {
                         p.activation = Activation::Inactive;
                     }
                 }
+                // Not tried again every tick: only when the stack wanted changes.
+                self.failed = Some(r.refs);
             }
         }
     }
@@ -772,6 +802,7 @@ impl Packs {
         self.packs.clear();
         self.prompt = None;
         self.reload = None;
+        self.failed = None;
         if self.applied != self.local {
             let local = self.local.clone();
             if wait_stack(&local, &self.applied, host, world, blocks).is_ok() {
@@ -865,12 +896,21 @@ fn apply_stack(refs: &[String], old: &[String], host: &mut dyn Host, world: Opti
     }, &mut no_input);
     if !key.is_empty() && have.trim() != key {
         let r = relay().ok_or("no relay")?;
+        // Every file is fetched beside the ones in use first: a failed fetch leaves the stack
+        // in use whole.
+        let dir = crate::data_dir();
         for n in names.iter() {
             let resp = crate::http::get(&r.0, r.1, &format!("/pack/files/{}/{}", key, n), 600000)?;
             if resp.status != 200 {
                 return Err(format!("the relay has no {} for the packs", n));
             }
-            if !sys::write_file_private(&format!("{}/pack-{}", crate::data_dir(), n), &resp.body) {
+            if !sys::write_file_private(&format!("{}/pack-{}.part", dir, n), &resp.body) {
+                return Err(format!("cannot write pack-{}", n));
+            }
+        }
+        sys::write_file_private(&marker, b"");
+        for n in names.iter() {
+            if !sys::rename_file(&format!("{}/pack-{}.part", dir, n), &format!("{}/pack-{}", dir, n)) {
                 return Err(format!("cannot write pack-{}", n));
             }
         }
@@ -1271,6 +1311,28 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     p.on_pop(&mut In::new(&o.b));
     p.cleanup();
     check("pack popped: removed, no answer", format!("{} [{}]", p.packs.len(), statuses(&p)), "0 []");
+    // A second push while the screen is open: the screen takes the latest required flag.
+    let mut p = mk(Setting::Prompt);
+    p.on_push(&mut In::new(&br));
+    p.on_push(&mut In::new(&b));
+    check("pack prompt updated: 2 requests, latest not required", format!("{} {}", p.prompt.as_ref().map_or(0, |q| q.requests.len()), p.prompt.as_ref().map_or(true, |q| q.required)), "2 false");
+    // A reload answers SUCCESSFULLY_LOADED for every pack it loads, the active ones too.
+    let mut p = mk(Setting::Enabled);
+    let b2 = {
+        let mut o = Out::new();
+        o.bytes(&[8u8; 16]).string("http://127.0.0.1:1/q.zip").string("").bool(false).bool(false);
+        o.b
+    };
+    p.on_push(&mut In::new(&b));
+    p.on_push(&mut In::new(&b2));
+    p.packs[0].download = Download::Done(String::from("a"));
+    p.packs[0].activation = Activation::Active;
+    p.packs[1].download = Download::Done(String::from("b"));
+    p.applied = alloc::vec![String::from("sha1:a"), String::from("sha1:b")];
+    p.out.clear();
+    p.begin_reload();
+    p.finish_reload(Ok(()));
+    check("pack reload: APPLIED for the active pack too", format!("{} {:?}", statuses(&p), p.packs[1].activation), "0 0 Active");
     // options.txt resourcePacks.
     let l = parse_option("[\"vanilla\",\"file/Local Test\",\"file/a\\\"b.zip\"]");
     check("resourcePacks option", format!("{:?}", l), "[\"file/Local Test\", \"file/a\\\"b.zip\"]");

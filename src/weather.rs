@@ -372,7 +372,12 @@ impl Weather {
             let px = d.get(p + 4..p + 4 + w * h * 4)?;
             if let Some(gl) = gl {
                 let mut tex = 0u32;
+                // Loaded again (a resource pack): the old texture goes.
+                let old = if k == 0 { self.rain_tex } else { self.snow_tex };
                 unsafe {
+                    if old != 0 {
+                        (gl.DeleteTextures)(1, &old);
+                    }
                     (gl.GenTextures)(1, &mut tex);
                     (gl.BindTexture)(TEXTURE_2D, tex);
                     (gl.PixelStorei)(UNPACK_ALIGNMENT, 1);

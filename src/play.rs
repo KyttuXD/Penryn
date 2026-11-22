@@ -1848,6 +1848,9 @@ impl crate::packs::Host for App {
             }
         }
         if has("atlas.bin") || has("particles.bin") {
+            if let Some(old) = self.particles.as_ref().map(|p| p.sheet()).filter(|&t| t != 0) {
+                unsafe { (gl.DeleteTextures)(1, &old) };
+            }
             let pd = sys::read_file(&path("particles.bin"));
             self.particles = Some(crate::particles::Particles::load(gl, pd.as_deref(), self.r.atlas_size));
         }
@@ -1873,7 +1876,12 @@ impl crate::packs::Host for App {
         if has("entities.bin") {
             if let Some(d) = sys::read_file(&path("entities.bin")) {
                 match crate::entities::EntityTable::load(gl, &d) {
-                    Ok(t) => self.entities = Some(t),
+                    Ok(t) => {
+                        if let Some(old) = self.entities.as_ref().map(|e| e.texture()).filter(|&t| t != 0) {
+                            unsafe { (gl.DeleteTextures)(1, &old) };
+                        }
+                        self.entities = Some(t)
+                    }
                     Err(e) => say!("{}", e),
                 }
             }
