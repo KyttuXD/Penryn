@@ -1240,6 +1240,9 @@ fn draw_beacon(gui: &mut Gui, g: &Game, a: &Assets, c: &Container, left: f32, to
     gui.text_centered(&lang::get("block.minecraft.beacon.secondary"), left + 169.0, top + 10.0, 0xFFE0_E0E0);
 }
 
+/// DyeColor's names in its id order.
+const DYES: [&str; 16] = ["white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black"];
+
 /// The patterns the loom offers for what is in its pattern slot (LoomMenu.getSelectablePatterns).
 fn loom_patterns<'a>(g: &Game, a: &'a Assets, c: &Container) -> &'a [String] {
     match slot(c, 2) {
@@ -1266,6 +1269,33 @@ fn draw_loom(gui: &mut Gui, g: &Game, a: &Assets, c: &Container, left: f32, top:
     for (i, icon, x, y) in [(0, "container/slot/banner", 13.0, 26.0), (1, "container/slot/dye", 33.0, 26.0), (2, "container/slot/banner_pattern", 23.0, 45.0)] {
         if slot(c, i).is_none() {
             gui.blit(icon, left + x, top + y);
+        }
+    }
+    // The result: its banner as the loom shows it (base colour, then each layer).
+    if let Some((item, _)) = slot(c, 3) {
+        let name = item_name(g, item);
+        let base = DYES.iter().position(|d| name.strip_suffix("_banner") == Some(*d)).unwrap_or(0);
+        let tint = |i: usize| 0xFF00_0000 | crate::entities::DYE[i.min(15)];
+        let (x, y) = (left + 141.0, top + 8.0);
+        a.tinted(gui, "banner/base", x, y, 20.0, 40.0, tint(base));
+        let regs = g.creative.registries.iter().find(|r| r.0 == "minecraft:banner_pattern").map(|r| &r.1);
+        if let Some(v) = component(patch(c, 3), 74) {
+            let mut r = In::new(v);
+            for _ in 0..r.varint().unwrap_or(0).clamp(0, 16) {
+                let (pat, colour) = match r.varint() {
+                    Some(0) => {
+                        let asset = r.string().unwrap_or_default();
+                        let _key = r.string();
+                        (String::from(asset.split(':').last().unwrap_or("")), r.varint().unwrap_or(0))
+                    }
+                    Some(id) => {
+                        let n = regs.and_then(|n| n.get(id as usize - 1)).cloned().unwrap_or_default();
+                        (String::from(n.split(':').last().unwrap_or("")), r.varint().unwrap_or(0))
+                    }
+                    None => break,
+                };
+                a.tinted(gui, &format!("banner/{}", pat), x, y, 20.0, 40.0, tint(colour.max(0) as usize));
+            }
         }
     }
     let pats = loom_patterns(g, a, c);

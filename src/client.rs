@@ -1506,6 +1506,15 @@ pub(crate) fn skip_component(kind: i32, r: &mut In) -> Option<()> {
             r.varint().map(drop)
         }
         47 => r.take(4).map(drop),
+        // banner_patterns: layers of a pattern holder (an id plus one, or 0 and its asset id
+        // and translation key) and a DyeColor
+        74 => list(r, |r| {
+            if r.varint()? == 0 {
+                r.string()?;
+                r.string()?;
+            }
+            r.varint().map(drop)
+        }),
         // block_entity_data, entity_data: the type, then a compound
         60 | 62 => {
             r.varint()?;
