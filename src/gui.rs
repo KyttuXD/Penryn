@@ -678,6 +678,9 @@ impl Gui {
 
     /// A stack's item as its item_model (or custom_model_data case) says, else the item's own icon.
     pub fn item_patch(&mut self, b: &Blocks, item: i32, patch: &[u8], count: i32, x: f32, y: f32) {
+        if self.overlays.is_empty() {
+            return self.item(b, item, count, x, y);
+        }
         let registry = match b.items.get(item as usize) {
             Some(short) => alloc::format!("minecraft:{}", short),
             None => return,

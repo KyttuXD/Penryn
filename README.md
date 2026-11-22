@@ -168,7 +168,7 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   the relay's `resourcepacks/` folder (saved as `resourcePacks` in `options.txt`). The relay
   downloads the pack (HTTP or HTTPS, SHA-1 checked, at most 250 MB, kept by its hash) and bakes
   the stack into Penryn's game files with `make_assets.py --packs`: block and item textures and
-  models, 26.x item model definitions, block states, GUI sprites (nine-slice), fonts (bitmap
+  models, 26.x item definitions (`items.bin`: the stacks with an `item_model` or a `custom_model_data` string draw their model in slots, the hotbar, the hand, drops and item frames; not yet in the creative tabs or on the cursor), block states, GUI sprites (nine-slice), fonts (bitmap
   providers), language, `sounds.json` and sounds (a small `packsounds.bin` over sounds.bin),
   particles, entity textures, sun, moon and rain, animated textures (their first frame),
   `pack.mcmeta` formats, overlays and filters; higher-resolution textures are scaled to the
@@ -323,6 +323,7 @@ Options > Controls. Third person draws no model for the player (the server sends
 | `src/weather.rs` | rain, snow, thunder and lightning |
 | `src/particles.rs` | particles (vanilla's ParticleEngine) |
 | `src/gui.rs`, `screens.rs`, `lang.rs` | vanilla's GUI |
+| `src/itemmodels.rs` | the packs' item definitions (`items.bin`): the model of a stack with an `item_model` or a `custom_model_data` string |
 | `src/talk.rs`, `chatui.rs`, `commands.rs`, `text.rs` | secure chat and its keys, the chat screen, the command tree, text components |
 | `src/menus.rs`, `books.rs`, `maps.rs` | the other container screens, books, maps and item frames |
 | `src/play.rs`, `physics.rs` | the game window, input, movement, digging |

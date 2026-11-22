@@ -155,7 +155,7 @@ impl Hand {
         let mut tex_size = atlas_size;
         // A held stack whose item_model (or custom_model_data case) the packs define shows that
         // icon; its extruded layers are cached under a negative key (the overlay's index).
-        let overlay = held.and_then(|i| {
+        let overlay = held.filter(|_| !gui.overlays.is_empty()).and_then(|i| {
             let reg = alloc::format!("minecraft:{}", blocks.items.get(i as usize)?);
             crate::itemmodels::pick(&gui.overlays, &reg, held_patch)
         });
