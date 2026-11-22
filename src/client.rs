@@ -166,8 +166,10 @@ fn handshake(c: &mut Conn, host: &str, port: u16, intent: i32) -> Result<(), Str
 }
 
 /// The server-list ping: (description and version, players online/max, round trip ms).
-pub fn status(host: &str, port: u16) -> Result<String, String> {
-    let mut c = Conn::open(host, port)?;
+/// The handshake names host and port; the connection goes to dial_host and dial_port (an SRV
+/// record, srv.rs), which are the same for a plain address.
+pub fn status(host: &str, port: u16, dial_host: &str, dial_port: u16) -> Result<String, String> {
+    let mut c = Conn::open(dial_host, dial_port)?;
     handshake(&mut c, host, port, 1)?;
     c.send(0, &Out::new())?;
     let p = c.recv(5000)?.ok_or("no status answer")?;
@@ -230,9 +232,15 @@ impl From<String> for Join {
 impl Game {
     /// Connects and logs in (the connect screen's stages). Runs on the join's thread. `common` is
     /// what a transfer keeps (the cookies); `transferred` says so in the handshake (ClientIntent.TRANSFER).
-    pub fn login(host: &str, port: u16, name: &str, account: Option<&Account>, mut common: crate::serverui::Common, transferred: bool) -> Result<Login, String> {
+    pub fn login(host: &str, port: u16, name: &str, account: Option<&Account>, common: crate::serverui::Common, transferred: bool) -> Result<Login, String> {
+        Game::login_dialing(host, port, host, port, name, account, common, transferred)
+    }
+
+    /// `login` for a server whose connect address differs (an SRV record, srv.rs): the handshake
+    /// and the Login name host and port, the connection goes to dial_host and dial_port.
+    pub fn login_dialing(host: &str, port: u16, dial_host: &str, dial_port: u16, name: &str, account: Option<&Account>, mut common: crate::serverui::Common, transferred: bool) -> Result<Login, String> {
         crate::talk::set_account(account);
-        let mut c = Conn::open(host, port)?;
+        let mut c = Conn::open(dial_host, dial_port)?;
         handshake(&mut c, host, port, if transferred { 3 } else { 2 })?;
         let (name, uuid) = match account {
             Some(a) => (a.name.clone(), uuid_bytes(&a.uuid)),

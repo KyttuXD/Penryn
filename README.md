@@ -286,6 +286,10 @@ From a terminal:
 ./penryn status SERVER                     # the server-list ping
 ```
 
+A hostname on the default port 25565 is looked up for its `_minecraft._tcp` SRV record first (as the
+game does), over UDP to the first nameserver in `/etc/resolv.conf`; `PENRYN_DNS=IP:PORT` names
+another one (for tests). Without a record the name is joined on port 25565.
+
 `PENRYN_VIEW` (chunks, 2-16; 6 to 8 suit a Radeon HD 2600), `PENRYN_FULLSCREEN=1`, `PENRYN_DATA`
 (where the game files and the sign-in are; the program's folder in `Play.command`). Once the
 options screens have saved `options.txt` there, its render distance and fullscreen win over

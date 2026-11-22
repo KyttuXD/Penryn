@@ -434,7 +434,7 @@ impl App {
 
 /// The window: the title screen and the menus (title.rs), then each game joined from them. With
 /// `server` Penryn connects straight away, as `penryn HOST` always has.
-pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, relay: Option<(String, u16)>) -> Result<(), String> {
+pub fn run(server: Option<String>, name: &str, account: Option<Account>, relay: Option<(String, u16)>) -> Result<(), String> {
     // options.txt first; settings.txt's VIEW and FULLSCREEN (PENRYN_VIEW, PENRYN_FULLSCREEN)
     // stand in for what it does not say yet.
     let mut settings = crate::options::Settings::load();
@@ -565,8 +565,8 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
         app.entities = Some(crate::entities::EntityTable::load(&app.v.gl, &d)?);
     }
     let mut front = crate::title::Front::new(account, relay, name, &sys::env("PENRYN_TEST_INPUT").unwrap_or_default());
-    if let Some((h, p)) = server {
-        front.connect(&format!("{}:{}", h, p), false);
+    if let Some(address) = server {
+        front.connect(&address, false);
     }
     loop {
         let next = {

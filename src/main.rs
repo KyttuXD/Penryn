@@ -54,6 +54,7 @@ mod signs;
 mod sky;
 mod special;
 mod net;
+mod srv;
 mod options;
 mod packs;
 mod particles;
@@ -134,8 +135,8 @@ pub fn load_blocks() -> Result<blocks::Blocks, String> {
 fn run(args: &[String]) -> Result<(), String> {
     match args.get(1).map(|s| s.as_str()) {
         Some("status") => {
-            let (h, p) = http::host_port(args.get(2).ok_or(USAGE)?, 25565);
-            say!("{}", client::status(&h, p)?);
+            let ((h, p), (dh, dp)) = srv::dial(args.get(2).ok_or(USAGE)?).ok_or(USAGE)?;
+            say!("{}", client::status(&h, p, &dh, dp)?);
             Ok(())
         }
         Some("join") => {
@@ -226,8 +227,12 @@ fn run(args: &[String]) -> Result<(), String> {
                 }
                 i += 1;
             }
+            // The address as typed: whether it names a port decides an SRV lookup (srv.rs).
             let server = match host {
-                Some(h) => Some(servers::address(&h).ok_or(USAGE)?),
+                Some(h) => {
+                    servers::address(&h).ok_or(USAGE)?;
+                    Some(h)
+                }
                 None => None,
             };
             let mut acc = match (&name, &server) {
@@ -363,6 +368,7 @@ fn selftest() -> Result<(), String> {
     for (what, got, want) in menus::selftest(cdata.as_deref()).into_iter().chain(maps::selftest()).chain(books::selftest()) {
         check(what, got, want);
     }
+    srv::selftest(&mut check);
     if ok {
         Ok(())
     } else {
