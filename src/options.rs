@@ -485,6 +485,8 @@ pub enum Page {
     Sounds,
     Video,
     Controls,
+    /// Controls > Key Binds (keybinds.rs).
+    Keys,
     Mouse,
     Chat,
     Accessibility,
@@ -499,6 +501,7 @@ impl Page {
             Page::Sounds => "options.sounds.title",
             Page::Video => "options.videoTitle",
             Page::Controls => "controls.title",
+            Page::Keys => "controls.keybinds.title",
             Page::Mouse => "options.mouse_settings.title",
             Page::Chat => "options.chat.title",
             Page::Accessibility => "options.accessibility.title",
@@ -513,6 +516,7 @@ impl Page {
             "sounds" => Page::Sounds,
             "video" => Page::Video,
             "controls" => Page::Controls,
+            "keys" => Page::Keys,
             "mouse" => Page::Mouse,
             "chat" => Page::Chat,
             "accessibility" => Page::Accessibility,
@@ -529,6 +533,10 @@ pub enum W {
     Open(Page, &'static str),
     /// A button Penryn has nothing behind yet: (label, value shown after it).
     Off(&'static str, Option<&'static str>),
+    /// Key Binds: a binding's button, its Reset button, and Reset Keys (TABLE indices).
+    Bind(usize),
+    Reset(usize),
+    ResetAll,
     Done,
 }
 
@@ -579,9 +587,10 @@ fn rows(p: Page) -> Vec<Row> {
             r.extend(small(&[AutosaveIndicator, Vignette, AttackIndicator, ChunkFade]));
         }
         Page::Controls => {
-            r.push(Row::Two(W::Open(Page::Mouse, "options.mouse_settings"), Some(W::Off("controls.keybinds", None))));
+            r.push(Row::Two(W::Open(Page::Mouse, "options.mouse_settings"), Some(W::Open(Page::Keys, "controls.keybinds"))));
             r.extend(small(&[ToggleCrouch, ToggleSprint, ToggleAttack, ToggleUse, AutoJump, SprintWindow, QuitShortcuts, OperatorItemsTab]));
         }
+        Page::Keys => {}
         Page::Mouse => r.extend(small(&[Sensitivity, WheelSensitivity, DiscreteScroll, InvertX, InvertY, AllowCursor])),
         Page::Chat => r.extend(small(&[
             ChatVisibility, ChatColors, ChatLinks, ChatLinksPrompt, ChatOpacity, TextBackground, ChatScale, ChatLineSpacing,
@@ -630,11 +639,13 @@ const ROW: f32 = 25.0;
 pub struct Menu {
     pub o: Settings,
     stack: Vec<Page>,
-    scroll: f32,
+    pub scroll: f32,
     drag: Option<(O, f32, f32)>,
     /// The dragged slider's value, for the sliders vanilla applies only when let go.
     pending: Option<f64>,
     pub changed: Vec<O>,
+    /// The key bindings (keybinds.rs), written to options.txt as they change.
+    pub keys: crate::keybinds::Keymap,
     /// The automatic GUI scale for the window: the GUI scale slider's top.
     pub max_gui_scale: i32,
     /// Off in the self test, which must not write options.txt.
@@ -651,18 +662,21 @@ pub enum Ev {
     Packs,
 }
 
-fn ceil(x: f32) -> f32 {
+pub(crate) fn ceil(x: f32) -> f32 {
     -math::floor(-x as f64) as f32
 }
 
-fn fl(x: f32) -> f32 {
+pub(crate) fn fl(x: f32) -> f32 {
     math::floor(x as f64) as f32
 }
 
 impl Menu {
-    pub fn new(o: Settings) -> Menu {
+    pub fn new(mut o: Settings) -> Menu {
+        // Vanilla writes every key binding when it saves: the defaults are in options.txt too.
+        let keys = crate::keybinds::Keymap::load(&o);
+        keys.write(&mut o);
         o.publish();
-        Menu { o, stack: Vec::new(), scroll: 0.0, drag: None, pending: None, changed: Vec::new(), max_gui_scale: 4, saving: true }
+        Menu { o, stack: Vec::new(), scroll: 0.0, drag: None, pending: None, changed: Vec::new(), keys, max_gui_scale: 4, saving: true }
     }
 
     pub fn open(&mut self, p: Page) {
@@ -675,6 +689,7 @@ impl Menu {
         self.stack.push(p);
         self.scroll = 0.0;
         self.drag = None;
+        self.keys.listening = None;
     }
 
     /// One options screen on its own (the title screen's accessibility button): Done and
@@ -705,6 +720,7 @@ impl Menu {
     /// a screen is removed. True when the options are closed.
     pub fn back(&mut self) -> bool {
         self.drag = None;
+        self.keys.listening = None;
         self.stack.pop();
         self.scroll = 0.0;
         if self.saving {
@@ -870,6 +886,9 @@ impl Menu {
         let cx = fl(w / 2.0);
         let mut l = Layout { widgets: Vec::new(), texts: Vec::new(), list: None, content: 0.0 };
         let page = self.page();
+        if page == Page::Keys {
+            return crate::keybinds::layout(self, gw, gh);
+        }
         l.texts.push((lang::get(page.title()), cx, 12.0));
         l.widgets.push(Placed { x: fl((w - 200.0) / 2.0), y: h - HEADER + 6.0, w: 200.0, what: W::Done });
         if page == Page::Main {
@@ -973,6 +992,20 @@ impl Menu {
                 Ev::Click
             }
             W::Off("options.resourcepack", _) => Ev::Packs,
+            W::Bind(i) => {
+                self.keys.listening = Some(i);
+                Ev::Click
+            }
+            W::Reset(i) => {
+                self.keys.reset(i);
+                self.keys.write(&mut self.o);
+                Ev::Click
+            }
+            W::ResetAll => {
+                self.keys.reset_all();
+                self.keys.write(&mut self.o);
+                Ev::Click
+            }
             W::Off(..) => Ev::None,
             W::Opt(O::GuiScale) => {
                 let n = self.max_gui_scale.max(1) + 1;
@@ -1066,6 +1099,9 @@ impl Menu {
                 W::Opt(o) => button(gui, &self.caption(o), p, true, hover),
                 W::Open(_, key) => button(gui, &lang::get(key), p, true, hover),
                 W::Done => button(gui, &lang::get("gui.done"), p, true, hover),
+                W::Bind(i) => crate::keybinds::draw_bind(gui, self, i, p, hover),
+                W::Reset(i) => button(gui, &lang::get("controls.reset"), p, !self.keys.is_default(i), hover && !self.keys.is_default(i)),
+                W::ResetAll => button(gui, &lang::get("controls.resetAll"), p, true, hover),
                 W::Off(key, value) => {
                     let t = match value {
                         Some(v) => lang::format("options.generic_value", &[lang::get(key), lang::get(v)]),
@@ -1205,5 +1241,6 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     let info = client_information(8);
     let hex: String = info.b.iter().map(|b| format!("{:02x}", b)).collect();
     check("client information", hex, "05656e5f75730800017f01000100");
+    out.extend(crate::keybinds::selftest());
     out
 }

@@ -19,6 +19,7 @@ mod effects;
 mod entities;
 mod http;
 mod ids;
+mod keybinds;
 mod json;
 mod lang;
 mod math;

@@ -128,7 +128,7 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 - No recipe book. The creative inventory draws potions and tipped arrows untinted and without
   the enchantment glint, and has no drag-splitting of stacks.
 - No ambient cave sounds or biome music (music.game everywhere).
-- Options screens without anything behind them yet: key binds, language,
+- Options screens without anything behind them yet: language,
   telemetry, credits; brightness only lifts the night (Penryn has no light levels yet).
 - Block entities other than chests and signs (banners, heads, shulker boxes, bells) are drawn
   without their entity model. Signs show their text (front and back, colours, glow ink) and
@@ -227,6 +227,13 @@ options screens have saved `options.txt` there, its render distance and fullscre
 Vanilla's defaults: WASD, mouse, space (double-tap to fly in creative), shift sneak, ctrl or double
 W sprint, left click dig and attack, right click place and use, 1-9 and the wheel for the hotbar,
 E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
+
+Every binding is in Options > Controls > Key Binds (vanilla's names in options.txt, `key_key.forward:
+key.keyboard.w` and so on); click a button, then press the key or mouse button (Esc unbinds). Q drops
+(Ctrl the stack), F swaps with the off hand, middle click picks the block, Tab lists the players,
+F1 hides the HUD, F2 saves a screenshot to screenshots/, F5 changes the view (first, third person
+behind, third person in front). Sneak and sprint can be toggled, and attack and use too, under
+Options > Controls. Third person draws no model for the player (the server sends none for them).
 
 ## Layout
 
