@@ -63,6 +63,9 @@ pub fn window(g: &Game) -> Window {
             container_id: 0,
         };
     };
+    if let Some(w) = crate::menus::window(g, c) {
+        return w;
+    }
     let mut slots = Vec::new();
     let (w, h, parts, label_y, title_x);
     match c.menu {
@@ -209,7 +212,10 @@ pub fn draw_window(gui: &mut Gui, g: &Game, win: &Window, mx: f32, my: f32) {
     for (sprite, sy, sh, dy) in win.parts.iter() {
         gui.blit_part(sprite, left, top + dy, 0.0, *sy, win.w, *sh);
     }
-    gui.text_plain(&win.title, left + win.title_at.0, top + win.title_at.1, LABEL);
+    // The other menus' backgrounds, bars and widgets (menus.rs).
+    crate::menus::draw_back(gui, g, win, left, top, mx, my);
+    let tx = crate::menus::title_x(gui, win);
+    gui.text_plain(&win.title, left + tx, top + win.title_at.1, LABEL);
     if win.inventory_label_y >= 0.0 {
         gui.text_plain(&lang::get("container.inventory"), left + 8.0, top + win.inventory_label_y, LABEL);
     }
@@ -241,6 +247,7 @@ pub fn draw_window(gui: &mut Gui, g: &Game, win: &Window, mx: f32, my: f32) {
             gui.fill(left + x, top + y, left + x + 16.0, top + y + 16.0, 0x80FF_FFFF);
         }
     }
+    let tip = crate::menus::draw_front(gui, g, win, left, top, mx, my);
     // The item on the cursor, then the hovered item's name.
     if let Some((item, count)) = g.carried {
         gui.item(&g.blocks, item, count, mx - 8.0, my - 8.0);
@@ -255,6 +262,8 @@ pub fn draw_window(gui: &mut Gui, g: &Game, win: &Window, mx: f32, my: f32) {
             let lines = crate::tooltip::stack_lines(g, gui, item, patch.map_or(&[][..], |p| &p[..]));
             crate::tooltip::draw(gui, &lines, mx, my);
         }
+    } else if let Some(t) = tip {
+        tooltip(gui, &t, mx, my);
     }
 }
 

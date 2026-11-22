@@ -132,13 +132,13 @@ pub fn format_duration(ticks: i32) -> String {
     }
 }
 
-struct Icons {
-    tex: u32,
+pub(crate) struct Icons {
+    pub tex: u32,
     /// uv rectangle per effect id (none: no icon).
-    uv: Vec<Option<[f32; 4]>>,
+    pub uv: Vec<Option<[f32; 4]>>,
 }
 
-fn load_icons(gl: &Gl) -> Option<Icons> {
+pub(crate) fn load_icons(gl: &Gl) -> Option<Icons> {
     let d = crate::sys::read_file(&crate::packs::path("effects.bin"))?;
     if d.get(..4)? != crate::account::EFFECTS_MAGIC || d.len() < 10 {
         return None;

@@ -28,6 +28,7 @@ const K_W: usize = 26;
 const K_X: usize = 27;
 const K_1: usize = 30;
 const K_ESC: usize = 41;
+const K_BACKSPACE: usize = 42;
 const K_SPACE: usize = 44;
 const K_TAB: usize = 43;
 const K_SLASH: usize = 56;
@@ -74,6 +75,8 @@ enum Screen {
     Options,
     /// The server's links (serverhud.rs), from the pause menu.
     Links,
+    /// A book being read or written (books.rs).
+    Book,
 }
 
 /// Items used over time while the button is held (eaten, drunk, drawn, raised), and for how
@@ -229,6 +232,8 @@ pub struct App {
     to_title: bool,
     /// Since when the world is being waited for (LevelLoadingScreen).
     loading_from: Option<u64>,
+    /// The open book (Screen::Book).
+    book: Option<crate::books::Book>,
 }
 
 impl App {
@@ -326,6 +331,7 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
         creative: crate::creative::Screen::new(),
         to_title: false,
         loading_from: None,
+        book: None,
     };
     let atlas = sys::read_file(&crate::packs::path("atlas.bin")).ok_or("cannot read atlas.bin (see README.md)")?;
     app.r.load_atlas(&app.v.gl, &atlas)?;
@@ -337,6 +343,8 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
     let gui = sys::read_file(&crate::packs::path("gui.bin")).ok_or("cannot read gui.bin (see README.md)")?;
     app.gui = Some(Gui::load(&app.v.gl, &gui, app.r.atlas, app.r.atlas_size)?);
     drop(gui);
+    // The other container screens, maps and item frames (containers.bin, optional).
+    crate::menus::load(&app.v.gl);
     // Weather is optional: without weather.bin no rain or snow falls (the sky still greys).
     if let Some(d) = sys::read_file(&crate::packs::path("weather.bin")) {
         if app.weather.parse(&d, Some(&app.v.gl)).is_none() {
@@ -500,6 +508,7 @@ impl App {
         self.set_screen(Screen::Play);
         self.keys = [false; 512];
         self.chat_ui = crate::chatui::ChatUi::new();
+        self.book = None;
         self.mover = Mover::new([0.0; 3]);
         self.prev_pos = [0.0; 3];
         self.sprinting = false;
@@ -684,11 +693,23 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if down && repeat && self.screen == Screen::Sign && sc != K_ESC {
                     crate::signs::key(g, sc)?;
                 }
+                if down && repeat && sc == K_BACKSPACE && (self.screen == Screen::Inventory || self.screen == Screen::Book) {
+                    return self.key(g, sc);
+                }
             }
             sdl::EV_TEXTINPUT => {
                 if let (Screen::Sign, Some(gui)) = (&self.screen, self.gui.as_ref()) {
                     let n = e.0[12..44].iter().position(|b| *b == 0).unwrap_or(32);
                     crate::signs::type_text(g, gui, &String::from_utf8_lossy(&e.0[12..12 + n]));
+                }
+                if self.screen == Screen::Inventory || self.screen == Screen::Book {
+                    let n = e.0[12..44].iter().position(|b| *b == 0).unwrap_or(32);
+                    let s = String::from_utf8_lossy(&e.0[12..12 + n]).into_owned();
+                    if self.screen == Screen::Inventory {
+                        crate::menus::text(g, &s)?;
+                    } else if let (Some(gui), Some(b)) = (self.gui.as_ref(), self.book.as_mut()) {
+                        crate::books::text(gui, b, &s);
+                    }
                 }
                 if self.screen == Screen::Chat {
                     let mut n = 0;
@@ -715,6 +736,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     g.player.pitch = (g.player.pitch + dy * ky).clamp(-90.0, 90.0);
                 } else if self.screen == Screen::Options {
                     self.menu.drag_to(self.mouse.0);
+                } else if let (Screen::Inventory, Some(gui)) = (&self.screen, self.gui.as_ref()) {
+                    crate::menus::drag(gui, g, self.mouse.0, self.mouse.1);
                 }
             }
             sdl::EV_MOUSEDOWN | sdl::EV_MOUSEUP => {
@@ -724,6 +747,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     if down {
                         return self.screen_click(g, button);
                     }
+                    crate::menus::release(g);
                     if self.screen == Screen::Options && button == 1 {
                         if let crate::options::Ev::Click = self.menu.release() {
                             self.ui_click();
@@ -767,6 +791,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     self.menu.wheel(gui.width, gui.height, e.i32_at(20));
                 } else if self.screen == Screen::Links {
                     crate::serverhud::links_wheel(e.i32_at(20));
+                } else if let (Screen::Inventory, Some(gui)) = (&self.screen, self.gui.as_ref()) {
+                    crate::menus::wheel(gui, g, e.i32_at(20));
                 } else if self.screen == Screen::Play {
                     let y = e.i32_at(20);
                     if y != 0 {
@@ -859,8 +885,19 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     self.set_screen(Screen::Play);
                 }
             }
+            Screen::Book if button == 1 => {
+                if let Some(b) = self.book.as_mut() {
+                    if crate::books::click(gui, g, b, mx, my)? {
+                        self.book = None;
+                        self.set_screen(Screen::Play);
+                    }
+                }
+            }
             Screen::Inventory if button == 1 || button == 3 => {
                 let win = screens::window(g);
+                if crate::menus::click(gui, g, &win, mx, my, button)? {
+                    return Ok(false);
+                }
                 let shift = self.keys[K_LSHIFT] || self.keys[K_RSHIFT];
                 let b = if button == 1 { 0 } else { 1 };
                 match screens::slot_at(gui, &win, mx, my) {
@@ -945,7 +982,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.menu.close();
         }
         self.v.grab_mouse(s == Screen::Play);
-        self.v.text_input(s == Screen::Chat || s == Screen::Sign || s == Screen::Creative);
+        self.v.text_input(s == Screen::Chat || s == Screen::Sign || s == Screen::Creative || s == Screen::Inventory || s == Screen::Book);
         if s != Screen::Play {
             self.left_down = false;
             self.right_down = false;
@@ -982,7 +1019,18 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 K_Q => return Ok(true),
                 _ => {}
             },
+            Screen::Book => {
+                if let Some(b) = self.book.as_mut() {
+                    if crate::books::key(g, b, sc)? {
+                        self.book = None;
+                        self.set_screen(Screen::Play);
+                    }
+                }
+            }
             Screen::Inventory => {
+                if crate::menus::key(g, sc)? {
+                    return Ok(false);
+                }
                 if sc == K_ESC || sc == K_E {
                     self.close_inventory(g)?;
                 } else if let Some(gui) = self.gui.as_ref() {
@@ -1118,6 +1166,14 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         g.ui.refresh_tags(&own);
         let eye = [self.mover.pos[0], self.mover.pos[1] + self.eye_height(), self.mover.pos[2]];
         self.weather.tick(g, eye);
+        crate::menus::tick(g)?;
+        // A written book the server opened (ClientboundOpenBook).
+        if let Some(hand) = g.menus.open_book.take() {
+            if let Some(b) = crate::books::open_view(g, hand) {
+                self.book = Some(b);
+                self.set_screen(Screen::Book);
+            }
+        }
         // Screens follow what the server does: containers it opens or closes, death, respawn.
         if g.container.is_some() && !self.container_screen {
             self.container_screen = true;
@@ -1207,6 +1263,13 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         if self.chat_ui.test(g, &mut self.mouse, self.gui.as_ref(), &self.v)? && self.screen == Screen::Play {
             self.set_screen(Screen::Chat);
         }
+        // G: use (right click) the entity under the crosshair, sneaking with v (tests).
+        if self.test_keys.contains('G') && self.screen == Screen::Play && g.loaded_sent && sys::now_ms() / 50 % 20 == 0 {
+            if let Some((id, _, at)) = self.pick_entity(g) {
+                say!("using entity {} (type {}, sneaking {})", id, g.entities.get(&id).map_or(-1, |e| e.kind), self.keys[K_LSHIFT]);
+                g.interact(id, at, self.keys[K_LSHIFT])?;
+            }
+        }
         if self.test_keys.contains('A') && g.loaded_sent && sys::now_ms() / 50 % 10 == 0 {
             if let Some((id, d, _)) = self.pick_entity(g) {
                 say!("attacking entity {} at {:.2}", id, d);
@@ -1247,6 +1310,17 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         // click=X:Y (GUI units): a left click on the open screen, one each half second.
         if self.screen != Screen::Play && self.test_keys.contains("click=") {
             self.test_ticks += 1;
+            // type=TEXT: typed into the open screen after the first click; ptr=X:Y: where the
+            // mouse rests after the last one (menus.rs, books.rs).
+            if self.test_ticks == 5 {
+                if let Some(t) = self.test_keys.split(',').find_map(|t| t.strip_prefix("type=")).map(String::from) {
+                    if self.screen == Screen::Inventory {
+                        crate::menus::text(g, &t)?;
+                    } else if let (Some(gui), Some(b)) = (self.gui.as_ref(), self.book.as_mut()) {
+                        crate::books::text(gui, b, &t);
+                    }
+                }
+            }
             if self.test_ticks % 10 == 1 {
                 let clicks: Vec<String> = self.test_keys.split(',').filter_map(|t| t.strip_prefix("click=")).map(String::from).collect();
                 if let Some((x, y)) = clicks.get(self.test_ticks / 10 - 1).and_then(|c| c.split_once(':')) {
@@ -1259,12 +1333,19 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                         self.ui_click();
                     }
                 }
+                if self.test_ticks / 10 == clicks.len() + 1 && self.test_ticks % 10 == 1 {
+                    if let Some((x, y)) = self.test_keys.split(',').find_map(|t| t.strip_prefix("ptr=")).and_then(|c| c.split_once(':')) {
+                        self.mouse = (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+                    }
+                }
             }
         }
         if self.test_keys.contains('L') {
             self.left_down = true;
         }
-        if self.test_keys.contains('R') && self.screen == Screen::Play {
+        // rt=TICKS: R starts that many ticks after joining (menus.rs counts them).
+        let rt: u32 = self.test_keys.split(',').find_map(|t| t.strip_prefix("rt=")).and_then(|v| v.parse().ok()).unwrap_or(0);
+        if self.test_keys.contains('R') && self.screen == Screen::Play && g.menus.ticks >= rt {
             self.right_down = true;
         }
         for part in self.test_keys.split(',') {
@@ -1447,7 +1528,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     ];
                     g.place(h.pos[0], h.pos[1], h.pos[2], h.face, c, false)?;
                     let name = g.blocks.of_state(g.world.get(h.pos[0], h.pos[1], h.pos[2])).name.clone();
-                    usable.is_none() || interactive(&name)
+                    (usable.is_none() && !crate::books::used_in_air(&held_name)) || interactive(&name)
                 }
                 None => false,
             };
@@ -1457,6 +1538,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 g.use_item()?;
                 if let Some(d) = usable {
                     self.using = Some((0, d));
+                }
+                // WritableBookItem.use: the client opens its own edit screen.
+                if let Some(b) = crate::books::open_edit(g) {
+                    self.book = Some(b);
+                    self.set_screen(Screen::Book);
                 }
             }
         }
@@ -1790,6 +1876,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let fog = fog.or_else(|| g.ui.boss_fog().then(|| crate::effects::Fog { start: far * 0.05, end: far.min(192.0) * 0.5, darkness: 0.0 }));
         let dk = 1.0 - 0.3 * g.ui.darken_at(partial as f32);
         let sky = [sky[0] * dk, sky[1] * dk, sky[2] * dk];
+        g.maps.upload(&self.v.gl);
+        let maps_ref = &g.maps;
         let ents = self.entities.as_ref();
         let gl = &self.v.gl;
         let own = g.ui.camera.unwrap_or(g.entity_id);
@@ -1838,6 +1926,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     crate::skins::draw(gl, view, eye, entities, pf, own, t);
                 }
                 crate::entities::draw_items(gl, view, eye, entities, pf, icons, blocks_ref, atlas, atlas_size);
+                crate::maps::draw_frames(gl, view, eye, entities, maps_ref, icons, blocks_ref, atlas, atlas_size);
                 if let Some(gui) = gui_ref {
                     crate::signs::draw_world(gl, view, eye, block_entities, world_ref, blocks_ref, gui);
                 }
@@ -1881,6 +1970,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             let walk = self.prev_walk_dist + (self.walk_dist - self.prev_walk_dist) * partial as f32;
             let bob = self.prev_bob + (self.bob - self.prev_bob) * partial as f32;
             let skin = crate::entities::EntityTable::skin_index(&g.uuid);
+            // A held map (ItemInHandRenderer.renderTwoHandedMap / renderOneHandedMap).
+            let map = g.held().filter(|h| crate::menus::item_name(g, h.0) == "filled_map").map(|_| crate::maps::map_id(&g.creative.patches[36 + g.selected as usize]));
+            let bob_v = if self.menu.o.on(crate::options::O::BobView) { (-walk, bob) } else { (0.0, 0.0) };
+            if !crate::maps::draw_hand(&self.v.gl, w, h, &g.maps, map, g.inventory[45].is_none(), g.player.pitch, swing, equip, bob_v) {
             self.hand.draw(
                 &self.v.gl,
                 w,
@@ -1895,8 +1988,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 skin,
                 swing,
                 equip,
-                if self.menu.o.on(crate::options::O::BobView) { (-walk, bob) } else { (0.0, 0.0) },
+                bob_v,
             );
+            }
         }
         // ---- 2D: vanilla's HUD and screens
         let Some(mut gui) = self.gui.take() else {
@@ -1932,7 +2026,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         g.effects.draw_hud(&self.v.gl, &mut gui, self.screen == Screen::Inventory && g.container.is_none());
         crate::serverhud::hud(&mut gui, &self.v.gl, g, partial as f32);
-        let show_chat = self.screen != Screen::Inventory && self.screen != Screen::Creative && self.screen != Screen::Dead;
+        let show_chat = self.screen != Screen::Inventory && self.screen != Screen::Creative && self.screen != Screen::Dead && self.screen != Screen::Book;
         crate::chatui::draw(&mut gui, g, &mut self.chat_ui, self.screen == Screen::Chat, show_chat, partial as f32, self.mouse.0, self.mouse.1);
         // The player list while Tab is held (PENRYN_TEST_INPUT "P" holds it).
         if (self.keys[K_TAB] || self.test_keys.contains('P')) && self.screen == Screen::Play {
@@ -1982,6 +2076,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
             }
             Screen::Sign => crate::signs::draw_editor(&mut gui, &self.v.gl, w, h, g, mx, my),
+            Screen::Book => {
+                if let Some(b) = self.book.as_ref() {
+                    crate::books::draw(&mut gui, b, mx, my, (sys::now_ms() / 300) % 2 == 0);
+                }
+            }
             Screen::Creative => {
                 if let Some(d) = gui.creative.take() {
                     self.creative.draw(&d, &mut gui, g, mx, my);

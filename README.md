@@ -50,6 +50,15 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   tab of the game, scrolling, search (names, tooltips, ids, `#tags`), the survival inventory tab
   with its destroy slot, saved hotbars (C/X + number), and stacks with their components (enchanted
   books, potions, paintings...) sent to the server as vanilla sends them.
+- **Every other container screen** as vanilla lays it out, from `containers.bin` (optional):
+  anvils (the name field, the cost), enchanting tables (the three offers in the runes, lapis,
+  the clue tooltips), brewing stands (bubbles, fuel), beacons (the powers, confirm), grindstones,
+  stonecutters (the server's recipes), looms (the patterns), smithing tables (the template
+  icons), cartography tables (the map previews), crafters (slot toggles), merchants (the trade
+  list, scrolling, the level bar, out of stock), horse, donkey and llama inventories, lecterns,
+  and the furnaces' flame and arrow. Books: written books open to read, a book and quill opens
+  to write (pages, signing). Maps: the server's map colours and markers, held in one hand or
+  both, and in item frames; item frames and glow item frames show what they hold.
 - **Plays as vanilla**: walking, sprinting, sneaking (no falling off edges), jumping, swimming,
   creative flight (ends on landing), the 0.6-block step, climbing ladders, vines and scaffolding,
   crouching where standing does not fit, and every block's own collision shape from the game
@@ -168,13 +177,16 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   splashes are not drawn yet.
 - Mobs: no armour trims or dyed leather colours, no heads or pumpkins worn, no shields or other
   specially drawn items in hands, no crouching or swimming player poses, no elytra.
-- Only menus listed above have their own screen; others show their slots as chest rows.
+- No enchanting book model, smithing armour stand or mount model in their screens; the stonecutter does not resolve recipe inputs given as tags; a held map is drawn
+  without the arms holding it.
 - Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);
   no elytra, and Dinnerbone and Grumm stand the right way up.
 - Tooltips have no potion effects, book authors, firework or banner lines for stacks whose
   components the server changed; italics and bold are drawn as plain text; no advanced tooltips
   (F3+H). The spectator hotbar menu (teleporting to players) and seeing invisible entities as
   spectator are not done; can_break and can_place_on check blocks and tags, not block states.
+- Item stacks with unusual data components (some potions and other rare ones) can hide the slots after
+  them in a container until the server sends them again.
 
 ## Building (on Linux)
 
@@ -201,7 +213,7 @@ secure chat: `POST /certificates`):
 PENRYN_MSA_CLIENT_ID=<your client id> python3 tools/relay.py      # port 25580
 ```
 
-It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`, `effects.bin`, `weather.bin`, `signs.bin`, `particles.bin`, `menu.bin`, `serverui.bin`) from
+It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`, `effects.bin`, `weather.bin`, `signs.bin`, `particles.bin`, `menu.bin`, `serverui.bin`, `containers.bin`) from
 your own copy of Minecraft: the 26.3 client jar from an existing install (Horizon's launcher, the
 official launcher, Prism), or downloaded from Mojang for a signed-in account that owns the game,
 plus the data Horizon's `horizon-prepare` writes (install a Horizon release with its launcher).
@@ -277,6 +289,7 @@ E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
 | `src/weather.rs` | rain, snow, thunder and lightning |
 | `src/particles.rs` | particles (vanilla's ParticleEngine) |
 | `src/gui.rs`, `screens.rs`, `lang.rs` | vanilla's GUI |
+| `src/menus.rs`, `books.rs`, `maps.rs` | the other container screens, books, maps and item frames |
 | `src/play.rs`, `physics.rs` | the game window, input, movement, digging |
 | `src/effects.rs`, `moving.rs` | status effects; pistons and shulker lids in motion |
 | `src/serverui.rs`, `serverhud.rs` | tab list, scoreboard, teams, boss bars, titles, world border, links, cookies, transfers |

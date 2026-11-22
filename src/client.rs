@@ -114,6 +114,9 @@ pub struct Game {
     pub talk: crate::talk::Talk,
     /// The tab list, scoreboard, teams, boss bars, titles, world border... (serverui.rs).
     pub ui: crate::serverui::ServerUi,
+    /// The container screens' own state (menus.rs) and the maps the server sent (maps.rs).
+    pub menus: crate::menus::State,
+    pub maps: crate::maps::Maps,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -137,7 +140,7 @@ pub struct Container {
     pub menu: i32,
     pub title: String,
     pub slots: Vec<Option<(i32, i32)>>,
-    /// Each slot's component patch (creative.rs's delimited form), for tooltips.
+    /// Each slot's component patch (creative::read_stack's form; empty when unknown).
     pub patches: Vec<Vec<u8>>,
     pub state: i32,
 }
@@ -380,6 +383,8 @@ impl Game {
             reconfigure: false,
             talk: crate::talk::Talk::new(),
             ui: su,
+            menus: crate::menus::State::new(),
+            maps: crate::maps::Maps::new(),
         })
     }
 
@@ -661,7 +666,8 @@ impl Game {
             play::C_CONTAINER_SET_CONTENT => {
                 let id = r.varint().unwrap_or(-1);
                 let state = r.varint().unwrap_or(0);
-                let n = r.varint().unwrap_or(0).max(0) as usize;
+                // Every slot takes at least a byte: a count past the packet's end is a bad one.
+                let n = (r.varint().unwrap_or(0).max(0) as usize).min(r.left());
                 let mut ok = true;
                 let mut got: Vec<Option<(i32, i32)>> = Vec::with_capacity(n);
                 let mut patches: Vec<Vec<u8>> = Vec::with_capacity(n);
@@ -700,12 +706,12 @@ impl Game {
                     if c.patches.len() < n {
                         c.patches.resize(n, Vec::new());
                     }
-                    let own = n.saturating_sub(36);
+                    let own = crate::menus::player_start(c.menu, n);
                     for (i, it) in got.into_iter().enumerate() {
                         c.slots[i] = it;
                         c.patches[i] = patches.get(i).cloned().unwrap_or_default();
                         // The player's own rows at the bottom of every container.
-                        if i >= own {
+                        if i >= own && i < own + 36 {
                             let k = i - own;
                             let menu = if k < 27 { 9 + k } else { 36 + k - 27 };
                             if menu < 46 {
@@ -735,10 +741,10 @@ impl Game {
                         if c.slots.len() <= i as usize {
                             c.slots.resize(i as usize + 1, None);
                         }
-                        c.slots[i as usize] = item;
                         if c.patches.len() <= i as usize {
                             c.patches.resize(i as usize + 1, Vec::new());
                         }
+                        c.slots[i as usize] = item;
                         c.patches[i as usize] = patch;
                     }
                 }
@@ -752,6 +758,7 @@ impl Game {
                 let id = r.varint().unwrap_or(0);
                 let menu = r.varint().unwrap_or(0);
                 let title = nbt::text(&mut r);
+                self.menus.opened();
                 self.container = Some(Container { id, menu, title, slots: Vec::new(), patches: Vec::new(), state: 0 });
             }
             play::C_CONTAINER_CLOSE => {
@@ -798,7 +805,12 @@ impl Game {
                 let pitch = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
                 let yaw = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
                 let head = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
-                self.entities.insert(id, crate::entities::Entity::new(kind, uuid, pos, yaw, pitch, head));
+                let mut e = crate::entities::Entity::new(kind, uuid, pos, yaw, pitch, head);
+                if crate::maps::is_frame(kind) {
+                    // An item frame's facing (Direction.get3DDataValue).
+                    e.data.insert(crate::maps::SPAWN_DATA, r.varint().unwrap_or(3) as i64);
+                }
+                self.entities.insert(id, e);
             }
             play::C_REMOVE_ENTITIES => {
                 let n = r.varint().unwrap_or(0);
@@ -1015,7 +1027,13 @@ impl Game {
                 self.packs.flush(&mut self.conn, play::S_RESOURCE_PACK)?;
             }
             play::C_RESOURCE_PACK_POP => self.packs.on_pop(&mut r),
-            _ => {}
+            crate::maps::C_MAP_ITEM_DATA => {
+                let _ = self.maps.packet(&mut r);
+            }
+            crate::books::C_OPEN_BOOK => self.menus.open_book = Some(r.varint().unwrap_or(0)),
+            id => {
+                crate::menus::packet(self, id, &mut r);
+            }
         }
         Ok(())
     }
@@ -1370,8 +1388,18 @@ pub(crate) fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option
                 }
             }
             7 => {
+                let start = r.pos;
                 let (item, ok) = slot(r)?;
                 e.item = item;
+                // A framed map: its id, for the frame to draw it.
+                match crate::maps::map_id_in_stack(&r.b[start..r.pos]) {
+                    Some(m) if crate::maps::is_frame(e.kind) => {
+                        e.data.insert(crate::maps::FRAMED_MAP, m as i64);
+                    }
+                    _ => {
+                        e.data.remove(&crate::maps::FRAMED_MAP);
+                    }
+                }
                 if !ok {
                     return None;
                 }
@@ -1438,6 +1466,21 @@ fn list(r: &mut In, f: fn(&mut In) -> Option<()>) -> Option<()> {
     Some(())
 }
 
+/// MobEffectInstance.Details: amplifier, duration, ambient, particles, icon, then the hidden
+/// effect's details (nested at most 16 deep here).
+fn effect_details(r: &mut In, depth: u32) -> Option<()> {
+    if depth > 16 {
+        return None;
+    }
+    r.varint()?;
+    r.varint()?;
+    r.take(3)?;
+    if r.bool()? {
+        effect_details(r, depth + 1)?;
+    }
+    Some(())
+}
+
 fn ident(r: &mut In) -> Option<()> {
     r.string().map(drop)
 }
@@ -1470,8 +1513,25 @@ fn sound(r: &mut In) -> Option<()> {
 /// not handled here.
 pub(crate) fn skip_component(kind: i32, r: &mut In) -> Option<()> {
     match kind {
-        // custom_data, custom_name, item_name: NBT
-        0 | 6 | 9 | 61 => nbt::skip_root(r),
+        // custom_data, custom_name, item_name, bucket_entity_data, map_decorations: NBT
+        0 | 6 | 9 | 61 | 49 => nbt::skip_root(r),
+        // writable_book_content: Filterable pages; written_book_content: title, author,
+        // generation, Filterable component pages, resolved
+        56 => list(r, |r| {
+            r.string()?;
+            opt(r, |r| r.string().map(drop))
+        }),
+        57 => {
+            r.string()?;
+            opt(r, |r| r.string().map(drop))?;
+            r.string()?;
+            r.varint()?;
+            list(r, |r| {
+                nbt::skip_root(r)?;
+                opt(r, nbt::skip_root)
+            })?;
+            r.bool().map(drop)
+        }
         // max_stack_size, max_damage, damage, rarity, repair_cost, map ids, and the VarInt ones
         1 | 2 | 3 | 12 | 19 | 48 | 50 | 65 | 8 | 31 | 42 | 43 | 44 | 46 | 75 | 88..=108 | 110..=117 | 121 => r.varint().map(drop),
         // unbreakable, creative_slot_lock, glider, waxed: nothing
@@ -1539,6 +1599,26 @@ pub(crate) fn skip_component(kind: i32, r: &mut In) -> Option<()> {
             r.varint().map(drop)
         }
         47 => r.take(4).map(drop),
+        // potion_contents (brewing stands, potions in chests): the potion, a custom colour,
+        // custom effects, a custom name
+        53 => {
+            opt(r, |r| r.varint().map(drop))?;
+            opt(r, |r| r.take(4).map(drop))?;
+            list(r, |r| {
+                r.varint()?;
+                effect_details(r, 0)
+            })?;
+            opt(r, ident)
+        }
+        // banner_patterns: layers of a pattern holder (an id plus one, or 0 and its asset id
+        // and translation key) and a DyeColor
+        74 => list(r, |r| {
+            if r.varint()? == 0 {
+                r.string()?;
+                r.string()?;
+            }
+            r.varint().map(drop)
+        }),
         // block_entity_data, entity_data: the type, then a compound
         60 | 62 => {
             r.varint()?;

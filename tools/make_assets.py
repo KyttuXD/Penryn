@@ -1966,6 +1966,7 @@ def main():
     make_weather(res, assets, out_dir, reg)
     make_menu(res, assets, out_dir)
     make_serverui(assets, out_dir, res, reg)
+    make_containers(assets, out_dir, reg)
     print("blocks.bin: %d states, %d blocks, %d quads; atlas %dx%d with %d textures%s"
           % (len(state_rows), len(blocks_out), len(quads), width, height, len(tiles),
              (", missing: " + ", ".join(sorted(missing))) if missing else ""))
@@ -2082,6 +2083,368 @@ def make_menu(res, assets, out_dir):
     print("menu.bin: %d images (%s panorama), %d sprites, %d splashes"
           % (len(images), "with" if any(im[0] == "panorama_0" for im in images) else "no", len(sprites),
              splashes.count(b"\n")))
+def class_ops(data, method):
+    """The bytecode of one method of a class file as (opcode name, operand) pairs: ldc and
+    push operands resolved to their values, the rest left as None (enough to read constant
+    tables out of vanilla's classes)."""
+    p = 8
+    n = struct.unpack(">H", data[p:p + 2])[0]
+    p += 2
+    cp = [None] * n
+    i = 1
+    while i < n:
+        t = data[p]
+        p += 1
+        if t == 1:
+            l = struct.unpack(">H", data[p:p + 2])[0]
+            cp[i] = data[p + 2:p + 2 + l].decode("utf8", "replace")
+            p += 2 + l
+        elif t == 3:
+            cp[i] = struct.unpack(">i", data[p:p + 4])[0]
+            p += 4
+        elif t == 4:
+            p += 4
+        elif t in (5, 6):
+            p += 8
+            i += 1
+        elif t == 8:
+            cp[i] = ("str", struct.unpack(">H", data[p:p + 2])[0])
+            p += 2
+        elif t in (7, 16, 19, 20):
+            p += 2
+        elif t == 15:
+            p += 3
+        else:
+            p += 4
+        i += 1
+    val = lambda k: cp[cp[k][1]] if isinstance(cp[k], tuple) else cp[k]
+    p += 6
+    p += 2 + 2 * struct.unpack(">H", data[p:p + 2])[0]
+
+    def attrs(p):
+        out = []
+        cnt = struct.unpack(">H", data[p:p + 2])[0]
+        p += 2
+        for _ in range(cnt):
+            nm, l = struct.unpack(">HI", data[p:p + 6])
+            out.append((cp[nm], data[p + 6:p + 6 + l]))
+            p += 6 + l
+        return p, out
+
+    nf = struct.unpack(">H", data[p:p + 2])[0]
+    p += 2
+    for _ in range(nf):
+        p, _a = attrs(p + 6)
+    ops = []
+    nm_ = struct.unpack(">H", data[p:p + 2])[0]
+    p += 2
+    for _ in range(nm_):
+        nm = cp[struct.unpack(">H", data[p + 2:p + 4])[0]]
+        p, at = attrs(p + 6)
+        if nm != method:
+            continue
+        for an, ab in at:
+            if an != "Code":
+                continue
+            code = ab[8:8 + struct.unpack(">I", ab[4:8])[0]]
+            q = 0
+            # Operand lengths of the opcodes (tableswitch and lookupswitch handled below).
+            two = set(range(0x13, 0x15)) | {0x11} | set(range(0x99, 0xA9)) | set(range(0xB2, 0xB9)) | {0xBB, 0xBD, 0xC0, 0xC1, 0xC6, 0xC7, 0x84}
+            one = {0x10, 0x12, 0xBC, 0xA9} | set(range(0x15, 0x1A)) | set(range(0x36, 0x3B))
+            while q < len(code):
+                op = code[q]
+                if op == 0x10:
+                    ops.append(("push", struct.unpack(">b", code[q + 1:q + 2])[0]))
+                elif op == 0x11:
+                    ops.append(("push", struct.unpack(">h", code[q + 1:q + 3])[0]))
+                elif 0x02 <= op <= 0x08:
+                    ops.append(("push", op - 3))
+                elif op == 0x12:
+                    ops.append(("push", val(code[q + 1])))
+                elif op in (0x13, 0x14):
+                    ops.append(("push", val(struct.unpack(">H", code[q + 1:q + 3])[0])))
+                else:
+                    ops.append((op, None))
+                if op == 0xAA:
+                    q2 = (q + 4) & ~3
+                    lo, hi = struct.unpack(">ii", code[q2 + 4:q2 + 12])
+                    q = q2 + 12 + 4 * (hi - lo + 1)
+                elif op == 0xAB:
+                    q2 = (q + 4) & ~3
+                    q = q2 + 8 + 8 * struct.unpack(">i", code[q2 + 4:q2 + 8])[0]
+                elif op == 0xC4:
+                    q += 6 if code[q + 1] == 0x84 else 4
+                elif op in (0xB9, 0xBA, 0xC8, 0xC9):
+                    q += 5
+                elif op == 0xC5:
+                    q += 4
+                elif op in two:
+                    q += 3 if op != 0x84 else 3
+                elif op in one:
+                    q += 2
+                else:
+                    q += 1
+    return ops
+
+
+def make_containers(assets, out_dir, reg):
+    """containers.bin, "PNC1" (little-endian): what the container screens Penryn draws itself
+    need beyond gui.bin (anvil, beacon, brewing stand, enchanting table, grindstone, loom,
+    merchant, smithing, stonecutter, cartography, crafter, horse, books), maps and item frames.
+    Optional: without it those menus show their slots as chest rows and maps stay blank.
+
+        u16 width, u16 height, width x height RGBA (the sprites)
+        u16 sprites; per sprite: u8 name length, name, u16 x, y, w, h
+        u16 glyphs of the enchanting table's alt font (ascii_sga); per glyph: u16 code point,
+            u16 x, y, u8 cell width, cell height, advance
+        u16 length, the EnchantmentNames words (space separated)
+        u8 map colours (MapColor ids); per colour: u32 RGB
+        u8 banner patterns without an item (the no_item_required tag, in order); per one:
+            u8 length, name. u8 pattern items; per item: u8 length, item name, u8 patterns,
+            each u8 length, name
+        u8 item frame models (item_frame, item_frame_map, glow_item_frame,
+            glow_item_frame_map); per model: u16 quads; per quad: 4 x (f32 x, y, z in block
+            units, f32 u, v in the atlas), f32 shade
+        u8 map decoration types (registry order); per type: u8 length, sprite name
+            (map/decorations/<name>), u8 shown in item frames
+    """
+    jar = assets.zip
+    sprites = {}
+
+    def add(name, rel, crop=None):
+        img = png_decode(assets.read("textures/" + rel + ".png"))
+        if img is None:
+            return False
+        w, h, px = img
+        if crop:
+            cw, ch = min(crop[0], w), min(crop[1], h)
+            out = bytearray()
+            for y in range(ch):
+                out += px[(y * w) * 4:(y * w + cw) * 4]
+            w, h, px = cw, ch, bytes(out)
+        sprites[name] = (w, h, px)
+        return True
+
+    for name, crop in (("anvil", (176, 166)), ("beacon", (230, 219)), ("brewing_stand", (176, 166)),
+                       ("cartography_table", (176, 166)), ("crafter", (176, 166)), ("enchanting_table", (176, 166)),
+                       ("grindstone", (176, 166)), ("horse", (176, 166)), ("loom", (176, 166)), ("smithing", (176, 166)),
+                       ("stonecutter", (176, 166)), ("villager", (276, 166))):
+        add("bg/" + name, "gui/container/" + name, crop)
+    add("bg/book", "gui/book", (192, 192))
+    add("container/slot", "gui/sprites/container/slot")
+    def raw(path):
+        if jar:
+            try:
+                return jar.read(path)
+            except KeyError:
+                return None
+        try:
+            with open(os.path.join(assets.folder, path), "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    if jar:
+        listing = jar.namelist()
+    else:
+        listing = []
+        for top in ("assets", "data"):
+            for root, _, files in os.walk(os.path.join(assets.folder, top)):
+                for fn in files:
+                    listing.append(os.path.relpath(os.path.join(root, fn), assets.folder).replace(os.sep, "/"))
+    for full in listing:
+        for folder in ("anvil", "beacon", "brewing_stand", "cartography_table", "crafter", "enchanting_table", "grindstone",
+                       "horse", "loom", "smithing", "stonecutter", "villager"):
+            pre = "assets/minecraft/textures/gui/sprites/container/%s/" % folder
+            if full.startswith(pre) and full.endswith(".png"):
+                rel = full[len("assets/minecraft/textures/"):-4]
+                add(rel[len("gui/sprites/"):], rel)
+        pre = "assets/minecraft/textures/map/decorations/"
+        if full.startswith(pre) and full.endswith(".png"):
+            add("map/decorations/" + full[len(pre):-4], "map/decorations/" + full[len(pre):-4])
+    add("map/background", "map/map_background")
+    add("map/checkerboard", "map/map_background_checkerboard")
+    for t in ("item_frame", "glow_item_frame", "birch_planks"):
+        add("block/" + t, "block/" + t)
+    # The banner patterns' flags (u 1..21, v 1..41 of their 64 x 64 textures), for the loom.
+    patterns = sorted(reg.get("minecraft:banner_pattern", {}).get("entries", {}))
+    names = set()
+    for full in listing:
+        pre = "assets/minecraft/textures/entity/banner/"
+        if full.startswith(pre) and full.endswith(".png") and "/" not in full[len(pre):]:
+            names.add(full[len(pre):-4])
+    for n in sorted(names):
+        img = png_decode(assets.read("textures/entity/banner/%s.png" % n))
+        if img is None or img[0] != 64:
+            continue
+        w, h, px = img
+        out = bytearray()
+        for y in range(1, 41):
+            out += px[(y * w + 1) * 4:(y * w + 21) * 4]
+        sprites["banner/" + n] = (20, 40, bytes(out))
+    # The alt font's glyphs (BitmapProvider's widths).
+    glyph_rows = []
+    font = assets.json("font/alt.json") or {}
+    sga = None
+    for pr in font.get("providers", []):
+        if pr.get("type") == "bitmap":
+            sga = pr
+    if sga:
+        img = png_decode(assets.read("textures/" + sga["file"].split(":", 1)[-1]))
+        if img:
+            w, h, px = img
+            rows = sga["chars"]
+            cw, chh = w // max(len(r) for r in rows), h // len(rows)
+            sprites["font/sga"] = (w, h, px)
+            for ry, row in enumerate(rows):
+                for rx, ch in enumerate(row):
+                    if ord(ch) == 0:
+                        continue
+                    gwid = 0
+                    for gx in range(cw - 1, -1, -1):
+                        if any(px[((ry * chh + gy) * w + rx * cw + gx) * 4 + 3] for gy in range(chh)):
+                            gwid = gx + 1
+                            break
+                    glyph_rows.append((ord(ch), rx * cw, ry * chh, cw, chh, int(0.5 + gwid * 8 / chh) + 1))
+
+    def cls(path):
+        if not jar:
+            return None
+        try:
+            return jar.read(path)
+        except KeyError:
+            return None
+
+    words = []
+    d = cls("net/minecraft/client/gui/screens/inventory/EnchantmentNames.class")
+    if d:
+        words = [v for k, v in class_ops(d, "<init>") if k == "push" and isinstance(v, str)]
+    colours = {}
+    d = cls("net/minecraft/world/level/material/MapColor.class")
+    if d:
+        ops = class_ops(d, "<clinit>")
+        for i in range(len(ops) - 3):
+            # new MapColor, dup, id, colour, invokespecial
+            if ops[i][0] == 0xBB and ops[i + 1][0] == 0x59 and ops[i + 2][0] == "push" and ops[i + 3][0] == "push" \
+                    and ops[i + 4][0] == 0xB7 and isinstance(ops[i + 2][1], int) and isinstance(ops[i + 3][1], int):
+                colours[ops[i + 2][1]] = ops[i + 3][1] & 0xFFFFFF
+    # MapDecorationTypes: each type's sprite and whether item frames show it, by registry id.
+    decorations = []
+    d = cls("net/minecraft/world/level/saveddata/maps/MapDecorationTypes.class")
+    if d:
+        ops = class_ops(d, "<clinit>")
+        ids = reg.get("minecraft:map_decoration_type", {}).get("entries", {})
+        found = {}
+        for i in range(len(ops) - 3):
+            a, b, c_, e = ops[i:i + 4]
+            if a[0] == b[0] == c_[0] == e[0] == "push" and isinstance(a[1], str) and isinstance(b[1], str) \
+                    and isinstance(c_[1], int) and isinstance(e[1], int) and ("minecraft:" + a[1]) in ids:
+                found[ids["minecraft:" + a[1]]["protocol_id"]] = (b[1], c_[1])
+        decorations = [found.get(i, ("", 0)) for i in range(max(found) + 1)] if found else []
+    loom_free = []
+    t = raw("data/minecraft/tags/banner_pattern/no_item_required.json")
+    t = json.loads(t) if t else None
+    if t:
+        loom_free = [v.split(":", 1)[-1] for v in t.get("values", []) if not v.startswith("#")]
+    loom_items = []
+    for full in listing:
+        pre = "data/minecraft/tags/banner_pattern/pattern_item/"
+        if full.startswith(pre) and full.endswith(".json"):
+            key = full[len(pre):-5]
+            vals = [v.split(":", 1)[-1] for v in json.loads(raw(full)).get("values", []) if not v.startswith("#")]
+            loom_items.append((key + "_banner_pattern", vals))
+
+    # Item frame models: template_item_frame(_map) with their textures.
+    frame_models = []
+    for name in ("item_frame", "item_frame_map", "glow_item_frame", "glow_item_frame_map"):
+        m = assets.json("models/block/%s.json" % name) or {}
+        texs = dict(m.get("textures", {}))
+        parent = assets.json("models/block/%s.json" % m.get("parent", "").split("/")[-1]) or {}
+        frame_models.append((texs, parent.get("elements", [])))
+
+    # Shelf-pack.
+    order = sorted(sprites, key=lambda k: -sprites[k][1])
+    aw = 1024
+    placed = {}
+    x = y = shelf = 0
+    for k in order:
+        w, h, _ = sprites[k]
+        if x + w > aw:
+            x, y, shelf = 0, y + shelf, 0
+        placed[k] = (x, y)
+        x += w + 1
+        shelf = max(shelf, h + 1)
+    ah = 1
+    while ah < y + shelf:
+        ah *= 2
+    atlas = bytearray(aw * ah * 4)
+    for k, (sx, sy) in placed.items():
+        w, h, px = sprites[k]
+        for j in range(h):
+            atlas[((sy + j) * aw + sx) * 4:((sy + j) * aw + sx + w) * 4] = px[j * w * 4:(j + 1) * w * 4]
+
+    out = bytearray(b"PNC1" + struct.pack("<HH", aw, ah)) + atlas
+    out += struct.pack("<H", len(placed))
+    for k in sorted(placed):
+        nb = k.encode()
+        w, h, _ = sprites[k]
+        out += bytes([len(nb)]) + nb + struct.pack("<4H", placed[k][0], placed[k][1], w, h)
+    fx, fy = placed.get("font/sga", (0, 0))
+    out += struct.pack("<H", len(glyph_rows))
+    for cp, gx, gy, cw, chh, adv in glyph_rows:
+        out += struct.pack("<HHHBBB", cp, fx + gx, fy + gy, cw, chh, adv)
+    wb = " ".join(words).encode()
+    out += struct.pack("<H", len(wb)) + wb
+    n = max(colours) + 1 if colours else 0
+    out += bytes([n])
+    for i in range(n):
+        out += struct.pack("<I", colours.get(i, 0))
+
+    def strs(lst):
+        b = bytes([len(lst)])
+        for s_ in lst:
+            sb = s_.encode()
+            b += bytes([len(sb)]) + sb
+        return b
+
+    out += strs(loom_free)
+    out += bytes([len(loom_items)])
+    for item, vals in sorted(loom_items):
+        ib = item.encode()
+        out += bytes([len(ib)]) + ib + strs(vals)
+    out += bytes([len(frame_models)])
+    for texs, elements in frame_models:
+        quads = []
+        for el in elements:
+            f, t = el["from"], el["to"]
+            for dname, face in el.get("faces", {}).items():
+                tex = texs.get(face.get("texture", "").lstrip("#"), "")
+                key = "block/" + tex.split("/")[-1]
+                if key not in placed:
+                    continue
+                sx, sy = placed[key]
+                uv = face.get("uv") or default_uv(dname, f, t)
+                vs = []
+                for p_, (s_, t_) in face_corners(dname, f, t):
+                    u = (sx + (uv[0] + (uv[2] - uv[0]) * s_)) / aw
+                    v = (sy + (uv[1] + (uv[3] - uv[1]) * t_)) / ah
+                    vs.append((p_[0] / 16, p_[1] / 16, p_[2] / 16, u, v))
+                quads.append((vs, SHADE[dname]))
+        out += struct.pack("<H", len(quads))
+        for vs, sh in quads:
+            for v in vs:
+                out += struct.pack("<5f", *v)
+            out += struct.pack("<f", sh)
+    out += bytes([len(decorations)])
+    for asset, on_frame in decorations:
+        ab = asset.encode()
+        out += bytes([len(ab)]) + ab + bytes([on_frame])
+    with open(os.path.join(out_dir, "containers.bin"), "wb") as f:
+        f.write(out)
+    print("containers.bin: %d sprites (atlas %dx%d), %d alt glyphs, %d words, %d map colours, %d+%d banner patterns, "
+          "%d map decorations" % (len(placed), aw, ah, len(glyph_rows), len(words), n, len(loom_free), len(loom_items),
+                                  len(decorations)))
+
 
 def make_weather(res, assets, out_dir, reg):
     """weather.bin, "PNW1" (little-endian): u16 the lightning_bolt entity type id; rain.png and

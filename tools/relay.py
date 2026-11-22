@@ -17,7 +17,7 @@ Penryn asks this relay, over plain HTTP on the local network, to do them:
     POST /pack/bake, GET /pack/files/...);
   * fetch the account's chat key pair (the services' player certificates), which Penryn signs
     its chat with on servers that enforce secure chat;
-  * serve the game files Penryn draws with (blocks.bin, atlas.bin, gui.bin, entities.bin, signs.bin, weather.bin, effects.bin, particles.bin, menu.bin, serverui.bin and sounds.bin), made from your own copy
+  * serve the game files Penryn draws with (blocks.bin, atlas.bin, gui.bin, entities.bin, signs.bin, weather.bin, effects.bin, particles.bin, menu.bin, serverui.bin, containers.bin and sounds.bin), made from your own copy
     of Minecraft 26.3: an existing install (Horizon's launcher, the official launcher, Prism),
     or the 26.3 client downloaded from Mojang for your signed-in account (as Horizon does).
 
@@ -291,7 +291,8 @@ class Relay:
 
     def build_assets(self, token=None):
         out = os.path.join(self.data_dir, "assets")
-        names = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin", "menu.bin", "serverui.bin")
+        names = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin", "menu.bin", "serverui.bin",
+                 "containers.bin")
         tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_assets.py")
         # Made again when the tool is newer (another format) than the files.
         if all(os.path.isfile(os.path.join(out, n)) and os.path.getmtime(os.path.join(out, n)) >= os.path.getmtime(tool)
@@ -559,7 +560,7 @@ def make_handler(relay):
                 except Exception as e:  # noqa: BLE001 - reported to the client
                     return self.reply(500, str(e))
             if self.path in ("/assets/blocks.bin", "/assets/atlas.bin", "/assets/gui.bin", "/assets/entities.bin",
-                             "/assets/weather.bin", "/assets/signs.bin", "/assets/particles.bin", "/assets/menu.bin", "/assets/serverui.bin"):
+                             "/assets/weather.bin", "/assets/signs.bin", "/assets/particles.bin", "/assets/menu.bin", "/assets/serverui.bin", "/assets/containers.bin"):
                 try:
                     d = relay.build_assets()
                     with open(os.path.join(d, self.path.rsplit("/", 1)[1]), "rb") as f:
