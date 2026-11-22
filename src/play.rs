@@ -1145,7 +1145,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.last_input = flags;
             g.send_input(flags)?;
         }
-        let keys = crate::riding::Keys { forward: k(K_W), back: k(K_S), left: k(K_A), right: k(K_D), jump: k(K_SPACE), shift, sprint: self.sprinting };
+        // PENRYN_TEST_INPUT "J": jump held 10 ticks out of every 40 (a horse's jump bar).
+        let pulse = self.test_keys.contains('J') && g.game_time % 40 < 10;
+        let keys = crate::riding::Keys { forward: k(K_W), back: k(K_S), left: k(K_A), right: k(K_D), jump: k(K_SPACE) || pulse, shift, sprint: self.sprinting };
         let riding = match self.entities.as_ref() {
             Some(t) => self.ride.tick(g, t, keys, &mut self.mover)?,
             None => false,

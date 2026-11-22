@@ -38,6 +38,8 @@ pub const START_FALL_FLYING: i32 = 6;
 pub const D_PADDLE_LEFT: u8 = 0xF0;
 pub const D_PADDLE_RIGHT: u8 = 0xF1;
 pub const D_RIDING: u8 = 0xF2;
+/// Ticks in the gliding or riptide pose (the model leans in over the first 10).
+pub const D_FLY_TICKS: u8 = 0xF3;
 
 /// Avatar.DEFAULT_VEHICLE_ATTACHMENT.
 pub const PLAYER_VEHICLE_ATTACHMENT: f64 = 0.6;
@@ -356,11 +358,17 @@ pub fn seat_passengers(g: &mut Game, t: &EntityTable) {
             }
         }
     }
-    // Riders that got off stand again.
+    // Riders that got off stand again; gliders count their ticks.
     let riding = &g.riding.vehicle_of;
     for (id, e) in g.entities.iter_mut() {
         if e.data.contains_key(&D_RIDING) && !riding.contains_key(id) {
             e.data.remove(&D_RIDING);
+        }
+        let pose = e.data.get(&6).copied().unwrap_or(0);
+        if pose == crate::poses::FALL_FLYING || pose == crate::poses::SPIN_ATTACK {
+            *e.data.entry(D_FLY_TICKS).or_insert(0) += 1;
+        } else if e.data.contains_key(&D_FLY_TICKS) {
+            e.data.remove(&D_FLY_TICKS);
         }
     }
 }
@@ -514,7 +522,7 @@ impl Rider {
             self.mount = Mover::new(e.pos);
             self.mount.dims = Some((w as f64, h as f64));
             if crate::sys::env("PENRYN_DEBUG").is_some() {
-                crate::say!("riding {} {} ({:?})", name, vid, kind);
+                crate::say!("riding {} {} ({:?}), attributes {:?}", name, vid, kind, g.riding.attrs.get(&vid));
             }
         }
         let index = g.riding.passengers.get(&vid).and_then(|l| l.iter().position(|&p| p == me)).unwrap_or(0);

@@ -28,6 +28,7 @@ mod mobs;
 mod nbt;
 mod physics;
 mod play;
+mod poses;
 mod render;
 mod riding;
 mod screens;
