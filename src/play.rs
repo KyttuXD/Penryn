@@ -839,6 +839,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 None => crate::creative::Action::None,
             };
             self.creative_action(g, act)?;
+        } else if self.screen == Screen::Inventory && !self.container_screen && g.game_mode == 1 && self.gui.as_ref().map_or(false, |x| x.creative.is_some()) {
+            // InventoryScreen.containerTick: in creative it becomes the creative screen.
+            self.open_inventory(g, '\0');
         }
         if self.test_keys.contains('I') && self.screen == Screen::Play && g.loaded_sent {
             self.open_inventory(g, 'i');

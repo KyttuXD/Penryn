@@ -549,9 +549,9 @@ impl Inv {
         }
     }
 
-    /// doClick's SWAP with hotbar slot `k`.
+    /// doClick's SWAP with hotbar slot `k` (40: the offhand).
     pub fn swap(&mut self, d: &Data, s: usize, k: usize) {
-        let h = 36 + k.min(8);
+        let h = menu_of_swap(k as i32);
         if h == s {
             return;
         }
@@ -565,11 +565,10 @@ impl Inv {
         self.slots[h] = a;
     }
 
-    /// doClick's THROW: one, or the stack, thrown out.
+    /// THROW on an inventory slot: one, or the stack, thrown out. The creative screen does it
+    /// whether or not the cursor holds a stack (slotClicked's inventory-tab THROW, and its
+    /// hotbar-row THROW after ItemPickerMenu.clicked).
     pub fn throw(&mut self, s: usize, all: bool) {
-        if self.carried.is_some() {
-            return;
-        }
         if let Some(mut x) = self.slots[s].take() {
             let n = if all { x.count } else { 1 };
             self.drops.push(x.with(n));
@@ -600,7 +599,7 @@ impl Inv {
             Input::Swap(k) => {
                 if let Some(it) = item {
                     let n = max(&it);
-                    self.slots[36 + k.clamp(0, 8) as usize] = Some(it.with(n));
+                    self.slots[menu_of_swap(k)] = Some(it.with(n));
                 }
             }
             Input::Clone => {
@@ -662,7 +661,10 @@ impl Inv {
                 }
             }
             Hit::Outside => match input {
-                Input::Pickup(b) | Input::QuickMove(b) => self.throw_carried(b),
+                // slotClicked turns PICKUP at -999 into THROW: the inventory tab's THROW path
+                // drops the whole cursor stack whatever the button; the other tabs drop the
+                // stack (left) or one of it (right).
+                Input::Pickup(b) | Input::QuickMove(b) => self.throw_carried(if inventory_tab { 0 } else { b }),
                 _ => {}
             },
             Hit::Grid(_) => self.grid(d, item, input),
@@ -688,6 +690,15 @@ impl Inv {
             },
             Hit::None => {}
         }
+    }
+}
+
+/// The inventory-menu slot of a SWAP's button: hotbar 0-8, or 40 (the offhand key).
+fn menu_of_swap(k: i32) -> usize {
+    if k == 40 {
+        45
+    } else {
+        36 + k.clamp(0, 8) as usize
     }
 }
 
@@ -887,8 +898,11 @@ impl Screen {
                 return (h, Some((x, y)));
             }
         }
+        // hasClickedOutside: outside the window. Its exception for the selected tab compares the
+        // absolute mouse position with window-relative tab bounds, so it never applies: a
+        // right click on a tab throws (a left click is the tab's).
         let outside = mx < left || my < top || mx >= left + W || my >= top + H;
-        if outside && self.tab_at(d, gui, mx, my, false).is_none() {
+        if outside {
             (Hit::Outside, None)
         } else {
             (Hit::None, None)
@@ -1065,10 +1079,9 @@ impl Screen {
     /// A key (repeats included): what the screen does with it.
     pub fn key(&mut self, d: &Data, gui: &Gui, g: &mut Game, sc: usize, repeat: bool, keys: &[bool; 512], mouse: (f32, f32)) -> Result<Action, String> {
         const K_E: usize = 8;
-        const K_C: usize = 6;
+        const K_F: usize = 9;
         const K_Q: usize = 20;
         const K_T: usize = 23;
-        const K_X: usize = 27;
         const K_1: usize = 30;
         const K_ESC: usize = 41;
         const K_BACKSPACE: usize = 42;
@@ -1087,23 +1100,24 @@ impl Screen {
             return Ok(Action::None);
         }
         let (hit, _) = self.hit(d, gui, mouse.0, mouse.1);
-        if (K_1..K_1 + 9).contains(&sc) {
-            let k = (sc - K_1) as i32;
-            if keys[K_C] || keys[K_X] {
-                self.hotbar_load_or_save(d, g, k as usize, keys[K_X])?;
-                self.ignore_text = Some(((b'1' + k as u8) as char, crate::sys::now_ms()));
-                return Ok(Action::None);
-            }
-            // In the search tab a number goes to the box unless it is over a stack.
-            let over_item = match hit {
-                Hit::Grid(i) => !matches!(self.grid_pick(i), Pick::Empty),
+        // checkHotbarKeyPressed: a number key (or F, the offhand) swaps with the slot under the
+        // mouse when the cursor is empty. In the search tab only over a stack or an inventory
+        // slot; else the key is typed into the box.
+        let swap = if (K_1..K_1 + 9).contains(&sc) {
+            Some((sc - K_1) as i32)
+        } else if sc == K_F && !search {
+            Some(40)
+        } else {
+            None
+        };
+        if let Some(k) = swap {
+            let over = match hit {
+                Hit::Grid(i) => !search || !matches!(self.grid_pick(i), Pick::Empty),
                 Hit::Menu(_) => true,
                 _ => false,
             };
-            if !search || over_item {
-                if matches!(hit, Hit::Grid(_) | Hit::Menu(_)) {
-                    self.click(d, g, hit, Input::Swap(k))?;
-                }
+            if over && self.carried.is_none() {
+                self.click(d, g, hit, Input::Swap(k))?;
                 if search {
                     self.ignore_text = Some(((b'1' + k as u8) as char, crate::sys::now_ms()));
                 }
@@ -1307,12 +1321,12 @@ impl Screen {
         if kind == SEARCH {
             // EditBox without a border: the end of the text that fits, and the blinking cursor.
             let mut shown: &str = &self.search;
-            while gui.text_width(shown) > 80.0 - 6.0 {
+            while gui.text_width(shown) + gui.text_width("_") > 80.0 {
                 let mut cs = shown.chars();
                 cs.next();
                 shown = cs.as_str();
             }
-            let x = gui.text(shown, left + 82.0, top + 6.0, 0xFFFF_FFFF);
+            let x = left + 82.0 + gui.text(shown, left + 82.0, top + 6.0, 0xFFFF_FFFF); // text() gives the width
             if (crate::sys::now_ms() / 300) % 2 == 0 {
                 gui.text("_", x, top + 6.0, 0xFFFF_FFFF);
             }
@@ -1425,17 +1439,17 @@ impl Screen {
         if kind == CATEGORY && creative_slot {
             return out;
         }
-        let mut at = 1;
         if kind == SEARCH && creative_slot {
             if let Some(en) = e.map(|e| &d.entries[e as usize]) {
                 for t in self.visible_tags.iter() {
                     if en.tags.contains(t) {
                         out.insert(1, (format!("#{}", d.tags[*t as usize]), DARK_PURPLE));
-                        at += 1;
                     }
                 }
             }
         }
+        // The tabs from index 1, ahead of the tags.
+        let mut at = 1;
         let mask = match e {
             Some(e) => d.entries[e as usize].tabs,
             None => 0,
@@ -1554,5 +1568,14 @@ pub fn checks(gui_bin: &[u8], item_names: &[String]) -> Vec<(&'static str, Strin
     inv.click(&d, true, Hit::Destroy, None, Input::QuickMove(0));
     let h = format!("{}", inv.slots.iter().all(|s| s.is_none()));
     out.push(("creative inventory tab", format!("{} {} {}", f, g, h), "Some(1) Some(true) 2 None true true"));
+    // A right click outside: the item tabs throw one, the inventory tab the whole stack; a
+    // number key swaps the hotbar with the offhand (F is button 40).
+    let mut inv = Inv { slots: vec![None; 46], carried: Some(st(stone, 5)), drops: Vec::new() };
+    inv.click(&d, false, Hit::Outside, None, Input::Pickup(1));
+    inv.click(&d, true, Hit::Outside, None, Input::Pickup(1));
+    inv.slots[36] = Some(st(stone, 3));
+    inv.click(&d, true, Hit::Menu(36), None, Input::Swap(40));
+    let drops: Vec<i32> = inv.drops.iter().map(|s| s.count).collect();
+    out.push(("creative right click outside, offhand swap", format!("{:?} {} {:?}", drops, inv.carried.is_none(), inv.slots[45].as_ref().map(|s| s.count)), "[1, 4] true Some(3)"));
     out
 }
