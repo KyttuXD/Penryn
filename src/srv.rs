@@ -24,12 +24,12 @@ pub struct Record {
     pub target: String,
 }
 
-/// The host and port to connect to for `address` (typed as in the server list): an SRV record
-/// when the address has no port and is not an IP literal, else the address itself (25565 when
-/// none is typed). A failed lookup gives the typed host and port.
+/// The host and port to connect to for `address` (typed as in the server list): the SRV record
+/// when the port is 25565 and the host is a name, else the address itself (25565 when none is
+/// typed). A failed lookup gives the typed host and port.
 pub fn target(address: &str) -> Option<(String, u16)> {
     let (host, port) = crate::servers::address(address)?;
-    if has_port(address) || is_ip(&host) {
+    if !wants_srv(&host, port) {
         return Some((host, port));
     }
     match lookup(&format!("_minecraft._tcp.{}", host)) {
@@ -46,13 +46,10 @@ pub fn dial(address: &str) -> Option<((String, u16), (String, u16))> {
     Some((typed, target))
 }
 
-/// Whether the typed address names its port ("host:1234", "[v6]:1234").
-fn has_port(s: &str) -> bool {
-    let s = s.trim();
-    if let Some(rest) = s.strip_prefix('[') {
-        return rest.split_once(']').map_or(false, |(_, t)| t.starts_with(':'));
-    }
-    matches!(s.rsplit_once(':'), Some((h, _)) if !h.is_empty() && !h.contains(':'))
+/// Whether an address gets an SRV lookup (ServerNameResolver, as Horizon's resolver.rs has it):
+/// port 25565, and a host that is a name rather than an IP literal or localhost.
+fn wants_srv(host: &str, port: u16) -> bool {
+    port == 25565 && !is_ip(host) && !host.eq_ignore_ascii_case("localhost")
 }
 
 /// A literal IPv4 or IPv6 address (no lookup for those).
@@ -277,6 +274,6 @@ pub fn selftest(check: &mut dyn FnMut(&str, String, &str)) {
     check("srv error response ignored", format!("{}", parse(&bad, 0x1234).is_none()), "true");
     let r = |p: u16, w: u16| Record { priority: p, weight: w, port: 1, target: String::from("t") };
     check("srv pick lowest priority", format!("{:?}", pick(alloc::vec![r(2, 9), r(1, 0), r(1, 4)], 0).map(|x| x.weight)), "Some(4)");
-    check("srv typed port", format!("{} {}", has_port("a.b:1"), has_port("a.b")), "true false");
-    check("srv ip literal", format!("{} {}", is_ip("1.2.3.4"), is_ip("mc.example.org")), "true false");
+    check("srv port rule", format!("{} {} {}", wants_srv("mc.example.org", 25565), wants_srv("mc.example.org", 25566), wants_srv("localhost", 25565)), "true false false");
+    check("srv ip literal", format!("{} {} {}", is_ip("1.2.3.4"), is_ip("mc.example.org"), wants_srv("127.0.0.1", 25565)), "true false false");
 }

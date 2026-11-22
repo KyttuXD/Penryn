@@ -286,7 +286,7 @@ From a terminal:
 ./penryn status SERVER                     # the server-list ping
 ```
 
-A hostname typed without a port is looked up for its `_minecraft._tcp` SRV record first (as the
+A hostname on the default port 25565 is looked up for its `_minecraft._tcp` SRV record first (as the
 game does), over UDP to the first nameserver in `/etc/resolv.conf`; `PENRYN_DNS=IP:PORT` names
 another one (for tests). Without a record the name is joined on port 25565.
 
