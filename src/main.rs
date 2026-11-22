@@ -32,8 +32,9 @@ mod math;
 mod md5;
 mod menus;
 mod mesher;
-mod moving;
+mod mobanim;
 mod mobs;
+mod moving;
 mod multiplayer;
 mod nbt;
 mod occlusion;
@@ -302,7 +303,7 @@ fn selftest() -> Result<(), String> {
     for (what, got, want) in talk::selftest().into_iter().chain(text::selftest()).chain(commands::selftest()).chain(chatui::selftest()) {
         check(what, got, want);
     }
-    for (what, got, want) in skins::selftest().into_iter().chain(entities::selftest()) {
+    for (what, got, want) in skins::selftest().into_iter().chain(entities::selftest()).chain(mobanim::selftest()) {
         check(what, got, want);
     }
     for (what, got, want) in occlusion::selftest().into_iter().chain(render::selftest()).chain(terrain::selftest()).chain(sky::selftest()).chain(json::selftest()).chain(servers::selftest()).chain(title::selftest()).chain(multiplayer::selftest()) {

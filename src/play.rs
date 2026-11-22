@@ -2249,10 +2249,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 *world_view_ref = *view;
                 if let Some(t) = ents {
                     t.draw(gl, view, eye, entities, pf, own, &ent_cx);
-                    crate::skins::draw(gl, view, eye, entities, pf, own, t);
+                    crate::skins::draw(gl, view, eye, entities, pf, own, t, &ent_cx.blocks.items);
                     if !mine.is_empty() {
                         t.draw(gl, view, eye, &mine, pf, -1, &ent_cx);
-                        crate::skins::draw(gl, view, eye, &mine, pf, -1, t);
+                        crate::skins::draw(gl, view, eye, &mine, pf, -1, t, &ent_cx.blocks.items);
                     }
                 }
                 crate::entities::draw_items(gl, view, eye, entities, pf, icons, overlays, blocks_ref, atlas, atlas_size);

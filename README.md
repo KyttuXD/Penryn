@@ -196,14 +196,16 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 - Particles vanilla's blocks make on their own (torches, campfires, leaves, drips) and rain
   splashes are not drawn yet.
 - Mobs: no armour trims or dyed leather colours, no heads or pumpkins worn, no shields or other
-  specially drawn items in hands, no elytra wings drawn on players.
+  specially drawn items in hands (a shield's pose is drawn); a player's loaded crossbow is held
+  as an unloaded one (the server does not send its charge), and a crossbow being charged is
+  drawn half way.
 - No enchanting book model, smithing armour stand or mount model in their screens; the
   stonecutter does not resolve recipe inputs given as tags; a held map is drawn without the arms
   holding it.
 - Riding: striders do not walk on lava yet, no third-person view, a horse's rearing and
   the camel's sitting transitions are not followed on the seat.
 - Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);
-  no elytra wings, and Dinnerbone and Grumm stand the right way up.
+  and Dinnerbone and Grumm stand the right way up.
 - Tooltips have no potion effects, book authors, firework or banner lines for stacks whose
   components the server changed; italics and bold are drawn as plain text; no advanced tooltips
   (F3+H). The spectator hotbar menu (teleporting to players) and seeing invisible entities as
@@ -333,6 +335,7 @@ Options > Controls. Third person draws no model for the player (the server sends
 | `src/play.rs`, `physics.rs` | the game window, input, movement, digging |
 | `src/effects.rs`, `moving.rs` | status effects; pistons and shulker lids in motion |
 | `src/riding.rs`, `boat.rs`, `special.rs`, `poses.rs` | vehicles and their seats, boats, swimming, crawling, gliding and players' poses |
+| `src/mobanim.rs` | the limbs of mobs and players beyond the walk: bows, crossbows, shields, zombies' and skeletons' arms, piglins, spiders, chickens, elytra wings |
 | `src/serverui.rs`, `serverhud.rs` | tab list, scoreboard, teams, boss bars, titles, world border, links, cookies, transfers |
 | `src/tooltip.rs`, `gamemode.rs` | item components and tooltips; spectator and adventure mode |
 | `src/main.rs` | the command line, and the commands that run without a window (`status`, `join`, `selftest`) |
