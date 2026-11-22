@@ -114,7 +114,9 @@ unsafe extern "C" fn callback(_ud: *mut c_void, stream: *mut u8, len: c_int) {
     let acc = &mut buf[..frames * 2];
     let master = mix.volumes[0];
     mix.voices.retain_mut(|v| {
-        let g = [v.gain[0] * master * mix.volumes[v.category], v.gain[1] * master * mix.volumes[v.category]];
+        // Options.getFinalSoundSourceVolume: master once for the master category itself.
+        let k = master * if v.category == 0 { 1.0 } else { mix.volumes[v.category] };
+        let g = [v.gain[0] * k, v.gain[1] * k];
         for f in 0..frames {
             let i = v.pos as usize;
             if i + 1 >= v.data.len() {

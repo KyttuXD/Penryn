@@ -622,6 +622,8 @@ pub struct Menu {
     stack: Vec<Page>,
     scroll: f32,
     drag: Option<(O, f32, f32)>,
+    /// The dragged slider's value, for the sliders vanilla applies only when let go.
+    pending: Option<f64>,
     pub changed: Vec<O>,
     /// The automatic GUI scale for the window: the GUI scale slider's top.
     pub max_gui_scale: i32,
@@ -648,7 +650,7 @@ fn fl(x: f32) -> f32 {
 impl Menu {
     pub fn new(o: Settings) -> Menu {
         o.publish();
-        Menu { o, stack: Vec::new(), scroll: 0.0, drag: None, changed: Vec::new(), max_gui_scale: 4, saving: true }
+        Menu { o, stack: Vec::new(), scroll: 0.0, drag: None, pending: None, changed: Vec::new(), max_gui_scale: 4, saving: true }
     }
 
     pub fn open(&mut self, p: Page) {
@@ -698,38 +700,76 @@ impl Menu {
         }
     }
 
-    fn bounds(&self, o: O) -> (f64, f64, f64) {
+    /// The slider's values: lo + i * step for i in 0..=n (n 0: continuous).
+    fn steps(&self, o: O) -> (f64, f64, f64, i64) {
         match def(o).kind {
             Kind::Int(lo, hi, step) => {
                 let hi = if o == O::GuiScale { self.max_gui_scale.max(1) } else { hi };
-                (lo as f64, hi as f64, step as f64)
+                (lo as f64, hi as f64, step as f64, ((hi - lo) / step.max(1)) as i64)
             }
-            Kind::Real(lo, hi, step) => (lo, hi, step),
-            _ => (0.0, 1.0, 0.0),
+            Kind::Real(lo, hi, step) if step > 0.0 => (lo, hi, step, round((hi - lo) / step) as i64),
+            Kind::Real(lo, hi, _) => (lo, hi, 0.0, 0),
+            _ => (0.0, 1.0, 0.0, 0),
         }
     }
 
-    /// The slider's handle position (0..1) for the option's value.
-    pub fn slider_pos(&self, o: O) -> f64 {
-        let (lo, hi, _) = self.bounds(o);
-        ((self.o.get(o) - lo) / (hi - lo)).clamp(0.0, 1.0)
+    /// The option's value, or while its slider is held, the value it will take when let go.
+    fn shown(&self, o: O) -> f64 {
+        match (self.drag, self.pending) {
+            (Some((d, ..)), Some(v)) if d == o => v,
+            _ => self.o.get(o),
+        }
     }
 
-    /// The value at a slider position, snapped to the option's steps (IntRange rounds).
-    pub fn value_at(&self, o: O, pos: f64) -> f64 {
-        let (lo, hi, step) = self.bounds(o);
-        let v = lo + pos.clamp(0.0, 1.0) * (hi - lo);
-        if step > 0.0 {
-            (lo + round((v - lo) / step) * step).clamp(lo, hi)
+    /// The slider's handle position (0..1) for a value (IntRangeBase.toSliderValue: the ends
+    /// at the ends, the steps between them in the middle of their share).
+    pub fn slider_pos_of(&self, o: O, v: f64) -> f64 {
+        let (lo, hi, step, n) = self.steps(o);
+        if n == 0 {
+            return ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
+        }
+        let i = round((v - lo) / step) as i64;
+        if i <= 0 {
+            0.0
+        } else if i >= n {
+            1.0
         } else {
-            v
+            (i as f64 + 0.5) / (n + 1) as f64
         }
+    }
+
+    pub fn slider_pos(&self, o: O) -> f64 {
+        self.slider_pos_of(o, self.shown(o))
+    }
+
+    /// The value at a slider position (IntRangeBase.fromSliderValue: each step gets an equal
+    /// share of the slider).
+    pub fn value_at(&self, o: O, pos: f64) -> f64 {
+        let (lo, hi, step, n) = self.steps(o);
+        let pos = pos.clamp(0.0, 1.0);
+        if n == 0 {
+            return lo + pos * (hi - lo);
+        }
+        let d = if pos >= 1.0 { 0.99999 } else { pos };
+        let i = (math::floor(d * (n + 1) as f64) as i64).clamp(0, n);
+        (lo + i as f64 * step).clamp(lo, hi)
+    }
+
+    /// Sliders vanilla applies only when let go (IntRange with applyValueImmediately false).
+    fn on_release(o: O) -> bool {
+        matches!(o, O::RenderDistance | O::SimulationDistance | O::BiomeBlend)
+    }
+
+    /// GUI Scale is a cycle button over 0 (automatic) to the largest scale the window allows
+    /// (ClampingLazyMaxIntRange.createCycleButton).
+    fn is_slider(o: O) -> bool {
+        o != O::GuiScale && matches!(def(o).kind, Kind::Int(..) | Kind::Real(..))
     }
 
     /// The text on an option's button or slider, as its OptionInstance captions it.
     pub fn caption(&self, o: O) -> String {
         let d = def(o);
-        let v = self.o.get(o);
+        let v = self.shown(o);
         let label = lang::get(d.label);
         let generic = |value: String| lang::format("options.generic_value", &[label.clone(), value]);
         let percent = |x: f64| lang::format("options.percent_value", &[label.clone(), format!("{}", (x * 100.0) as i32)]);
@@ -912,6 +952,12 @@ impl Menu {
                 Ev::Click
             }
             W::Off(..) => Ev::None,
+            W::Opt(O::GuiScale) => {
+                let n = self.max_gui_scale.max(1) + 1;
+                let v = (self.o.int(O::GuiScale).clamp(0, n - 1) + if back { -1 } else { 1 }).rem_euclid(n);
+                self.set(O::GuiScale, v as f64);
+                Ev::Click
+            }
             W::Opt(o) => match def(o).kind {
                 Kind::Bool => {
                     let v = if self.o.on(o) { 0.0 } else { 1.0 };
@@ -926,6 +972,7 @@ impl Menu {
                 }
                 _ => {
                     self.drag = Some((o, p.x, p.w));
+                    self.pending = None;
                     self.drag_to(mx);
                     Ev::None
                 }
@@ -938,13 +985,20 @@ impl Menu {
         if let Some((o, x, w)) = self.drag {
             let pos = ((mx - (x + 4.0)) / (w - 8.0)) as f64;
             let v = self.value_at(o, pos);
-            self.set(o, v);
+            if Self::on_release(o) {
+                self.pending = Some(v);
+            } else {
+                self.set(o, v);
+            }
         }
     }
 
     /// The button came up: a slider let go plays the click (AbstractSliderButton.onRelease).
     pub fn release(&mut self) -> Ev {
-        if self.drag.take().is_some() {
+        if let Some((o, ..)) = self.drag.take() {
+            if let Some(v) = self.pending.take() {
+                self.set(o, v);
+            }
             Ev::Click
         } else {
             Ev::None
@@ -980,7 +1034,7 @@ impl Menu {
         for p in l.widgets.iter() {
             let hover = p.hit(mx, my) && self.drag.is_none();
             match p.what {
-                W::Opt(o) if matches!(def(o).kind, Kind::Int(..) | Kind::Real(..)) => {
+                W::Opt(o) if Self::is_slider(o) => {
                     let held = self.drag.map_or(false, |d| d.0 == o);
                     gui.blit_nine("widget/slider", p.x, p.y, p.w, 20.0);
                     let hx = p.x + fl((self.slider_pos(o) * (p.w as f64 - 8.0)) as f32);
@@ -1083,6 +1137,28 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     check("slider view", format!("{}", m.value_at(O::RenderDistance, 0.33)), "12");
     m.max_gui_scale = 3;
     check("slider gui scale", format!("{}", m.value_at(O::GuiScale, 0.7)), "2");
+    m.max_gui_scale = 3;
+    m.set(O::GuiScale, 3.0);
+    m.open(Page::Video);
+    let gl = m.layout(480.0, 270.0);
+    let gs = gl.widgets.iter().find(|p| p.what == W::Opt(O::GuiScale)).copied();
+    let cycled = gs.map(|p| {
+        m.press(480.0, 270.0, p.x + 1.0, p.y + 1.0, false);
+        m.o.int(O::GuiScale)
+    });
+    check("gui scale cycles to auto", format!("{:?}", cycled), "Some(0)");
+    m.changed.clear();
+    m.scroll = 120.0;
+    let rd = m.layout(480.0, 270.0).widgets.iter().find(|p| p.what == W::Opt(O::RenderDistance)).copied();
+    let applied = rd.map(|p| {
+        m.press(480.0, 270.0, p.x + 4.0, p.y + 1.0, false);
+        let during = (m.o.int(O::RenderDistance), m.changed.len());
+        m.release();
+        (during, m.o.int(O::RenderDistance))
+    });
+    check("render distance applies on release", format!("{:?}", applied), "Some(((12, 0), 2))");
+    m.set(O::RenderDistance, 12.0);
+    check("slider handle for a step", format!("{:.4}", m.slider_pos(O::RenderDistance)), "0.3387");
     check("turn per pixel", format!("{:.3}", Settings::default().turn_per_pixel().0), "0.150");
     check("night overlay at default brightness", format!("{:.1}", Settings::default().night_alpha(140.0)), "140.0");
     let fov = fov_modifier(false, 0.1, true, 1.0);
