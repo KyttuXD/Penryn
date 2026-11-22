@@ -72,6 +72,7 @@ extern "C" {
     fn read(fd: c_int, buf: *mut c_void, n: SizeT) -> SsizeT;
     fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
     fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int;
+    fn mkdir(path: *const c_char, mode: c_int) -> c_int;
     fn rename(from: *const c_char, to: *const c_char) -> c_int;
     pub fn close(fd: c_int) -> c_int;
     pub fn exit(code: c_int) -> !;
@@ -246,6 +247,24 @@ pub fn local_date() -> (u32, u32) {
     }
 }
 
+/// The local date and time as vanilla names a screenshot: 2026-11-22_11.20.33.
+pub fn local_stamp() -> String {
+    let t = now() as i64;
+    let mut tm = [0i32; 16];
+    let ok = unsafe { !localtime_r(&t, tm.as_mut_ptr() as *mut c_void).is_null() };
+    if ok {
+        alloc::format!("{:04}-{:02}-{:02}_{:02}.{:02}.{:02}", tm[5] + 1900, tm[4] + 1, tm[3], tm[2], tm[1], tm[0])
+    } else {
+        String::from("screenshot")
+    }
+}
+
+/// Makes a folder (an existing one is fine).
+pub fn make_dir(path: &str) {
+    let p = cstr(path);
+    unsafe { mkdir(p.as_ptr() as *const c_char, 0o755) };
+}
+
 pub fn now_ms() -> u64 {
     (now() * 1000.0) as u64
 }
@@ -400,8 +419,17 @@ pub fn read_urandom(n: usize) -> Option<Vec<u8>> {
 
 /// Writes `data` to `path`, readable by its owner only (0600).
 pub fn write_file_private(path: &str, data: &[u8]) -> bool {
+    write_file_mode(path, data, 0o600)
+}
+
+/// Writes `data` to `path` with the usual file mode (0644), as a screenshot is saved.
+pub fn write_file_readable(path: &str, data: &[u8]) -> bool {
+    write_file_mode(path, data, 0o644)
+}
+
+fn write_file_mode(path: &str, data: &[u8], mode: c_int) -> bool {
     let p = cstr(path);
-    let fd = unsafe { open(p.as_ptr() as *const c_char, O_WRONLY_CREAT_TRUNC, 0o600) };
+    let fd = unsafe { open(p.as_ptr() as *const c_char, O_WRONLY_CREAT_TRUNC, mode) };
     if fd < 0 {
         return false;
     }

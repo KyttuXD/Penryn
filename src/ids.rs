@@ -113,6 +113,7 @@ pub mod play {
     pub const S_MOVE_PLAYER_POS_ROT: i32 = 31;
     pub const S_MOVE_PLAYER_STATUS: i32 = 33;
     pub const S_PLAYER_ABILITIES: i32 = 40;
+    pub const S_PICK_ITEM_FROM_BLOCK: i32 = 36;
     pub const S_PLAYER_ACTION: i32 = 41;
     pub const S_RESOURCE_PACK: i32 = 50;
     pub const S_PLAYER_COMMAND: i32 = 42;

@@ -3,6 +3,7 @@
 
 use crate::blocks::{self, Blocks};
 use crate::client::{Account, Game, Join};
+use crate::keybinds::{Key, B};
 use crate::math;
 use crate::physics::{self, Input, Mover};
 use crate::gui::Gui;
@@ -17,23 +18,11 @@ use alloc::vec::Vec;
 
 // SDL scancodes
 const K_A: usize = 4;
-const K_C: usize = 6;
-const K_D: usize = 7;
-const K_E: usize = 8;
 const K_Q: usize = 20;
 const K_R: usize = 21;
-const K_S: usize = 22;
-const K_T: usize = 23;
-const K_W: usize = 26;
-const K_X: usize = 27;
-const K_1: usize = 30;
 const K_ESC: usize = 41;
 const K_BACKSPACE: usize = 42;
-const K_SPACE: usize = 44;
-const K_TAB: usize = 43;
-const K_SLASH: usize = 56;
 const K_F3: usize = 60;
-const K_F11: usize = 68;
 const K_LCTRL: usize = 224;
 const K_LSHIFT: usize = 225;
 const K_RSHIFT: usize = 229;
@@ -238,18 +227,184 @@ pub struct App {
     ride: crate::riding::Rider,
     /// Swimming, crawling, gliding, riptide (special.rs).
     special: crate::special::Special,
+    /// The mouse buttons held (GLFW numbering), and the sneak and sprint toggles (Options).
+    mouse_held: [bool; 5],
+    sneak_toggle: bool,
+    sprint_toggle: bool,
+    /// F5: 0 first person, 1 third person behind the player, 2 in front (vanilla's CameraType).
+    perspective: u8,
+    /// F1 (Toggle GUI): the HUD is hidden.
+    hide_hud: bool,
+    /// F2 (Take Screenshot): the next frame is saved.
+    take_shot: bool,
 }
 
 impl App {
     fn eye_height(&self) -> f64 {
-        if let Some(e) = self.ride.eye(self.keys[K_LSHIFT] && self.screen == Screen::Play) {
+        let sneak = self.sneaking();
+        if let Some(e) = self.ride.eye(sneak) {
             e
         } else if let Some(e) = self.special.eye() {
             e
-        } else if self.keys[K_LSHIFT] && self.screen == Screen::Play {
+        } else if sneak {
             physics::SNEAK_EYE
         } else {
             physics::EYE
+        }
+    }
+
+    /// Whether a binding is held: its key down, or its mouse button.
+    fn held(&self, b: B) -> bool {
+        match self.menu.keys.get(b) {
+            Key::Kb(sc) => self.keys[(sc as usize).min(511)],
+            Key::Mouse(m) => self.mouse_held.get(m as usize).copied().unwrap_or(false),
+            Key::Unbound => false,
+        }
+    }
+
+    /// The character a binding's key types, when it is a keyboard key.
+    fn bound_char(&self, b: B) -> Option<char> {
+        match self.menu.keys.get(b) {
+            Key::Kb(sc) => crate::keybinds::kb_char(sc),
+            _ => None,
+        }
+    }
+
+    /// Sneaking: the sneak binding held, or toggled on (Options' toggleCrouch).
+    fn sneaking(&self) -> bool {
+        self.screen == Screen::Play && if self.menu.o.on(crate::options::O::ToggleCrouch) { self.sneak_toggle } else { self.held(B::Sneak) }
+    }
+
+    /// The camera (GameRenderer's camera setup): the player's eye and angles in first person.
+    /// In third person it is 4 blocks back along the view (or in front, looking back at the
+    /// player, for F5's second view), stopped short of a solid block.
+    fn camera(&self, g: &Game, eye: [f64; 3]) -> ([f64; 3], f32, f32) {
+        if self.perspective == 0 {
+            return (eye, g.player.yaw, g.player.pitch);
+        }
+        let front = self.perspective == 2;
+        let (yaw, pitch) = if front { (g.player.yaw + 180.0, -g.player.pitch) } else { (g.player.yaw, g.player.pitch) };
+        let (y, p) = (math::to_rad(yaw as f64), math::to_rad(pitch as f64));
+        let dir = [-math::sin(y) * math::cos(p), -math::sin(p), math::cos(y) * math::cos(p)];
+        let mut dist = 4.0;
+        let mut t = 0.1;
+        while t <= 4.0 {
+            let at = [eye[0] - dir[0] * t, eye[1] - dir[1] * t, eye[2] - dir[2] * t];
+            let s = g.world.get(math::ifloor(at[0]), math::ifloor(at[1]), math::ifloor(at[2]));
+            if s != 0 && g.blocks.collides(s) {
+                dist = (t - 0.2).max(0.0);
+                break;
+            }
+            t += 0.1;
+        }
+        ([eye[0] - dir[0] * dist, eye[1] - dir[1] * dist, eye[2] - dir[2] * dist], yaw, pitch)
+    }
+
+    /// A bound key or mouse button went down or up in the game: Attack and Use (held, or
+    /// toggled), Pick Block, and the sneak and sprint toggles. True when nothing else acts on it.
+    fn bind_edge(&mut self, g: &mut Game, b: B, down: bool) -> Result<bool, String> {
+        use crate::options::O;
+        match b {
+            B::Attack | B::Use => {
+                if down {
+                    if let Some((id, _, at)) = self.pick_entity(g) {
+                        if b == B::Attack {
+                            g.attack(id)?;
+                        } else {
+                            let sneak = self.keys[K_LSHIFT] || self.keys[K_RSHIFT];
+                            g.interact(id, at, sneak)?;
+                            g.punch()?;
+                        }
+                        return Ok(true);
+                    }
+                }
+                let toggle = if b == B::Attack { O::ToggleAttack } else { O::ToggleUse };
+                let on = if self.menu.o.on(toggle) { if down { !self.held_flag(b) } else { self.held_flag(b) } } else { down };
+                if b == B::Attack {
+                    if on && !self.left_down {
+                        self.punch_timer = 0;
+                    }
+                    self.left_down = on;
+                } else {
+                    if on && !self.right_down {
+                        self.use_delay = 0;
+                    }
+                    self.right_down = on;
+                }
+                Ok(true)
+            }
+            B::PickItem => {
+                if down {
+                    let data = self.keys[K_LCTRL];
+                    self.pick_block(g, data)?;
+                }
+                Ok(true)
+            }
+            B::Sneak => {
+                if down && self.menu.o.on(O::ToggleCrouch) {
+                    self.sneak_toggle = !self.sneak_toggle;
+                }
+                Ok(false)
+            }
+            B::Sprint => {
+                if down && self.menu.o.on(O::ToggleSprint) {
+                    self.sprint_toggle = !self.sprint_toggle;
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// The state Attack or Use is in (for a toggle).
+    fn held_flag(&self, b: B) -> bool {
+        if b == B::Attack { self.left_down } else { self.right_down }
+    }
+
+    /// Pick Block (vanilla's Minecraft.pickBlock): the block's item to the selected hotbar slot
+    /// when the inventory has it; in creative mode, asked of the server when it does not
+    /// (with Ctrl, its NBT too).
+    fn pick_block(&mut self, g: &mut Game, include_data: bool) -> Result<(), String> {
+        let Some(hit) = self.pick(g) else { return Ok(()) };
+        let s = g.world.get(hit.pos[0], hit.pos[1], hit.pos[2]);
+        let name = g.blocks.of_state(s).name.clone();
+        let Some(item) = g.blocks.items.iter().position(|n| *n == name).map(|i| i as i32) else { return Ok(()) };
+        if let Some(slot) = (0usize..9).find(|i| g.inventory[36 + i].map_or(false, |(id, _)| id == item)) {
+            return g.select_slot(slot as i16);
+        }
+        if g.game_mode == 1 {
+            let p = hit.pos;
+            let pos = ((p[0] as i64 & 0x3FF_FFFF) << 38) | ((p[2] as i64 & 0x3FF_FFFF) << 12) | (p[1] as i64 & 0xFFF);
+            let mut o = crate::wire::Out::new();
+            o.i64(pos).bool(include_data);
+            return g.conn.send(crate::ids::play::S_PICK_ITEM_FROM_BLOCK, &o);
+        }
+        // Survival: a stack in the main inventory swaps into the selected hotbar slot.
+        if let Some(slot) = (9usize..36).find(|i| g.inventory[*i].map_or(false, |(id, _)| id == item)) {
+            let sel = g.selected as i8;
+            g.click(0, slot as i16, sel, 2)?;
+        }
+        Ok(())
+    }
+
+    /// Screenshot (F2 by default): the frame as a PNG in screenshots/, named by the time as
+    /// vanilla's Screenshot.getFile does (2026-11-22_11.20.33.png, _1 for a second one).
+    fn save_screenshot(&mut self) {
+        let (w, h) = self.v.size();
+        let png = sdl::screenshot_png(&self.v.gl, w, h);
+        let dir = format!("{}/screenshots", crate::data_dir());
+        sys::make_dir(&dir);
+        let base = format!("{}/{}", dir, sys::local_stamp());
+        let mut path = format!("{}.png", base);
+        let mut n = 1;
+        while sys::read_head(&path, 1).is_some() {
+            path = format!("{}_{}.png", base, n);
+            n += 1;
+        }
+        if sys::write_file_readable(&path, &png) {
+            say!("screenshot: {}", path);
+        } else {
+            say!("cannot save screenshot {}", path);
         }
     }
 }
@@ -343,6 +498,12 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
         book: None,
         ride: crate::riding::Rider::new(),
         special: crate::special::Special::new(),
+        mouse_held: [false; 5],
+        sneak_toggle: false,
+        sprint_toggle: false,
+        perspective: 0,
+        hide_hud: false,
+        take_shot: false,
     };
     let atlas = sys::read_file(&crate::packs::path("atlas.bin")).ok_or("cannot read atlas.bin (see README.md)")?;
     app.r.load_atlas(&app.v.gl, &atlas)?;
@@ -524,6 +685,12 @@ impl App {
         self.book = None;
         self.ride = crate::riding::Rider::new();
         self.special = crate::special::Special::new();
+        self.mouse_held = [false; 5];
+        self.sneak_toggle = false;
+        self.sprint_toggle = false;
+        self.perspective = 0;
+        self.hide_hud = false;
+        self.take_shot = false;
         self.mover = Mover::new([0.0; 3]);
         self.prev_pos = [0.0; 3];
         self.sprinting = false;
@@ -615,6 +782,10 @@ impl App {
             }
             crate::perf::lap(crate::perf::S::Sleep);
             self.frame_shown = sys::now_ms();
+            if self.take_shot {
+                self.take_shot = false;
+                self.save_screenshot();
+            }
             if let Some(shot) = self.test_shot.as_ref() {
                 // PENRYN_TEST_INPUT "m": wait for a piston in motion.
                 if now >= shot.1 && (!self.test_keys.contains('m') || g.world.moving.in_motion()) {
@@ -718,6 +889,21 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 let down = t == sdl::EV_KEYDOWN;
                 let repeat = e.0[13] != 0;
                 self.keys[sc] = down;
+                // Controls > Key Binds: the next key is the binding (Escape unbinds it).
+                if self.menu.keys.listening.is_some() {
+                    if down && !repeat {
+                        let key = if sc == K_ESC { Key::Unbound } else { Key::Kb(sc as u16) };
+                        crate::keybinds::bind(&mut self.menu, key);
+                    }
+                    return Ok(false);
+                }
+                if self.screen == Screen::Play && !repeat {
+                    if let Some(b) = self.menu.keys.find_kb(sc) {
+                        if self.bind_edge(g, b, down)? {
+                            return Ok(false);
+                        }
+                    }
+                }
                 if down && !repeat {
                     return self.key(g, sc);
                 }
@@ -779,6 +965,16 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             sdl::EV_MOUSEDOWN | sdl::EV_MOUSEUP => {
                 let down = t == sdl::EV_MOUSEDOWN;
                 let button = e.0[16];
+                let glfw = crate::keybinds::glfw_button(button);
+                if let Some(h) = self.mouse_held.get_mut(glfw as usize) {
+                    *h = down;
+                }
+                if self.menu.keys.listening.is_some() {
+                    if down {
+                        crate::keybinds::bind(&mut self.menu, Key::Mouse(glfw));
+                    }
+                    return Ok(false);
+                }
                 if self.screen != Screen::Play {
                     if down {
                         return self.screen_click(g, button);
@@ -791,32 +987,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     }
                     return Ok(false);
                 }
-                if down && (button == 1 || button == 3) {
-                    if let Some((id, _, at)) = self.pick_entity(g) {
-                        if button == 1 {
-                            g.attack(id)?;
-                        } else {
-                            let sneak = self.keys[K_LSHIFT] || self.keys[K_RSHIFT];
-                            g.interact(id, at, sneak)?;
-                            g.punch()?;
-                        }
-                        return Ok(false);
-                    }
-                }
-                if button == 1 {
-                    self.left_down = down;
-                    if down {
-                        self.punch_timer = 0;
-                    } else if let Some(m) = self.mining.take() {
-                        g.dig(DIG_ABORT, m.pos[0], m.pos[1], m.pos[2], 0)?;
-                    }
-                } else if button == 3 {
-                    self.right_down = down;
-                    if down {
-                        self.use_delay = 0;
-                    } else if self.using.take().is_some() {
-                        g.dig(RELEASE_USE_ITEM, 0, 0, 0, 0)?;
-                    }
+                if let Some(b) = self.menu.keys.find_mouse(glfw) {
+                    self.bind_edge(g, b, down)?;
                 }
             }
             sdl::EV_MOUSEWHEEL => {
@@ -1067,16 +1239,20 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if crate::menus::key(g, sc)? {
                     return Ok(false);
                 }
-                if sc == K_ESC || sc == K_E {
+                let bound = self.menu.keys.find_kb(sc);
+                if sc == K_ESC || bound == Some(B::Inventory) {
                     self.close_inventory(g)?;
                 } else if let Some(gui) = self.gui.as_ref() {
-                    // Over a slot: 1-9 swap with the hotbar, Q throws (Ctrl+Q the stack).
+                    // Over a slot: the hotbar keys swap with it, Drop throws (Ctrl the stack),
+                    // Swap Item With Off Hand swaps with the off hand (slot 40).
                     let win = screens::window(g);
                     if let Some(slot) = screens::slot_at(gui, &win, self.mouse.0, self.mouse.1) {
-                        if (K_1..K_1 + 9).contains(&sc) {
-                            g.click(win.container_id, slot, (sc - K_1) as i8, 2)?;
-                        } else if sc == K_Q {
+                        if let Some(i) = bound.and_then(|b| b.hotbar_slot()) {
+                            g.click(win.container_id, slot, i as i8, 2)?;
+                        } else if bound == Some(B::Drop) {
                             g.click(win.container_id, slot, if self.keys[K_LCTRL] { 1 } else { 0 }, 4)?;
+                        } else if bound == Some(B::SwapOffhand) {
+                            g.click(win.container_id, slot, 40, 2)?;
                         }
                     }
                 }
@@ -1089,55 +1265,85 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     g.respawn()?;
                 }
             }
-            Screen::Play => match sc {
-                K_ESC => self.set_screen(Screen::Pause),
-                K_T => {
-                    self.chat_ui.open(g, "");
-                    self.set_screen(Screen::Chat);
-                    self.skip_text = Some(('t', sys::now_ms()));
+            Screen::Play => {
+                if sc == K_ESC {
+                    self.set_screen(Screen::Pause);
+                } else if sc == K_F3 {
+                    self.debug = !self.debug;
+                } else if sc == K_A && self.keys[K_F3] {
+                    self.reload_chunks(g);
+                } else if let Some(b) = self.menu.keys.find_kb(sc) {
+                    self.play_key(g, b)?;
                 }
-                K_SLASH => {
-                    self.chat_ui.open(g, "/");
-                    self.set_screen(Screen::Chat);
-                    self.skip_text = Some(('/', sys::now_ms()));
-                }
-                K_E => self.open_inventory(g, 'e'),
-                K_F3 => self.debug = !self.debug,
-                K_A if self.keys[K_F3] => self.reload_chunks(g),
-                K_F11 => {
-                    let f = !self.fullscreen;
-                    self.menu.set(crate::options::O::Fullscreen, f as i32 as f64);
-                    self.menu.o.save();
-                }
-                K_SPACE => {
-                    let now = sys::now_ms();
-                    if g.may_fly && now - self.last_space < 300 {
-                        let f = !g.flying;
-                        g.set_flying(f)?;
-                        self.last_space = 0;
-                    } else {
-                        self.last_space = now;
-                    }
-                }
-                K_W => {
-                    let now = sys::now_ms();
-                    if now - self.last_w < 300 {
-                        self.double_w = true;
-                    }
-                    self.last_w = now;
-                }
-                x if (K_1..K_1 + 9).contains(&x) => {
-                    // Creative: C+number saves the hotbar, X+number loads it.
-                    let d = self.gui.as_ref().and_then(|x| x.creative.as_ref()).filter(|_| g.game_mode == 1);
-                    match d {
-                        Some(d) if self.keys[K_C] || self.keys[K_X] => self.creative.hotbar_load_or_save(d, g, x - K_1, self.keys[K_X])?,
-                        _ => g.select_slot((x - K_1) as i16)?,
-                    }
-                }
-                _ => {}
-            },
+            }
         }
         Ok(false)
+    }
+
+    /// A bound key pressed in the game (Minecraft.handleKeybinds, once per press).
+    fn play_key(&mut self, g: &mut Game, b: B) -> Result<(), String> {
+        if let Some(slot) = b.hotbar_slot() {
+            // Creative: Save Hotbar Activator (C) with a number saves the hotbar, Load (X) loads it.
+            let d = self.gui.as_ref().and_then(|x| x.creative.as_ref()).filter(|_| g.game_mode == 1);
+            match d {
+                Some(d) if self.held(B::SaveToolbar) || self.held(B::LoadToolbar) => {
+                    self.creative.hotbar_load_or_save(d, g, slot, self.held(B::LoadToolbar))?
+                }
+                _ => g.select_slot(slot as i16)?,
+            }
+            return Ok(());
+        }
+        match b {
+            // The key that opens the chat also arrives as text: its character is dropped.
+            B::Chat => {
+                self.chat_ui.open(g, "");
+                self.set_screen(Screen::Chat);
+                self.skip_text = self.bound_char(B::Chat).map(|c| (c, sys::now_ms()));
+            }
+            B::Command => {
+                self.chat_ui.open(g, "/");
+                self.set_screen(Screen::Chat);
+                self.skip_text = self.bound_char(B::Command).map(|c| (c, sys::now_ms()));
+            }
+            B::Inventory => self.open_inventory(g, 'e'),
+            B::Drop => {
+                if g.held().is_some() {
+                    // Drop Selected Item; with Ctrl the whole stack (ServerboundPlayerActionPacket).
+                    let all = self.keys[K_LCTRL];
+                    g.dig(if all { 4 } else { 5 }, 0, 0, 0, 0)?;
+                }
+            }
+            B::SwapOffhand => g.dig(7, 0, 0, 0, 0)?,
+            B::Fullscreen => {
+                let f = !self.fullscreen;
+                self.menu.set(crate::options::O::Fullscreen, f as i32 as f64);
+                self.menu.o.save();
+            }
+            B::ToggleGui => self.hide_hud = !self.hide_hud,
+            B::Perspective => self.perspective = (self.perspective + 1) % 3,
+            B::Screenshot => self.take_shot = true,
+            B::Jump => {
+                // A double tap of jump flies in creative (and spectator) mode.
+                let now = sys::now_ms();
+                if g.may_fly && now - self.last_space < 300 {
+                    let f = !g.flying;
+                    g.set_flying(f)?;
+                    self.last_space = 0;
+                } else {
+                    self.last_space = now;
+                }
+            }
+            B::Forward => {
+                // A double tap of forward starts a sprint.
+                let now = sys::now_ms();
+                if now - self.last_w < 300 {
+                    self.double_w = true;
+                }
+                self.last_w = now;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Puts changed options into effect (OptionInstance's value-update listeners).
@@ -1288,7 +1494,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.teleported(g);
         }
         self.prev_pos = self.mover.pos;
-        for (c, sc) in [('w', K_W), ('a', K_A), ('s', K_S), ('d', K_D), (' ', K_SPACE), ('^', K_LCTRL), ('v', K_LSHIFT)] {
+        // The default keys (test input presses them, whatever they are bound to).
+        for (c, sc) in [('w', 26), ('a', 4), ('s', 22), ('d', 7), (' ', 44), ('^', K_LCTRL), ('v', K_LSHIFT)] {
             if self.test_keys.contains(c) {
                 self.keys[sc] = true;
             }
@@ -1392,15 +1599,29 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             if let Some(v) = part.strip_prefix("yaw=").and_then(|v| v.parse::<f32>().ok()) {
                 g.player.yaw = v;
             }
+            // Tests: the camera (F5's 0, 1 or 2) and the HUD (F1's hidden or not).
+            if let Some(v) = part.strip_prefix("persp=").and_then(|v| v.parse::<u8>().ok()) {
+                self.perspective = v % 3;
+            }
+            if let Some(v) = part.strip_prefix("hud=").and_then(|v| v.parse::<u8>().ok()) {
+                self.hide_hud = v == 0;
+            }
         }
         let play = self.screen == Screen::Play && !g.dead;
-        let k = |i: usize| play && self.keys[i];
+        let (kf, kb, kl, kr, kj) = (
+            play && self.held(B::Forward),
+            play && self.held(B::Back),
+            play && self.held(B::Left),
+            play && self.held(B::Right),
+            play && self.held(B::Jump),
+        );
+        let sneak_key = play && self.sneaking();
         let mut inp = Input {
-            forward: (k(K_W) as i32 - k(K_S) as i32) as f64 * 0.98,
-            strafe: (k(K_A) as i32 - k(K_D) as i32) as f64 * 0.98,
-            jump: k(K_SPACE),
-            sneak: k(K_LSHIFT) || k(K_RSHIFT),
-            shift: k(K_LSHIFT) || k(K_RSHIFT),
+            forward: (kf as i32 - kb as i32) as f64 * 0.98,
+            strafe: (kl as i32 - kr as i32) as f64 * 0.98,
+            jump: kj,
+            sneak: sneak_key,
+            shift: sneak_key,
             sprint: false,
             // Inventory slot 8: the feet.
             boots: g.inventory[8].and_then(|(i, _)| g.blocks.items.get(i as usize)).map_or(false, |n| n == "leather_boots"),
@@ -1419,11 +1640,12 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             }
         }
         // Sprinting: Ctrl or a double tap of W, forward only, with food above 6.
-        let want_sprint = (k(K_LCTRL) || self.double_w) && inp.forward > 0.0 && !inp.sneak && (g.food > 6 || g.may_fly);
-        if !k(K_W) {
+        let sprint_key = play && if self.menu.o.on(crate::options::O::ToggleSprint) { self.sprint_toggle } else { self.held(B::Sprint) };
+        let want_sprint = (sprint_key || self.double_w) && inp.forward > 0.0 && !inp.sneak && (g.food > 6 || g.may_fly);
+        if !kf {
             self.double_w = false;
         }
-        let sprint = want_sprint && !(self.mover.horizontal_collision && self.mover.on_ground && !self.sprinting) && self.special.sprint_allowed(self.sprinting, k(K_W));
+        let sprint = want_sprint && !(self.mover.horizontal_collision && self.mover.on_ground && !self.sprinting) && self.special.sprint_allowed(self.sprinting, kf);
         if sprint != self.sprinting {
             self.sprinting = sprint;
             g.command(if sprint { 1 } else { 2 })?;
@@ -1434,7 +1656,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let pulse = self.test_keys.contains('J') && g.game_time % 40 < 10;
         // Swimming, the pose's box, crawling, a glide starting (special.rs).
         let on_vehicle = g.riding.vehicle_of.contains_key(&g.entity_id);
-        self.special.before(g, &mut self.mover, &mut inp, k(K_SPACE) || pulse, shift, on_vehicle)?;
+        self.special.before(g, &mut self.mover, &mut inp, kj || pulse, shift, on_vehicle)?;
         if inp.sneak && !g.flying {
             inp.forward *= 0.3;
             inp.strafe *= 0.3;
@@ -1444,13 +1666,13 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             inp.strafe *= 0.2;
             inp.sprint = false;
         }
-        let flags = (k(K_W) as u8) | (k(K_S) as u8) << 1 | (k(K_A) as u8) << 2 | (k(K_D) as u8) << 3
+        let flags = (kf as u8) | (kb as u8) << 1 | (kl as u8) << 2 | (kr as u8) << 3
             | (inp.jump as u8) << 4 | (shift as u8) << 5 | (self.sprinting as u8) << 6;
         if flags != self.last_input {
             self.last_input = flags;
             g.send_input(flags)?;
         }
-        let keys = crate::riding::Keys { forward: k(K_W), back: k(K_S), left: k(K_A), right: k(K_D), jump: k(K_SPACE) || pulse, sprint: self.sprinting };
+        let keys = crate::riding::Keys { forward: kf, back: kb, left: kl, right: kr, jump: kj || pulse, sprint: self.sprinting };
         let riding = match self.entities.as_ref() {
             Some(t) => self.ride.tick(g, t, keys, &mut self.mover)?,
             None => false,
@@ -1907,6 +2129,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         if let Some(c) = self.entities.as_ref().and_then(|t| self.ride.camera(g, t, partial)) {
             eye = [c[0], c[1] + self.eye_height(), c[2]];
         }
+        // The camera: the eye and angles the world is drawn from (F5 moves them); the cave
+        // culling walks from the same eye.
+        let (eye, cam_yaw, cam_pitch) = self.camera(g, eye);
         self.r.update(&self.v.gl, &mut g.world, &g.blocks, eye, 6);
         crate::perf::lap(crate::perf::S::Mesh);
         // GameRenderer.getFov: the FOV option times the modifier, narrower under water.
@@ -1949,7 +2174,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let maps_ref = &g.maps;
         let ents = self.entities.as_ref();
         let gl = &self.v.gl;
-        let own = g.ui.camera.unwrap_or(g.entity_id);
+        let own = if self.perspective == 0 { g.ui.camera.unwrap_or(g.entity_id) } else { -1 };
         let pf = partial as f32;
         let entities = &g.entities;
         let icons = self.gui.as_ref().map(|gui| &gui.icons[..]).unwrap_or(&[]);
@@ -1969,8 +2194,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             atlas,
             atlas_size,
             gui: gui_ref,
-            yaw: g.player.yaw,
-            pitch: g.player.pitch,
+            yaw: cam_yaw,
+            pitch: cam_pitch,
             reach: if g.game_mode == 1 { 5.0 } else { 3.0 },
         };
         let (day_time, game_time) = (g.day_time, g.game_time as f64 + partial);
@@ -1982,8 +2207,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             gl,
             &g.world,
             eye,
-            g.player.yaw,
-            g.player.pitch,
+            cam_yaw,
+            cam_pitch,
             w,
             h,
             self.view,
@@ -2031,14 +2256,14 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             // Drawn at the block's offset: the same as moving the eye the other way.
             let o = Self::outline_offset(&g.blocks, s, hh.pos);
             let eye_o = [eye[0] - o[0], eye[1], eye[2] - o[2]];
-            self.r.draw_outline(&self.v.gl, eye_o, g.player.yaw, g.player.pitch, hh.pos, &boxes);
+            self.r.draw_outline(&self.v.gl, eye_o, cam_yaw, cam_pitch, hh.pos, &boxes);
             if let Some(m) = self.mining.as_ref().filter(|m| m.pos == hh.pos) {
                 let stage = ((m.progress * 10.0) as usize).min(9);
-                self.r.draw_cracks(&self.v.gl, eye_o, g.player.yaw, g.player.pitch, hh.pos, &boxes, g.blocks.crack_uv[stage]);
+                self.r.draw_cracks(&self.v.gl, eye_o, cam_yaw, cam_pitch, hh.pos, &boxes, g.blocks.crack_uv[stage]);
             }
         }
-        // ---- the hand (not a spectator's)
-        if let Some(gui) = self.gui.as_ref().filter(|_| g.game_mode != crate::gamemode::SPECTATOR) {
+        // ---- the hand (not a spectator's; third person hides it)
+        if let (Some(gui), 0) = (self.gui.as_ref().filter(|_| g.game_mode != crate::gamemode::SPECTATOR), self.perspective) {
             let swing = if self.swing_ticks >= 0 { ((self.swing_ticks as f64 + partial) / 6.0) as f32 } else { 0.0 };
             let equip = self.prev_equip + (self.equip - self.prev_equip) * partial as f32;
             let walk = self.prev_walk_dist + (self.walk_dist - self.prev_walk_dist) * partial as f32;
@@ -2097,15 +2322,18 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             None
         };
         // Spectators have no hotbar, health or crosshair (Hud: the spectator GUI instead).
-        if g.game_mode != crate::gamemode::SPECTATOR {
+        // Toggle GUI (F1) hides the HUD: crosshair, hotbar, health, the held item's name, effects, the server's HUD.
+        if g.game_mode != crate::gamemode::SPECTATOR && !self.hide_hud {
             screens::hud(&mut gui, g, self.screen == Screen::Play && !self.debug, held_name);
         }
-        g.effects.draw_hud(&self.v.gl, &mut gui, self.screen == Screen::Inventory && g.container.is_none());
-        crate::serverhud::hud(&mut gui, &self.v.gl, g, partial as f32);
+        if !self.hide_hud {
+            g.effects.draw_hud(&self.v.gl, &mut gui, self.screen == Screen::Inventory && g.container.is_none());
+            crate::serverhud::hud(&mut gui, &self.v.gl, g, partial as f32);
+        }
         let show_chat = self.screen != Screen::Inventory && self.screen != Screen::Creative && self.screen != Screen::Dead && self.screen != Screen::Book;
         crate::chatui::draw(&mut gui, g, &mut self.chat_ui, self.screen == Screen::Chat, show_chat, partial as f32, self.mouse.0, self.mouse.1);
         // The player list while Tab is held (PENRYN_TEST_INPUT "P" holds it).
-        if (self.keys[K_TAB] || self.test_keys.contains('P')) && self.screen == Screen::Play {
+        if self.screen == Screen::Play && (self.held(B::PlayerList) || self.test_keys.contains('P')) {
             crate::serverhud::tab_list(&mut gui, &self.v.gl, g);
         }
         if self.debug {
