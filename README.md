@@ -91,12 +91,30 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   into something. `penryn selftest` also checks movement against gates, ladders, walls, low
   ceilings, ice, soul sand, cobwebs, honey, slime and bamboo.
 
+- **Resource packs, the server's and your own**, as vanilla's pack stack: the server's pack
+  (pushed and popped in configuration or play) with vanilla's confirm screen (its prompt text;
+  declining a required pack leaves the server), the server list's Enabled / Disabled / Prompt
+  setting in `servers.dat`, and the statuses the server sees (accepted, downloaded, loaded,
+  declined, failed download or reload, discarded). Options > Resource Packs chooses packs from
+  the relay's `resourcepacks/` folder (saved as `resourcePacks` in `options.txt`). The relay
+  downloads the pack (HTTP or HTTPS, SHA-1 checked, at most 250 MB, kept by its hash) and bakes
+  the stack into Penryn's game files with `make_assets.py --packs`: block and item textures and
+  models, 26.x item model definitions, block states, GUI sprites (nine-slice), fonts (bitmap
+  providers), language, `sounds.json` and sounds (a small `packsounds.bin` over sounds.bin),
+  particles, entity textures, sun, moon and rain, animated textures (their first frame),
+  `pack.mcmeta` formats, overlays and filters; higher-resolution textures are scaled to the
+  game's size. Only the files the packs change are fetched, and they are loaded at once, without
+  reconnecting. Core shaders are ignored (OpenGL 1.5).
+
 ## Not done yet
 
+- Resource packs: no pack icons, drag and drop or pack folder button in the selection screen;
+  TrueType and unihex fonts, the title screen's panorama and splashes (no title screen yet),
+  animations past their first frame, and core shaders are not used.
 - No recipe book. The creative inventory draws potions and tipped arrows untinted and without
   the enchantment glint, and has no drag-splitting of stacks.
 - No ambient cave sounds or biome music (music.game everywhere).
-- Options screens without anything behind them yet: key binds, language, resource packs,
+- Options screens without anything behind them yet: key binds, language,
   telemetry, credits; brightness only lifts the night (Penryn has no light levels yet).
 - Block entities other than chests and signs (banners, heads, shulker boxes, bells) are drawn
   without their entity model. Signs show their text (front and back, colours, glow ink) and
@@ -145,6 +163,10 @@ Penryn fetches them on its first start. To make them by hand:
 python3 tools/make_assets.py ~/.local/share/horizon-launcher/versions/<version>/.local/horizon-client/26.3 \
     --jar ~/.local/share/horizon-launcher/minecraft/versions/26.3/26.3.jar  OUT_DIR
 ```
+
+Resource packs go through the relay too: it downloads a server's pack and bakes the pack stack
+into the files the packs change (kept in DATA/packs); your own packs go in DATA/resourcepacks
+(`~/.local/share/penryn-relay/resourcepacks` by default), zips or folders as vanilla takes them.
 
 Nothing from Mojang is in this repository.
 

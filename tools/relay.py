@@ -293,7 +293,7 @@ def pack_job(key, work, keep=True):
     """Runs work() once in a thread for `key`: (status, text) for the client to poll."""
     with PACK_LOCK:
         j = PACK_JOBS.get(key)
-        if j is None or j["state"] == "failed":
+        if j is None:
             j = PACK_JOBS[key] = {"state": "working", "result": "", "progress": ""}
 
             def run():

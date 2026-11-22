@@ -99,6 +99,10 @@ pub trait Host {
     fn ui_frame(&mut self, draw: &mut dyn FnMut(&mut Gui, f32, f32), input: &mut Vec<Input>) -> bool;
     /// Loads game files `names` again (from `path`) and everything drawn with them.
     fn reload(&mut self, names: &[String], world: Option<&mut World>, blocks: &mut Blocks);
+    /// No window: prompts are answered without asking (PENRYN_PACK_ANSWER, else yes).
+    fn headless(&self) -> bool {
+        false
+    }
 }
 
 /// Without a window (penryn join): prompts answered by PENRYN_PACK_ANSWER (yes by default),
@@ -106,6 +110,9 @@ pub trait Host {
 pub struct NoWindow;
 
 impl Host for NoWindow {
+    fn headless(&self) -> bool {
+        true
+    }
     fn ui_frame(&mut self, _draw: &mut dyn FnMut(&mut Gui, f32, f32), _input: &mut Vec<Input>) -> bool {
         sys::sleep_ms(20);
         true
@@ -780,8 +787,9 @@ impl Packs {
         self.flush(c, packet)?;
         if let Some(p) = self.prompt.as_ref() {
             let due = sys::now_ms() > p.shown_at + 1500;
-            match sys::env("PENRYN_PACK_ANSWER") {
-                Some(a) if due => self.answer(a != "no"),
+            let auto = sys::env("PENRYN_PACK_ANSWER").or_else(|| if host.headless() { Some(String::from("yes")) } else { None });
+            match auto {
+                Some(a) if due || host.headless() => self.answer(a != "no"),
                 _ => {
                     let mut input = Vec::new();
                     if !host.ui_frame(&mut |gui, mx, my| draw_prompt(gui, p, mx, my), &mut input) {
@@ -895,7 +903,7 @@ pub fn wait_stack(refs: &[String], old: &[String], host: &mut dyn Host, mut worl
         }
         let mut input = Vec::new();
         host.ui_frame(&mut |gui, _, _| {
-            gui.text_centered(&crate::lang::get("resourcepack.progress").replace("%s", ""), gui.width / 2.0, gui.height / 2.0 - 4.0, WHITE);
+            gui.text_centered(&crate::lang::get("resourcepack.downloading"), gui.width / 2.0, gui.height / 2.0 - 4.0, WHITE);
         }, &mut input);
         sys::sleep_ms(200);
     }

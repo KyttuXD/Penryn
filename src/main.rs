@@ -112,12 +112,12 @@ fn run(args: &[String]) -> Result<(), String> {
             let (h, p) = http::host_port(args.get(2).ok_or(USAGE)?, 25565);
             let name = args.get(3).cloned().unwrap_or_else(|| String::from("LitePlayer"));
             let secs: u64 = sys::env("PENRYN_SECONDS").and_then(|s| s.parse().ok()).unwrap_or(20);
+            packs::set_relay(sys::env("PENRYN_RELAY").map(|r| http::host_port(&r, 25580)));
             let mut g = client::Game::join(&h, p, &name, None, load_blocks()?, 6, Vec::new(), &mut packs::NoWindow)?;
             let end = sys::now_ms() + secs * 1000;
             let mut next_tick = sys::now_ms();
             let mut last_report = 0;
             let mut said = false;
-            packs::set_relay(sys::env("PENRYN_RELAY").map(|r| http::host_port(&r, 25580)));
             while sys::now_ms() < end {
                 g.wait(10)?;
                 if g.reconfigure {
