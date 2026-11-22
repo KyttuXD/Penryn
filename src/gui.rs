@@ -679,6 +679,16 @@ impl Gui {
         self.tex
     }
 
+    /// A glyph of the font for text drawn elsewhere (signs in the world): its uv (u0, v0, u1,
+    /// v1), its quad from the pen (x, y, w, h, in font pixels) and its advance; '?' for
+    /// characters the font lacks.
+    pub fn glyph_quad(&self, ch: char) -> Option<([f32; 4], [f32; 4], f32)> {
+        let g = self.glyphs.get(&(ch as u32)).or_else(|| self.glyphs.get(&('?' as u32)))?;
+        let uv = [g.x as f32 / self.aw, g.y as f32 / self.ah, (g.x as f32 + g.cw as f32) / self.aw, (g.y as f32 + g.ch as f32) / self.ah];
+        let w = if g.ch > 0 { g.cw as f32 * g.height as f32 / g.ch as f32 } else { 0.0 };
+        Some((uv, [0.0, g.yoff as f32, w, g.height as f32], g.adv as f32))
+    }
+
     /// A sprite's rectangle in the GUI atlas as uv (u0, v0, u1, v1).
     pub fn sprite_uv(&self, name: &str) -> Option<[f32; 4]> {
         let s = self.sprites.get(name)?;

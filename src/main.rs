@@ -27,6 +27,7 @@ mod render;
 mod screens;
 mod sdl;
 mod skins;
+mod signs;
 mod sky;
 mod net;
 mod sys;
@@ -234,8 +235,16 @@ fn selftest() -> Result<(), String> {
             for (what, got, want) in physics_checks(&b) {
                 check(what, got, want);
             }
+            for (what, got, want) in signs::selftest(Some(&b)) {
+                check(what, got, want);
+            }
         }
-        Err(e) => say!("skip physics checks: {}", e),
+        Err(e) => {
+            say!("skip physics checks: {}", e);
+            for (what, got, want) in signs::selftest(None) {
+                check(what, got, want);
+            }
+        }
     }
     // Weather: vanilla's randomness, and with weather.bin which biome rains or snows.
     let wdata = sys::read_file(&alloc::format!("{}/weather.bin", data_dir()));

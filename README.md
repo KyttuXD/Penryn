@@ -58,8 +58,9 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 - No creative inventory screen (creative players get the survival one), no recipe book.
 - No particles (no rain splashes); no ambient cave sounds or biome music (music.game everywhere).
 - No settings screen: volume is fixed.
-- Block entities other than chests (signs' text, banners, heads, shulker boxes, bells) are drawn
-  without their entity model.
+- Block entities other than chests and signs (banners, heads, shulker boxes, bells) are drawn
+  without their entity model. Signs show their text (front and back, colours, glow ink) and
+  placing one opens vanilla's sign editor; its sign pictures come from `signs.bin` (optional).
 - Mobs show their default texture (no variants, no baby models, no armour or held items).
 - Only menus listed above have their own screen; others show their slots as chest rows.
 - Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);

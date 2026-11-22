@@ -147,7 +147,7 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
     const FILES: [(&str, &[u8; 4]); 4] =
         [("blocks.bin", BLOCKS_MAGIC), ("atlas.bin", ATLAS_MAGIC), ("gui.bin", GUI_MAGIC), ("entities.bin", ENTITIES_MAGIC)];
     // Small optional files: the game runs without them (no weather...).
-    const OPTIONAL: [(&str, &[u8; 4]); 1] = [("weather.bin", WEATHER_MAGIC)];
+    const OPTIONAL: &[(&str, &[u8; 4])] = &[("weather.bin", WEATHER_MAGIC), ("signs.bin", crate::signs::SIGNS_MAGIC)];
     let have = |n: &str, magic: &[u8; 4]| sys::read_head(&format!("{}/{}", dir, n), 4).map_or(false, |d| d == magic);
     let optional = OPTIONAL.iter().all(|(n, m)| have(n, m));
     if FILES.iter().all(|(n, m)| have(n, m)) && ((have("sounds.bin", SOUNDS_MAGIC) && optional) || relay.is_none()) {
@@ -175,7 +175,7 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
             return Err(format!("cannot write {}/{}", dir, n));
         }
     }
-    for (n, magic) in OPTIONAL {
+    for &(n, magic) in OPTIONAL {
         if have(n, magic) {
             continue;
         }

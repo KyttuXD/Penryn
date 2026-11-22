@@ -34,6 +34,10 @@ fn skip(r: &mut In, t: u8, depth: u32) -> Option<()> {
         9 => {
             let et = r.u8()?;
             let n = r.i32()?;
+            // A list of End tags holds nothing: a count there would only spin.
+            if et == 0 && n > 0 {
+                return None;
+            }
             for _ in 0..n.max(0) {
                 skip(r, et, depth + 1)?;
             }
@@ -110,6 +114,9 @@ fn text_in(r: &mut In, t: u8, out: &mut String, depth: u32, parent: &str) -> Opt
         9 => {
             let et = r.u8()?;
             let n = r.i32()?;
+            if et == 0 && n > 0 {
+                return None;
+            }
             for _ in 0..n.max(0) {
                 text_of(r, et, out, depth + 1)?;
             }
@@ -193,6 +200,20 @@ fn text_in(r: &mut In, t: u8, out: &mut String, depth: u32, parent: &str) -> Opt
         _ => skip(r, t, depth + 1)?,
     }
     Some(())
+}
+
+/// Skips a tag payload whose type byte (`t`) was already read: compound entries and list
+/// elements read elsewhere (block entities).
+pub fn skip_payload(r: &mut In, t: u8) -> Option<()> {
+    skip(r, t, 0)
+}
+
+/// The text of a chat component whose type byte (`t`) was already read (a list element or a
+/// compound entry), with its colours as formatting codes. `None` on malformed data.
+pub fn text_payload(r: &mut In, t: u8) -> Option<String> {
+    let mut s = String::new();
+    text_of(r, t, &mut s, 0)?;
+    Some(s)
 }
 
 /// The plain text of a chat component sent as network NBT.

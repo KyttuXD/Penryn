@@ -87,6 +87,8 @@ pub struct Game {
     /// The rain and thunder levels (ClientboundGameEventPacket 1, 2, 7 and 8).
     pub rain_level: f32,
     pub thunder_level: f32,
+    /// Block entities' data (signs' text) and the sign editor the server opened.
+    pub block_entities: crate::signs::BlockEntities,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -293,6 +295,7 @@ impl Game {
             fly_speed: 0.05,
             rain_level: 0.0,
             thunder_level: 0.0,
+            block_entities: crate::signs::BlockEntities::new(),
         })
     }
 
@@ -399,10 +402,15 @@ impl Game {
                     }
                     self.chunks_received += 1;
                 }
+                // Then the chunk's block entities: signs' text.
+                if self.block_entities.read_chunk(x, z, &mut r).is_none() {
+                    crate::warn!("chunk {} {}: could not read its block entities", x, z);
+                }
             }
             play::C_FORGET_LEVEL_CHUNK => {
                 let v = r.i64().unwrap_or(0);
                 self.world.forget(v as i32, (v >> 32) as i32);
+                self.block_entities.forget(v as i32, (v >> 32) as i32);
             }
             play::C_CHUNK_BATCH_FINISHED => {
                 let mut o = Out::new();
@@ -414,7 +422,9 @@ impl Game {
                 let s = r.varint().unwrap_or(0) as u16;
                 let (x, y, z) = ((v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32);
                 let blocks = &self.blocks;
+                let old = self.world.get(x, y, z);
                 self.world.set(x, y, z, s, &|s| blocks.kind(s) == crate::blocks::AIR);
+                self.block_entities.block_changed(blocks, old, x, y, z, s);
                 // The block this client placed: its place sound (BlockItem.place plays it).
                 if let Some((pp, at)) = self.placing {
                     if pp == [x, y, z] && crate::sys::now_ms() < at + 1500 && blocks.kind(s) != crate::blocks::AIR {
@@ -441,7 +451,20 @@ impl Game {
                     let state = (c >> 12) as u16;
                     let (x, z, y) = ((c >> 8 & 15) as i32, (c >> 4 & 15) as i32, (c & 15) as i32);
                     let blocks = &self.blocks;
+                    let old = self.world.get(sx * 16 + x, sy * 16 + y, sz * 16 + z);
                     self.world.set(sx * 16 + x, sy * 16 + y, sz * 16 + z, state, &|s| blocks.kind(s) == crate::blocks::AIR);
+                    self.block_entities.block_changed(blocks, old, sx * 16 + x, sy * 16 + y, sz * 16 + z, state);
+                }
+            }
+            play::C_BLOCK_ENTITY_DATA | play::C_OPEN_SIGN_EDITOR => {
+                let v = r.i64().unwrap_or(0);
+                let (x, y, z) = ((v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32);
+                if p.id == play::C_OPEN_SIGN_EDITOR {
+                    // SignTextSlot: 0 back, 1 front.
+                    self.block_entities.open_request = Some(([x, y, z], r.varint().unwrap_or(1) == 1));
+                } else {
+                    let _kind = r.varint();
+                    let _ = self.block_entities.read_tag(x, y, z, &mut r);
                 }
             }
             play::C_PLAYER_ABILITIES => {
@@ -846,6 +869,7 @@ impl Game {
         // A new level starts dry; the server sends its weather again.
         self.rain_level = 0.0;
         self.thunder_level = 0.0;
+        self.block_entities.clear();
     }
 
     pub fn add_chat(&mut self, line: String) {

@@ -66,6 +66,8 @@ enum Screen {
     /// The player's inventory, or a container the server opened.
     Inventory,
     Dead,
+    /// The sign editor the server opened (signs.rs).
+    Sign,
 }
 
 /// Items used over time while the button is held (eaten, drunk, drawn, raised), and for how
@@ -484,8 +486,15 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if down && repeat && self.screen == Screen::Chat && sc == K_BACKSPACE {
                     self.chat_line.pop();
                 }
+                if down && repeat && self.screen == Screen::Sign && sc != K_ESC {
+                    crate::signs::key(g, sc)?;
+                }
             }
             sdl::EV_TEXTINPUT => {
+                if let (Screen::Sign, Some(gui)) = (&self.screen, self.gui.as_ref()) {
+                    let n = e.0[12..44].iter().position(|b| *b == 0).unwrap_or(32);
+                    crate::signs::type_text(g, gui, &String::from_utf8_lossy(&e.0[12..12 + n]));
+                }
                 if self.screen == Screen::Chat {
                     let mut n = 0;
                     while n < 32 && e.0[12 + n] != 0 {
@@ -589,6 +598,13 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     return Ok(true);
                 }
             }
+            Screen::Sign if button == 1 => {
+                if crate::signs::done_button(gui).hit(mx, my) {
+                    self.ui_click();
+                    crate::signs::close(g)?;
+                    self.set_screen(Screen::Play);
+                }
+            }
             Screen::Inventory if button == 1 || button == 3 => {
                 let win = screens::window(g);
                 let shift = self.keys[K_LSHIFT] || self.keys[K_RSHIFT];
@@ -616,7 +632,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
 
     fn set_screen(&mut self, s: Screen) {
         self.v.grab_mouse(s == Screen::Play);
-        self.v.text_input(s == Screen::Chat);
+        self.v.text_input(s == Screen::Chat || s == Screen::Sign);
         if s != Screen::Play {
             self.left_down = false;
             self.right_down = false;
@@ -641,6 +657,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
                 _ => {}
             },
+            Screen::Sign => {
+                if crate::signs::key(g, sc)? {
+                    self.set_screen(Screen::Play);
+                }
+            }
             Screen::Pause => match sc {
                 K_ESC => self.set_screen(Screen::Play),
                 K_Q => return Ok(true),
@@ -734,11 +755,33 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 self.set_screen(Screen::Play);
             }
         }
+        // The server opened a sign's editor (after placing one, or using one); typing for tests.
+        if let Some((pos, front)) = g.block_entities.open_request.take() {
+            if crate::signs::open_editor(g, pos, front) {
+                self.set_screen(Screen::Sign);
+            }
+        }
+        if self.screen == Screen::Sign {
+            if !crate::signs::editor_valid(g) {
+                crate::signs::close(g)?;
+                self.set_screen(Screen::Play);
+            } else if let (true, Some(gui)) = (self.test_keys.contains('N') || self.test_keys.contains('M'), self.gui.as_ref()) {
+                if crate::signs::test_type(g, gui, self.test_keys.contains('N'))? {
+                    self.test_keys = self.test_keys.replace('R', "");
+                    self.set_screen(Screen::Play);
+                }
+            }
+        }
         if g.dead && self.screen != Screen::Dead {
             self.respawn_sent = false;
             self.set_screen(Screen::Dead);
         } else if !g.dead && self.screen == Screen::Dead {
             self.set_screen(Screen::Play);
+        }
+        // Another screen took the sign editor's place (death, a container): its text still goes
+        // to the server (AbstractSignEditScreen.removed).
+        if self.screen != Screen::Sign && g.block_entities.editor.is_some() {
+            crate::signs::close(g)?;
         }
         // The held item's name shows for 2 s when it changes.
         let held = (g.selected, g.held());
@@ -1201,6 +1244,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let icons = self.gui.as_ref().map(|gui| &gui.icons[..]).unwrap_or(&[]);
         let (atlas, atlas_size) = (self.r.atlas, self.r.atlas_size);
         let blocks_ref = &g.blocks;
+        let block_entities = &g.block_entities;
+        let world_ref = &g.world;
         let gui_ref = self.gui.as_ref();
         let sky_ref = &self.sky;
         let (day_time, game_time) = (g.day_time, g.game_time as f64 + partial);
@@ -1224,6 +1269,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     crate::skins::draw(gl, view, eye, entities, pf, own, t);
                 }
                 crate::entities::draw_items(gl, view, eye, entities, pf, icons, blocks_ref, atlas, atlas_size);
+                if let Some(gui) = gui_ref {
+                    crate::signs::draw_world(gl, view, eye, block_entities, world_ref, blocks_ref, gui);
+                }
                 if let (Some(gui), false) = (gui_ref, dim) {
                     sky_ref.draw_clouds(gl, view, gui, eye, game_time, day, radius);
                 }
@@ -1334,6 +1382,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 let win = screens::window(g);
                 screens::draw_window(&mut gui, g, &win, mx, my);
             }
+            Screen::Sign => crate::signs::draw_editor(&mut gui, &self.v.gl, w, h, g, mx, my),
             Screen::Dead => {
                 let msg = g.chat.last().map(|c| c.0.clone()).unwrap_or_default();
                 screens::draw_death(&mut gui, mx, my, &msg);
