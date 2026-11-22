@@ -292,13 +292,16 @@ def skin_texture(data_dir, url):
             return f.read()
     req = urllib.request.Request("https://textures.minecraft.net/texture/" + h, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=20) as r:
-        body = r.read(1 << 21)
+        body = r.read((1 << 21) + 1)
+    if len(body) > 1 << 21:
+        raise ValueError("texture too big")
     if not body.startswith(b"\x89PNG\r\n\x1a\n"):
         raise ValueError("not a PNG")
     os.makedirs(cache, exist_ok=True)
-    with open(path + ".part", "wb") as f:
+    part = "%s.%s.part" % (path, secrets.token_hex(4))  # two requests at once write apart
+    with open(part, "wb") as f:
         f.write(body)
-    os.replace(path + ".part", path)
+    os.replace(part, path)
     return body
 
 

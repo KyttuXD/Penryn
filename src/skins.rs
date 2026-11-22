@@ -132,6 +132,9 @@ pub fn png(d: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
         let body = d.get(p + 8..p + 8 + n)?;
         match kind {
             b"IHDR" => {
+                if body.len() < 13 {
+                    return None;
+                }
                 w = be(p + 8);
                 h = be(p + 12);
                 ct = body[9];
@@ -139,7 +142,7 @@ pub fn png(d: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
                     return None;
                 }
             }
-            b"PLTE" => pal = body.chunks(3).map(|c| [c[0], c[1], c[2], 255]).collect(),
+            b"PLTE" => pal = body.chunks_exact(3).map(|c| [c[0], c[1], c[2], 255]).collect(),
             b"tRNS" => {
                 for (i, a) in body.iter().enumerate() {
                     if let Some(e) = pal.get_mut(i) {
@@ -152,6 +155,9 @@ pub fn png(d: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
             _ => {}
         }
         p += 12 + n;
+    }
+    if w == 0 {
+        return None; // no IHDR
     }
     let bpp = match ct {
         0 | 3 => 1,
@@ -672,7 +678,8 @@ fn cape_quads(out: &mut Vec<V>, e: &crate::entities::Entity, at: [f64; 3], angle
     for (c, n) in CAPE.iter() {
         let ny = 16.0 * (t[1][0] * n[0] as f64 + t[1][1] * n[1] as f64 + t[1][2] * n[2] as f64);
         let l = (0.7 + 0.3 * ny.clamp(-1.0, 1.0)) as f32;
-        let col = if e.hurt > 0 { [255, (110.0 * l) as u8, (110.0 * l) as u8, 255] } else { [(255.0 * l) as u8, (255.0 * l) as u8, (255.0 * l) as u8, 255] };
+        // CapeLayer draws with OverlayTexture.NO_OVERLAY: no red flash when hurt.
+        let col = [(255.0 * l) as u8, (255.0 * l) as u8, (255.0 * l) as u8, 255];
         for v in c.iter() {
             let x = t[0][0] * v[0] as f64 + t[0][1] * v[1] as f64 + t[0][2] * v[2] as f64 + t[0][3];
             let y = t[1][0] * v[0] as f64 + t[1][1] * v[1] as f64 + t[1][2] * v[2] as f64 + t[1][3];
@@ -814,6 +821,14 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     let file = png_file(64, 32, &raw);
     let img = png(&file);
     out.push(("PNG decode", format!("{:?}", img.as_ref().map(|i| (i.0, i.1, &i.2[(5 * 64 + 9) * 4..(5 * 64 + 9) * 4 + 4]))), "Some((64, 32, [36, 40, 77, 255]))"));
+    // Broken files are refused, never a crash: a short IHDR, a PLTE of 4 bytes, no IHDR, cut short.
+    let mut short = b"\x89PNG\r\n\x1a\n".to_vec();
+    short.extend_from_slice(&[0, 0, 0, 2, b'I', b'H', b'D', b'R', 0, 0, 0, 0, 0, 0, 0, 4, b'P', b'L', b'T', b'E', 1, 2, 3, 4, 0, 0, 0, 0]);
+    short.resize(40, 0);
+    let mut no_ihdr = file.clone();
+    no_ihdr[12..16].copy_from_slice(b"iHDR");
+    let cut = &file[..file.len() / 2];
+    out.push(("broken PNGs refused", format!("{:?}", (png(&short).is_none(), png(&no_ihdr).is_none(), png(cut).is_none())), "(true, true, true)"));
     let skin = img.and_then(|(w, h, px)| process_skin(w, h, px));
     // The right leg's front (4, 20) mirrored onto the left leg's front (20, 52): x 4 lands at 23.
     let at = |s: &Vec<u8>, x: usize, y: usize| [s[(y * 64 + x) * 4], s[(y * 64 + x) * 4 + 1], s[(y * 64 + x) * 4 + 3]];
