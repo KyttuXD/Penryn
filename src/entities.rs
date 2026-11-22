@@ -1067,14 +1067,14 @@ fn name_tags(gl: &Gl, view: &[f32; 16], gui: &crate::gui::Gui, tags: &mut Vec<([
 impl EntityTable {
     /// The player model (slim or wide) of `e` at `at` (relative to the eye) for skins.rs:
     /// corners with uvs 0..1 over the whole skin, and their colour.
-    pub fn player_quads(&self, e: &Entity, at: [f64; 3], partial: f32, slim: bool) -> Vec<([f32; 3], [f32; 2], [u8; 4])> {
+    pub fn player_quads(&self, e: &Entity, at: [f64; 3], partial: f32, slim: bool, items: &[String]) -> Vec<([f32; 3], [f32; 2], [u8; 4])> {
         let mut v: Vec<V> = Vec::new();
         let mi = self.player_models[if slim { 0 } else { 1 }];
         if mi >= 0 {
             // A rectangle the size of the atlas maps the model's uvs onto themselves.
             let m = &self.models[mi as usize];
             let mut mats: Vec<M> = Vec::new();
-            self.pose(m, e, partial, at, &[], &mut mats);
+            self.pose(m, e, partial, at, items, &mut mats);
             self.emit(&mut v, m, &mats, [0, 0, self.aw as u16, self.ah as u16], [255; 3], e.hurt > 0 || e.death_time > 0);
         }
         v.iter().map(|q| (q.p, q.uv, q.c)).collect()

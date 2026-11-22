@@ -709,7 +709,7 @@ fn submit(gl: &Gl, tex: u32, v: &[V], alpha: bool) {
 
 /// Draws the players EntityTable::draw left out: their own skin, and their cape
 /// (`Avatar.isModelPartShown(CAPE)`, entity data 16 bit 0). One draw call per texture.
-pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, crate::entities::Entity>, partial: f32, skip: i32, table: &crate::entities::EntityTable) {
+pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, crate::entities::Entity>, partial: f32, skip: i32, table: &crate::entities::EntityTable, items: &[String]) {
     let s = st();
     if s.profiles.is_empty() {
         return;
@@ -741,7 +741,7 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, crate
         v.clear();
         match skin_of(&e.uuid) {
             Some((tex, slim)) => {
-                for q in table.player_quads(e, at, partial, slim) {
+                for q in table.player_quads(e, at, partial, slim, items) {
                     v.push(V { p: q.0, uv: q.1, c: q.2 });
                 }
                 submit(gl, tex, &v, true);
@@ -750,7 +750,7 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, crate
                 let i = crate::entities::EntityTable::skin_index(&e.uuid);
                 let (aw, ah) = table.atlas_size();
                 if let Some(r) = table.skins.get(i) {
-                    for q in table.player_quads(e, at, partial, i < 9) {
+                    for q in table.player_quads(e, at, partial, i < 9, items) {
                         v.push(V { p: q.0, uv: [(r[0] as f32 + q.1[0] * r[2] as f32) / aw, (r[1] as f32 + q.1[1] * r[3] as f32) / ah], c: q.2 });
                     }
                     submit(gl, table.texture(), &v, true);
