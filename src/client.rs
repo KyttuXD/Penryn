@@ -886,8 +886,18 @@ impl Game {
                     e.hurt = 10;
                 }
             }
-            play::C_PLAYER_INFO_UPDATE => crate::skins::player_info(&mut r, self.uuid),
-            play::C_PLAYER_INFO_REMOVE => crate::skins::player_remove(&mut r),
+            play::C_PLAYER_INFO_UPDATE => {
+                // Two readers over the same body: the skins take the profile, mobs.rs keeps the
+                // name table (it used to sit in an arm that could never match).
+                let mut names = crate::wire::In { b: r.b, pos: r.pos };
+                crate::skins::player_info(&mut r, self.uuid);
+                crate::mobs::player_info(&mut names, &mut self.player_names);
+            }
+            play::C_PLAYER_INFO_REMOVE => {
+                let mut names = crate::wire::In { b: r.b, pos: r.pos };
+                crate::skins::player_remove(&mut r);
+                crate::mobs::player_info_remove(&mut names, &mut self.player_names);
+            }
             play::C_SET_ENTITY_DATA => {
                 let id = r.varint().unwrap_or(0);
                 if let Some(e) = self.entities.get_mut(&id) {
@@ -900,12 +910,6 @@ impl Game {
                 if let Some(e) = self.entities.get_mut(&id) {
                     crate::mobs::equipment(&mut r, e, slot);
                 }
-            }
-            crate::mobs::C_PLAYER_INFO_UPDATE => {
-                crate::mobs::player_info(&mut r, &mut self.player_names);
-            }
-            crate::mobs::C_PLAYER_INFO_REMOVE => {
-                crate::mobs::player_info_remove(&mut r, &mut self.player_names);
             }
             play::C_SOUND | play::C_SOUND_ENTITY => {
                 // SoundEvent holder: registry id + 1, or 0 and an inline name (and range).
