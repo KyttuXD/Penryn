@@ -1155,9 +1155,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         if self.test_keys.contains('L') {
             self.left_down = true;
         }
-        // rwait=TICKS: R starts that many ticks after joining (menus.rs counts them).
-        let rwait: u32 = self.test_keys.split(',').find_map(|t| t.strip_prefix("rwait=")).and_then(|v| v.parse().ok()).unwrap_or(0);
-        if self.test_keys.contains('R') && self.screen == Screen::Play && g.menus.ticks >= rwait {
+        // rt=TICKS: R starts that many ticks after joining (menus.rs counts them).
+        let rt: u32 = self.test_keys.split(',').find_map(|t| t.strip_prefix("rt=")).and_then(|v| v.parse().ok()).unwrap_or(0);
+        if self.test_keys.contains('R') && self.screen == Screen::Play && g.menus.ticks >= rt {
             self.right_down = true;
         }
         for part in self.test_keys.split(',') {

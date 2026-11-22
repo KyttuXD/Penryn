@@ -5,6 +5,7 @@
 
 use crate::entities::Entity;
 use crate::hand::M;
+use crate::math;
 use crate::sdl::*;
 use crate::wire::In;
 use alloc::collections::BTreeMap;
@@ -329,7 +330,10 @@ pub fn draw_frames(
     let mut flat = Batch::new();
     let tiles_row = (atlas_size.0 / 16.0) as u32;
     for e in ents.values().filter(|e| is_frame(e.kind)) {
-        let p = [e.pos[0] - eye[0], e.pos[1] - eye[1], e.pos[2] - eye[2]];
+        // The spawn packet gives the frame's block (HangingEntity.recreateFromPacket); the
+        // renderer's step of 0.46875 out from its centre brings it back to the block's centre.
+        let c = [math::floor(e.pos[0]) + 0.5, math::floor(e.pos[1]) + 0.5, math::floor(e.pos[2]) + 0.5];
+        let p = [c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]];
         if p[0] * p[0] + p[1] * p[1] + p[2] * p[2] > 64.0 * 64.0 {
             continue;
         }
@@ -341,7 +345,7 @@ pub fn draw_frames(
         } else {
             (-90.0 * st[1], 180.0)
         };
-        let m = M::id().t(p[0], p[1], p[2]).t(st[0] * 0.46875, st[1] * 0.46875, st[2] * 0.46875).r(0, xr).r(1, yr);
+        let m = M::id().t(p[0], p[1], p[2]).r(0, xr).r(1, yr);
         let invisible = e.data.get(&0).map_or(false, |f| f & 0x20 != 0);
         let map = e.data.get(&FRAMED_MAP).map(|v| *v as i32).filter(|_| e.item.is_some());
         let glow = e.kind == GLOW_ITEM_FRAME;
