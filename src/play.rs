@@ -519,6 +519,8 @@ impl App {
         self.keys = [false; 512];
         self.chat_ui = crate::chatui::ChatUi::new();
         self.book = None;
+        self.ride = crate::riding::Rider::new();
+        self.special = crate::special::Special::new();
         self.mover = Mover::new([0.0; 3]);
         self.prev_pos = [0.0; 3];
         self.sprinting = false;
