@@ -736,10 +736,13 @@ impl Game {
                 let Some(e) = self.entities.get_mut(&id) else { return Ok(()) };
                 if p.id == play::C_MOVE_ENTITY_ROT {
                     e.on_ground = r.bool().unwrap_or(false);
-                    e.yaw = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
-                    e.pitch = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
+                    let (yaw, pitch) = (r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0, r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0);
+                    let (pos, steps) = (e.target, e.steps.max(3));
+                    e.set_target(pos, yaw, pitch, steps);
                 } else {
-                    // 26.3: on-ground in bit 0, the number of timed steps above it.
+                    // 26.3: on-ground in bit 0, the number of timed steps above it. Each delta is
+                    // relative to the server's position (the last target), and each one counts
+                    // as a step of its own, so the entity glides to it instead of jumping.
                     let props = r.varint().unwrap_or(0) as u32;
                     e.on_ground = props & 1 != 0;
                     let steps = props >> 1;
@@ -752,19 +755,22 @@ impl Game {
                             deltas.push([r.u16().unwrap_or(0) as i16, r.u16().unwrap_or(0) as i16, r.u16().unwrap_or(0) as i16]);
                         }
                     }
-                    for d in deltas {
+                    let (mut pos, mut yaw, mut pitch) = (e.target, e.target_yaw, e.target_pitch);
+                    for d in deltas.iter() {
                         for a in 0..3 {
                             if d[a] != 0 {
                                 // VecDeltaCodec: quantize the base to 1/4096, then add.
-                                let q = crate::math::floor(e.pos[a] * 4096.0 + 0.5) as i64 + d[a] as i64;
-                                e.pos[a] = q as f64 / 4096.0;
+                                let q = crate::math::floor(pos[a] * 4096.0 + 0.5) as i64 + d[a] as i64;
+                                pos[a] = q as f64 / 4096.0;
                             }
                         }
                     }
                     if p.id == play::C_MOVE_ENTITY_POS_ROT {
-                        e.yaw = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
-                        e.pitch = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
+                        yaw = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
+                        pitch = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
                     }
+                    let n = (deltas.len() as u32).clamp(3, 8);
+                    e.set_target(pos, yaw, pitch, n);
                 }
             }
             play::C_TELEPORT_ENTITY => {
@@ -774,11 +780,12 @@ impl Game {
                 let (yaw, pitch) = (r.f32().unwrap_or(0.0), r.f32().unwrap_or(0.0));
                 let rel = r.i32().unwrap_or(0);
                 if let Some(e) = self.entities.get_mut(&id) {
+                    let mut to = e.target;
                     for a in 0..3 {
-                        e.pos[a] = if rel & (1 << a) != 0 { e.pos[a] + pos[a] } else { pos[a] };
+                        to[a] = if rel & (1 << a) != 0 { e.target[a] + pos[a] } else { pos[a] };
                     }
-                    e.yaw = if rel & 8 != 0 { e.yaw + yaw } else { yaw };
-                    e.pitch = if rel & 16 != 0 { e.pitch + pitch } else { pitch };
+                    let (yw, pt) = (if rel & 8 != 0 { e.target_yaw + yaw } else { yaw }, if rel & 16 != 0 { e.target_pitch + pitch } else { pitch });
+                    e.set_target(to, yw, pt, 3);
                 }
             }
             play::C_ENTITY_POSITION_SYNC => {
@@ -797,9 +804,7 @@ impl Game {
                 }
                 let (yaw, pitch) = (r.f32().unwrap_or(0.0), r.f32().unwrap_or(0.0));
                 if let (Some(e), Some(p)) = (self.entities.get_mut(&id), pos) {
-                    e.pos = p;
-                    e.yaw = yaw;
-                    e.pitch = pitch;
+                    e.set_target(p, yaw, pitch, 3);
                 }
             }
             play::C_ROTATE_HEAD => {
