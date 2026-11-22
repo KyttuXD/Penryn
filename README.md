@@ -197,8 +197,9 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   splashes are not drawn yet.
 - Mobs: no armour trims or dyed leather colours, no heads or pumpkins worn, no shields or other
   specially drawn items in hands, no elytra wings drawn on players.
-- No enchanting book model, smithing armour stand or mount model in their screens; the stonecutter does not resolve recipe inputs given as tags; a held map is drawn
-  without the arms holding it.
+- No enchanting book model, smithing armour stand or mount model in their screens; the
+  stonecutter does not resolve recipe inputs given as tags; a held map is drawn without the arms
+  holding it.
 - Riding: striders do not walk on lava yet, no third-person view, a horse's rearing and
   the camel's sitting transitions are not followed on the seat.
 - Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);
@@ -307,17 +308,22 @@ E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
 | `src/mesher.rs`, `terrain.rs`, `occlusion.rs` | meshing sections on worker threads, their vertex buffers and draw calls, cave culling |
 | `src/perf.rs` | the per-stage frame timer behind `PENRYN_PERF` |
 | `src/entities.rs` | entities and their models |
+| `src/mobs.rs`, `signs.rs`, `font.rs`, `creative.rs`, `options.rs` | mob variants, sign pictures and text, the font, the creative inventory, the options screens |
 | `src/skins.rs` | players' skins and capes: profile textures, PNG decoding, the download thread |
+| `src/packs.rs` | resource packs: the server's pushes, the player's own packs (options `resourcePacks`), the selection screen, the statuses sent back |
 | `src/title.rs`, `multiplayer.rs`, `servers.rs` | the title screen and panorama, the multiplayer screens, servers.dat, the server-list ping, LAN worlds |
 | `src/task.rs`, `json.rs` | work on threads of its own (pings, joining, signing in); a JSON reader |
 | `src/weather.rs` | rain, snow, thunder and lightning |
 | `src/particles.rs` | particles (vanilla's ParticleEngine) |
 | `src/gui.rs`, `screens.rs`, `lang.rs` | vanilla's GUI |
+| `src/talk.rs`, `chatui.rs`, `commands.rs`, `text.rs` | secure chat and its keys, the chat screen, the command tree, text components |
 | `src/menus.rs`, `books.rs`, `maps.rs` | the other container screens, books, maps and item frames |
 | `src/play.rs`, `physics.rs` | the game window, input, movement, digging |
 | `src/effects.rs`, `moving.rs` | status effects; pistons and shulker lids in motion |
+| `src/riding.rs`, `boat.rs`, `special.rs`, `poses.rs` | vehicles and their seats, boats, swimming, crawling, gliding and players' poses |
 | `src/serverui.rs`, `serverhud.rs` | tab list, scoreboard, teams, boss bars, titles, world border, links, cookies, transfers |
 | `src/tooltip.rs`, `gamemode.rs` | item components and tooltips; spectator and adventure mode |
+| `src/main.rs` | the command line, and the commands that run without a window (`status`, `join`, `selftest`) |
 | `src/sys.rs`, `sdl.rs`, `math.rs` | the C library, SDL2 and OpenGL, float maths (no libm) |
 | `src/account.rs`, `http.rs`, `tools/relay.py` | sign-in and the relay |
 | `tools/make_assets.py` | the game files, from your copy of Minecraft |
