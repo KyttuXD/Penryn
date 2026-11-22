@@ -288,7 +288,7 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
             let after: u64 = sys::env("PENRYN_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(8);
             (p, sys::now_ms() + after * 1000)
         }),
-        test_keys: sys::env("PENRYN_TEST_INPUT").unwrap_or_default(),
+        test_keys: crate::title::game_test_keys(&sys::env("PENRYN_TEST_INPUT").unwrap_or_default()),
         fps_at: sys::now_ms(),
         perf: sys::env("PENRYN_PERF").is_some(),
         frame_at: sys::now_ms(),
@@ -357,7 +357,7 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
     if let Some(d) = sys::read_file(&format!("{}/entities.bin", crate::data_dir())) {
         app.entities = Some(crate::entities::EntityTable::load(&app.v.gl, &d)?);
     }
-    let mut front = crate::title::Front::new(account, relay, name, &app.test_keys);
+    let mut front = crate::title::Front::new(account, relay, name, &sys::env("PENRYN_TEST_INPUT").unwrap_or_default());
     if let Some((h, p)) = server {
         front.connect(&format!("{}:{}", h, p), false, view as i8);
     }
@@ -379,7 +379,7 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
         let result = app.main_loop(&mut g);
         app.v.grab_mouse(false);
         match result {
-            Ok(()) if app.to_title => front.after_game(None),
+            _ if app.to_title => front.after_game(None),
             Ok(()) => return Ok(()),
             Err(e) => {
                 let reason = g.disconnected.clone().unwrap_or(e);
@@ -1544,7 +1544,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             let since = *self.loading_from.get_or_insert(now);
             if let (true, Some(gui)) = (now < since + 30000, self.gui.as_mut()) {
                 use crate::options::O;
-                crate::title::draw_loading(&self.v, gui, self.menu.o.get(O::PanoramaSpeed), self.menu.o.int(O::MenuBlur) > 0);
+                crate::title::draw_loading(&self.v, gui, self.menu.o.get(O::PanoramaSpeed), self.menu.o.int(O::MenuBlur));
                 return;
             }
         } else {

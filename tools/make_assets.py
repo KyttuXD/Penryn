@@ -1650,8 +1650,7 @@ def make_menu(res, assets, out_dir):
         u16 sprites; per sprite: u8 name length, name, u8 image, u16 x, y, width, height
 
     The panorama's six faces (gui/title/background, which the game's jar only holds as
-    placeholders: they come from the prepared data or the installed assets) at 512 x 512, and
-    a blurred 64 x 64 copy of each for the screens drawn over a blurred panorama."""
+    placeholders: they come from the prepared data or the installed assets) at 512 x 512."""
     def read_any(rel):
         # The prepared data and the installed asset objects have the real panorama.
         p = os.path.join(res, "assets", "minecraft", rel)
@@ -1698,32 +1697,6 @@ def make_menu(res, assets, out_dir):
             r[0::3], r[1::3], r[2::3] = row[0::3 * step], row[1::3 * step], row[2::3 * step]
             face += r
         add("panorama_%d" % i, n, h // step, 3, face)
-        # The blurred copy: 4 x 4 boxes of every fourth pixel, then three box blurs.
-        b = 64
-        k = w // b
-        small = [[0.0, 0.0, 0.0] for _ in range(b * b)]
-        for by in range(b):
-            for bx in range(b):
-                acc = [0, 0, 0]
-                for sy in range(0, k, max(1, k // 4)):
-                    for sx in range(0, k, max(1, k // 4)):
-                        o = ((by * k + sy) * w + bx * k + sx) * 3
-                        acc[0] += full[o]; acc[1] += full[o + 1]; acc[2] += full[o + 2]
-                cnt = len(range(0, k, max(1, k // 4))) ** 2
-                small[by * b + bx] = [acc[0] / cnt, acc[1] / cnt, acc[2] / cnt]
-        for _ in range(3):
-            for horiz in (True, False):
-                nxt = []
-                for y in range(b):
-                    for x in range(b):
-                        acc = [0.0, 0.0, 0.0]
-                        for d in (-1, 0, 1):
-                            xx, yy = (min(b - 1, max(0, x + d)), y) if horiz else (x, min(b - 1, max(0, y + d)))
-                            c = small[yy * b + xx]
-                            acc[0] += c[0]; acc[1] += c[1]; acc[2] += c[2]
-                        nxt.append([acc[0] / 3, acc[1] / 3, acc[2] / 3])
-                small = nxt
-        add("panorama_blur_%d" % i, b, b, 3, bytes(int(min(255, c[j] + 0.5)) for c in small for j in range(3)))
     for name, rel in (("overlay", "gui/title/background/panorama_overlay"), ("minecraft", "gui/title/minecraft"),
                       ("minceraft", "gui/title/minceraft"), ("edition", "gui/title/edition"),
                       ("menu_background", "gui/menu_background"), ("menu_list_background", "gui/menu_list_background"),

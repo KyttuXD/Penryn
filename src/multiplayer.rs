@@ -509,7 +509,8 @@ impl Mp {
                     return Act::Click;
                 }
                 if b[2].hit(mx, my) {
-                    let mut name = EditBox::new(&lang::get("selectServer.defaultName"), 32);
+                    // JoinMultiplayerScreen's Add Server: an empty name (the default as its hint).
+                    let mut name = EditBox::new("", 32);
                     name.hint = Some(lang::get("selectServer.defaultName"));
                     name.focus(true);
                     self.sub = Sub::Manage { edit: None, name, ip: EditBox::new("", 128), pack: Pack::Prompt };
@@ -656,15 +657,19 @@ impl Mp {
                 self.entries[i].st = St::Initial;
             }
             _ => {
-                // A Direct Connection address added for good keeps its remembered icon.
-                let mut s = s;
-                if let Some(h) = self.list.unhide(&s.ip) {
-                    self.list.servers.pop();
-                    s.icon = h.icon;
+                // A remembered Direct Connection address becomes listed (ServerList.unhide)
+                // with the new name and icon (copyNameIconFrom); else the server goes last.
+                match self.list.unhide(&s.ip) {
+                    Some(_) => {
+                        if let Some(last) = self.list.servers.last_mut() {
+                            last.name = s.name;
+                            last.icon = s.icon;
+                        }
+                    }
+                    None => self.list.servers.push(s),
                 }
-                self.list.servers.push(s);
                 self.entries.push(Entry::new());
-                self.sel = Some(Sel::Server(self.list.servers.len() - 1));
+                self.sel = None;
             }
         }
         self.list.save();

@@ -38,7 +38,6 @@ pub struct Image {
 
 pub struct Assets {
     faces: [u32; 6],
-    blur: [u32; 6],
     have_faces: bool,
     images: BTreeMap<String, Image>,
     /// Sprite: (texture, uv rectangle).
@@ -54,10 +53,14 @@ struct State {
     last: f64,
     /// LogoRenderer.showEasterEgg: "Minceraft", one start in 10000.
     easter: bool,
+    /// The blurred background: its texture, the small picture read back and a scratch row.
+    blur_tex: u32,
+    blur_px: Vec<u8>,
+    blur_tmp: Vec<u8>,
 }
 struct Main(UnsafeCell<State>);
 unsafe impl Sync for Main {}
-static STATE: Main = Main(UnsafeCell::new(State { assets: None, tried: false, spin: 0.0, last: 0.0, easter: false }));
+static STATE: Main = Main(UnsafeCell::new(State { assets: None, tried: false, spin: 0.0, last: 0.0, easter: false, blur_tex: 0, blur_px: Vec::new(), blur_tmp: Vec::new() }));
 
 /// The main thread's menu state (only the main thread draws).
 fn st() -> &'static mut State {
@@ -133,16 +136,14 @@ fn parse(gl: &Gl, d: &[u8]) -> Option<Assets> {
         sprites.insert(name, (t, [x / aw, y / ah, (x + w) / aw, (y + h) / ah]));
     }
     let face = |prefix: &str, i: usize| images.get(&format!("{}{}", prefix, i)).map(|im| im.tex);
-    let have_faces = (0..6).all(|i| face("panorama_", i).is_some() && face("panorama_blur_", i).is_some());
+    let have_faces = (0..6).all(|i| face("panorama_", i).is_some());
     let mut faces = [0u32; 6];
-    let mut blur = [0u32; 6];
     if have_faces {
         for i in 0..6 {
             faces[i] = face("panorama_", i).unwrap_or(0);
-            blur[i] = face("panorama_blur_", i).unwrap_or(0);
         }
     }
-    Some(Assets { faces, blur, have_faces, images, sprites, splashes })
+    Some(Assets { faces, have_faces, images, sprites, splashes })
 }
 
 /// menu.bin's pictures (loaded once; None without the file).
@@ -240,8 +241,12 @@ const FACES: [[[f32; 5]; 4]; 6] = [
 
 /// Panorama.extractRenderState: the spin goes on by 0.1 degree a tick times the Panorama
 /// Scroll Speed, and the cube is drawn with an 85-degree field of view, 10 degrees down.
-/// `blurred`: the blurred faces (Screen.extractBlurredBackground).
-pub fn panorama(gl: &Gl, w: i32, h: i32, speed: f64, blurred: bool) {
+pub fn panorama(gl: &Gl, w: i32, h: i32, speed: f64) {
+    panorama_in(gl, w, h, w, h, speed);
+}
+
+/// The panorama drawn into the lower left `vw` x `vh` pixels of a `w` x `h` window.
+fn panorama_in(gl: &Gl, w: i32, h: i32, vw: i32, vh: i32, speed: f64) {
     let s = st();
     let now = sys::now();
     if s.last > 0.0 {
@@ -253,6 +258,7 @@ pub fn panorama(gl: &Gl, w: i32, h: i32, speed: f64, blurred: bool) {
         (gl.Viewport)(0, 0, w, h);
         (gl.ClearColor)(0.0, 0.0, 0.0, 1.0);
         (gl.Clear)(sdl::COLOR_BUFFER_BIT | sdl::DEPTH_BUFFER_BIT);
+        (gl.Viewport)(0, 0, vw, vh);
     }
     let Some(a) = s.assets.as_ref().filter(|a| a.have_faces) else { return };
     let proj = crate::render::perspective_pub(85.0, w as f32 / h.max(1) as f32, 0.05, 10.0);
@@ -275,7 +281,7 @@ pub fn panorama(gl: &Gl, w: i32, h: i32, speed: f64, blurred: bool) {
         (gl.EnableClientState)(sdl::COLOR_ARRAY);
         (gl.ColorPointer)(4, sdl::UNSIGNED_BYTE, 4, WHITE4.as_ptr() as *const c_void);
         for (i, f) in FACES.iter().enumerate() {
-            (gl.BindTexture)(sdl::TEXTURE_2D, if blurred { a.blur[i] } else { a.faces[i] });
+            (gl.BindTexture)(sdl::TEXTURE_2D, a.faces[i]);
             (gl.VertexPointer)(3, sdl::FLOAT, 20, f.as_ptr() as *const c_void);
             (gl.TexCoordPointer)(2, sdl::FLOAT, 20, (f.as_ptr() as *const f32).add(3) as *const c_void);
             (gl.DrawArrays)(sdl::QUADS, 0, 4);
@@ -285,10 +291,68 @@ pub fn panorama(gl: &Gl, w: i32, h: i32, speed: f64, blurred: bool) {
     }
 }
 
+/// One box blur of radius 1 along rows (`dx` 4) or columns (`dx` the row's bytes), edges
+/// clamped.
+fn box_blur(px: &mut [u8], tmp: &mut Vec<u8>, w: usize, h: usize, along_rows: bool) {
+    tmp.clear();
+    tmp.extend_from_slice(px);
+    let (n, count, step, stride) = if along_rows { (w, h, 4, w * 4) } else { (h, w, w * 4, 4) };
+    for line in 0..count {
+        let base = line * stride;
+        for i in 0..n {
+            let a = base + i.saturating_sub(1) * step;
+            let b = base + i * step;
+            let c = base + (i + 1).min(n - 1) * step;
+            for k in 0..3 {
+                px[b + k] = ((tmp[a + k] as u16 + tmp[b + k] as u16 + tmp[c + k] as u16 + 1) / 3) as u8;
+            }
+        }
+    }
+}
+
+/// GameRenderer.processBlurEffect: vanilla blurs the screen with three box blurs of the Menu
+/// Background Blur radius in each direction. Here the panorama is drawn small, read back,
+/// blurred three times (radius 1) and stretched smoothly over the window: the same spread
+/// for a fraction of the work on an old GPU.
+fn blurred_panorama(gl: &Gl, gui: &mut Gui, w: i32, h: i32, speed: f64, radius: i32) {
+    let r = radius.max(1) as f64;
+    let d = ((r * (r + 1.0)) / 2.0).max(1.0);
+    let d = (crate::math::sqrt(d) + 0.5) as i32;
+    let d = (d.max(1)).min(8);
+    let (sw, sh) = ((w / d).max(1), (h / d).max(1));
+    panorama_in(gl, w, h, sw, sh, speed);
+    let s = st();
+    if s.assets.as_ref().map_or(true, |a| !a.have_faces) {
+        return;
+    }
+    let n = (sw * sh * 4) as usize;
+    s.blur_px.resize(n, 0);
+    unsafe {
+        (gl.PixelStorei)(sdl::PACK_ALIGNMENT, 1);
+        (gl.ReadPixels)(0, 0, sw, sh, sdl::RGBA, sdl::UNSIGNED_BYTE, s.blur_px.as_mut_ptr() as *mut c_void);
+        (gl.Viewport)(0, 0, w, h);
+        (gl.Clear)(sdl::COLOR_BUFFER_BIT);
+    }
+    for _ in 0..3 {
+        box_blur(&mut s.blur_px, &mut s.blur_tmp, sw as usize, sh as usize, true);
+        box_blur(&mut s.blur_px, &mut s.blur_tmp, sw as usize, sh as usize, false);
+    }
+    if s.blur_tex == 0 {
+        s.blur_tex = new_texture(gl);
+    }
+    upload(gl, s.blur_tex, sw as usize, sh as usize, &s.blur_px, 4, true);
+    // Read back bottom row first: drawn upside down.
+    gui.blit_tex(s.blur_tex, 0.0, 0.0, gui.width, gui.height, [0.0, 1.0, 1.0, 0.0], WHITE);
+}
+
 /// Screen.extractBackground without a world: the panorama, blurred when the Menu Background
 /// Blur option is on, then menu_background over it.
-pub fn menu_background(gl: &Gl, gui: &mut Gui, w: i32, h: i32, speed: f64, blur: bool) {
-    panorama(gl, w, h, speed, blur);
+pub fn menu_background(gl: &Gl, gui: &mut Gui, w: i32, h: i32, speed: f64, blur: i32) {
+    if blur > 0 {
+        blurred_panorama(gl, gui, w, h, speed, blur);
+    } else {
+        panorama(gl, w, h, speed);
+    }
     let a = st().assets.as_ref();
     let (gw, gh) = (gui.width, gui.height);
     if a.map_or(false, |a| a.images.contains_key("menu_background")) {
@@ -300,7 +364,7 @@ pub fn menu_background(gl: &Gl, gui: &mut Gui, w: i32, h: i32, speed: f64, blur:
 
 /// LevelLoadingScreen while the first chunks come: "Loading terrain..." over the menu
 /// background (play.rs calls this until the client is in its world).
-pub fn draw_loading(v: &Video, gui: &mut Gui, speed: f64, blur: bool) {
+pub fn draw_loading(v: &Video, gui: &mut Gui, speed: f64, blur: i32) {
     let (w, h) = v.size();
     assets(&v.gl);
     gui.begin(w, h);
@@ -502,6 +566,16 @@ pub struct Front {
     test_next: u64,
 }
 
+fn is_menu_step(t: &str) -> bool {
+    t.starts_with("mclick=") || t.starts_with("mtype=") || t.starts_with("mkey=") || t.starts_with("mwait")
+}
+
+/// PENRYN_TEST_INPUT without the menus' steps (the game reads single letters from the rest).
+pub fn game_test_keys(all: &str) -> String {
+    let v: Vec<&str> = all.split(',').filter(|t| !is_menu_step(t)).collect();
+    v.join(",")
+}
+
 const CONNECT_STAGES: [&str; 4] = ["connect.connecting", "connect.authorizing", "connect.encrypting", "connect.joining"];
 
 impl Front {
@@ -517,7 +591,7 @@ impl Front {
             keys: [false; 512],
             mouse: (0.0, 0.0),
             music_delay: 20,
-            test: test_keys.split(',').filter(|t| t.starts_with("mclick=") || t.starts_with("mtype=") || t.starts_with("mkey=") || t.starts_with("mwait")).map(String::from).collect(),
+            test: test_keys.split(',').filter(|t| is_menu_step(t)).map(String::from).collect(),
             test_next: sys::now_ms() + 1500,
         }
     }
@@ -1016,7 +1090,7 @@ impl Front {
         let gui = &mut *ui.gui;
         gui.begin(w, h);
         let speed = ui.menu.o.get(O::PanoramaSpeed);
-        let blur = ui.menu.o.int(O::MenuBlur) > 0;
+        let blur = ui.menu.o.int(O::MenuBlur);
         let (mx, my) = self.mouse;
         let (gw, gh) = (gui.width, gui.height);
         let cx = fl(gw / 2.0);
@@ -1024,7 +1098,7 @@ impl Front {
         ui.v.text_input(matches!(self.scr, Scr::Multiplayer) && self.mp.as_ref().map_or(false, |m| m.in_text()));
         match &self.scr {
             Scr::Title => {
-                panorama(gl, w, h, speed, false);
+                panorama(gl, w, h, speed);
                 // The widgets fade in over the first two seconds (TitleScreen.fading).
                 let fade = match self.fade_from {
                     Some(t) => {
