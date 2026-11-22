@@ -9,6 +9,7 @@ mod account;
 mod audio;
 mod blocks;
 mod books;
+mod boat;
 mod font;
 mod gui;
 mod hand;
@@ -34,7 +35,9 @@ mod multiplayer;
 mod nbt;
 mod physics;
 mod play;
+mod poses;
 mod render;
+mod riding;
 mod screens;
 mod sdl;
 mod servers;
@@ -45,6 +48,7 @@ mod tooltip;
 mod skins;
 mod signs;
 mod sky;
+mod special;
 mod net;
 mod options;
 mod packs;
@@ -300,6 +304,9 @@ fn selftest() -> Result<(), String> {
                 check(what, got, want);
             }
             let w = test_world(&b, &[]);
+            for (what, got, want) in riding::selftest(&b, &w).into_iter().chain(special::selftest()).chain(poses::selftest()) {
+                check(what, got, want);
+            }
             for (what, got, want) in signs::selftest(Some(&b)).into_iter().chain(effects::selftest(&b)).chain(moving::selftest(&b)).chain(particles::selftest(&b, &w)) {
                 check(what, got, want);
             }

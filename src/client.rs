@@ -117,6 +117,8 @@ pub struct Game {
     /// The container screens' own state (menus.rs) and the maps the server sent (maps.rs).
     pub menus: crate::menus::State,
     pub maps: crate::maps::Maps,
+    /// Who rides what, vehicles' attributes, the vehicle this client moves (riding.rs).
+    pub riding: crate::riding::Links,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -385,6 +387,7 @@ impl Game {
             ui: su,
             menus: crate::menus::State::new(),
             maps: crate::maps::Maps::new(),
+            riding: crate::riding::Links::default(),
         })
     }
 
@@ -474,9 +477,11 @@ impl Game {
                 let _death_screen = r.bool();
                 let _limited = r.bool();
                 self.spawn_info(&mut r);
+                self.riding.clear();
                 crate::say!("joined: entity {}, game mode {}", self.entity_id, self.game_mode);
             }
             play::C_RESPAWN => {
+                self.riding.clear();
                 self.spawn_info(&mut r);
                 self.dead = false;
                 self.positioned = false;
@@ -628,6 +633,8 @@ impl Game {
                             19 => self.jump_strength = v.clamp(0.0, 32.0),
                             _ => {}
                         }
+                    } else {
+                        self.riding.on_attribute(id, attr, v);
                     }
                 }
             }
@@ -820,11 +827,16 @@ impl Game {
                             crate::say!("entity {} removed", id);
                         }
                         self.entities.remove(&id);
+                        self.riding.forget(id);
                     }
                 }
             }
             play::C_MOVE_ENTITY_POS | play::C_MOVE_ENTITY_POS_ROT | play::C_MOVE_ENTITY_ROT => {
                 let id = r.varint().unwrap_or(0);
+                // The vehicle this client moves keeps its own place (isLocalInstanceAuthoritative).
+                if self.riding.driven.map(|d| d.0) == Some(id) {
+                    return Ok(());
+                }
                 let Some(e) = self.entities.get_mut(&id) else { return Ok(()) };
                 if p.id == play::C_MOVE_ENTITY_ROT {
                     e.on_ground = r.bool().unwrap_or(false);
@@ -865,6 +877,9 @@ impl Game {
                 let _d = (r.f64(), r.f64(), r.f64());
                 let (yaw, pitch) = (r.f32().unwrap_or(0.0), r.f32().unwrap_or(0.0));
                 let rel = r.i32().unwrap_or(0);
+                if self.riding.driven.map(|d| d.0) == Some(id) {
+                    return Ok(());
+                }
                 if let Some(e) = self.entities.get_mut(&id) {
                     for a in 0..3 {
                         e.pos[a] = if rel & (1 << a) != 0 { e.pos[a] + pos[a] } else { pos[a] };
@@ -888,12 +903,18 @@ impl Game {
                     _ => pos = Some([r.f64().unwrap_or(0.0), r.f64().unwrap_or(0.0), r.f64().unwrap_or(0.0)]),
                 }
                 let (yaw, pitch) = (r.f32().unwrap_or(0.0), r.f32().unwrap_or(0.0));
+                if self.riding.driven.map(|d| d.0) == Some(id) {
+                    return Ok(());
+                }
                 if let (Some(e), Some(p)) = (self.entities.get_mut(&id), pos) {
                     e.pos = p;
                     e.yaw = yaw;
                     e.pitch = pitch;
                 }
             }
+            crate::riding::C_SET_PASSENGERS => self.riding.on_passengers(&mut r),
+            crate::riding::C_MOVE_VEHICLE => self.riding.on_move_vehicle(&mut r),
+            crate::riding::C_SET_ENTITY_MOTION => self.riding.on_motion(&mut r, self.entity_id),
             play::C_ROTATE_HEAD => {
                 let id = r.varint().unwrap_or(0);
                 let h = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
@@ -912,6 +933,14 @@ impl Game {
             }
             play::C_SET_ENTITY_DATA => {
                 let id = r.varint().unwrap_or(0);
+                if id == self.entity_id {
+                    // Our own flags: the server's word on gliding (special.rs).
+                    let mut me = crate::entities::Entity::new(-1, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+                    entity_data(&mut r, &mut me);
+                    if let Some(&f) = me.data.get(&0) {
+                        self.riding.own_flags = Some(f as u8);
+                    }
+                }
                 if let Some(e) = self.entities.get_mut(&id) {
                     entity_data(&mut r, e);
                     e.version = e.version.wrapping_add(1);
@@ -1083,7 +1112,9 @@ impl Game {
             self.conn.send(play::S_PLAYER_LOADED, &Out::new())?;
             self.loaded_sent = true;
         }
-        self.send_position()?;
+        if !crate::riding::send(self)? {
+            self.send_position()?;
+        }
         self.conn.send(play::S_CLIENT_TICK_END, &Out::new())
     }
 
@@ -1327,6 +1358,10 @@ fn lp_vec3_write(o: &mut Out, v: [f64; 3]) {
     if partial {
         o.varint((scale >> 2) as i32);
     }
+}
+
+pub(crate) fn lp_vec3_out(o: &mut Out, v: [f64; 3]) {
+    lp_vec3_write(o, v)
 }
 
 /// Skips a Vec3.LP_STREAM_CODEC velocity.

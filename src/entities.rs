@@ -479,6 +479,8 @@ impl EntityTable {
         if matches!(e.custom_name.as_deref(), Some("Dinnerbone" | "Grumm")) {
             base = mul(&mul(&base, &tr(0.0, self.dims(e).1 as f64 + 0.1, 0.0)), &rot(2, math::PI));
         }
+        // Swimming, gliding, sleeping players; a crouching one sits lower (poses.rs).
+        base = crate::poses::setup_rotations(name, e, partial, base);
         base = mul(&base, &sc(-1.0, -1.0, 1.0));
         match name {
             // AvatarRenderer.scale.
@@ -496,6 +498,10 @@ impl EntityTable {
             _ => {}
         }
         base = mul(&mul(&base, &tr(0.0, -1.501, 0.0)), &sc(1.0 / 16.0, 1.0 / 16.0, 1.0 / 16.0));
+        // Boats and minecarts have their renderers' own transform.
+        if let Some(b) = crate::poses::vehicle_base(name, e, at) {
+            base = b;
+        }
         let speed = e.prev_limb_speed + (e.limb_speed - e.prev_limb_speed) * partial;
         let swing = e.limb_pos as f64 * 0.6662;
         let amount = speed.min(1.0) as f64;
@@ -543,7 +549,12 @@ impl EntityTable {
                 "left_hind_leg" | "right_front_leg" => xr += math::cos(swing + math::PI) * 1.4 * amount,
                 _ => {}
             }
-            let mut t = mul(&parent, &tr(q[0] as f64, q[1] as f64, q[2] as f64));
+            // Riding, crouching, rowing (poses.rs).
+            let mut at_part = [q[0] as f64, q[1] as f64, q[2] as f64];
+            let mut turn = [xr, yr, zr];
+            crate::poses::part(name, e, partial, &p.name, &mut at_part, &mut turn);
+            let [xr, yr, zr] = turn;
+            let mut t = mul(&parent, &tr(at_part[0], at_part[1], at_part[2]));
             t = mul(&t, &rot(2, zr));
             t = mul(&t, &rot(1, yr));
             t = mul(&t, &rot(0, xr));

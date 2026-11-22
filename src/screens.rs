@@ -381,7 +381,9 @@ pub fn hud(gui: &mut Gui, g: &Game, crosshair: bool, held_name: Option<(String, 
         }
     }
     let survival = g.game_mode == 0 || g.game_mode == 2;
-    if survival {
+    // Riding: the jump bar and the vehicle's hearts take the experience's and food's places.
+    let (jump_bar, vehicle_hearts) = crate::riding::hud(gui, g);
+    if survival && !jump_bar {
         // Experience
         let by = h - 32.0 + 3.0;
         gui.blit("hud/experience_bar_background", x, by);
@@ -389,7 +391,9 @@ pub fn hud(gui: &mut Gui, g: &Game, crosshair: bool, held_name: Option<(String, 
         if fill > 0.0 {
             gui.blit_part("hud/experience_bar_progress", x, by, 0.0, 0.0, fill, 5.0);
         }
-        if g.xp_level > 0 {
+    }
+    if survival {
+        if g.xp_level > 0 && !jump_bar {
             let t = format!("{}", g.xp_level);
             let tw = gui.text_width(&t);
             gui.text_outlined(&t, ((w - tw) / 2.0).floor(), h - 31.0 - 4.0, 0xFF80_FF20);
@@ -407,7 +411,7 @@ pub fn hud(gui: &mut Gui, g: &Game, crosshair: bool, held_name: Option<(String, 
             }
         }
         let right = cx + 91.0;
-        for i in 0..10 {
+        for i in (0..10).filter(|_| !vehicle_hearts) {
             let fx = right - i as f32 * 8.0 - 9.0;
             gui.blit("hud/food_empty", fx, top);
             if i * 2 + 1 < g.food {
