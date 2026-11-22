@@ -338,8 +338,8 @@ pub fn valid(s: &str) -> bool {
 }
 
 pub fn ping(ip: &str) -> Ping {
-    let Some((host, port)) = address(ip) else { return Ping::CantResolve };
-    let mut c = match Conn::open(&host, port) {
+    let Some(((host, port), (dial_host, dial_port))) = crate::srv::dial(ip) else { return Ping::CantResolve };
+    let mut c = match Conn::open(&dial_host, dial_port) {
         Ok(c) => c,
         Err(e) if e.starts_with("cannot resolve") => return Ping::CantResolve,
         Err(_) => return Ping::CantConnect,

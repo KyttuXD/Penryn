@@ -608,14 +608,19 @@ impl Front {
     /// Starts joining `address` (ConnectScreen.startConnecting): the login runs on its own
     /// thread while the screen shows how far it got.
     pub fn connect(&mut self, address: &str, back_to_list: bool) {
-        let Some((host, port)) = crate::servers::address(address) else {
+        if crate::servers::address(address).is_none() {
             self.scr = Scr::Disconnected { title: lang::get("connect.failed"), reason: lang::get("disconnect.unknownHost"), to_list: back_to_list };
             return;
-        };
+        }
         let acc = self.account.clone();
         let name = self.player_name();
         crate::client::JOIN_STAGE.store(0, core::sync::atomic::Ordering::Relaxed);
-        let task = task::spawn(move || Game::login(&host, port, &name, acc.as_ref(), crate::serverui::Common::default(), false).map(Sendable));
+        // The SRV lookup blocks, so it runs on the join's thread with the login.
+        let typed = String::from(address);
+        let task = task::spawn(move || {
+            let ((host, port), (dial_host, dial_port)) = crate::srv::dial(&typed).ok_or_else(|| String::from("unknown host"))?;
+            Game::login_dialing(&host, port, &dial_host, dial_port, &name, acc.as_ref(), crate::serverui::Common::default(), false).map(Sendable)
+        });
         self.scr = Scr::Connect { task, address: String::from(address), back_to_list };
     }
 
