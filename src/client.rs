@@ -832,6 +832,14 @@ impl Game {
             play::C_PLAYER_INFO_REMOVE => crate::skins::player_remove(&mut r),
             play::C_SET_ENTITY_DATA => {
                 let id = r.varint().unwrap_or(0);
+                if id == self.entity_id {
+                    // Our own flags: the server's word on gliding (special.rs).
+                    let mut me = crate::entities::Entity::new(-1, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+                    entity_data(&mut r, &mut me);
+                    if let Some(&f) = me.data.get(&0) {
+                        self.riding.own_flags = Some(f as u8);
+                    }
+                }
                 if let Some(e) = self.entities.get_mut(&id) {
                     entity_data(&mut r, e);
                     e.version = e.version.wrapping_add(1);

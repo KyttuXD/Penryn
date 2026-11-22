@@ -226,11 +226,15 @@ pub struct App {
     creative: crate::creative::Screen,
     /// The vehicle the player rides (riding.rs).
     ride: crate::riding::Rider,
+    /// Swimming, crawling, gliding, riptide (special.rs).
+    special: crate::special::Special,
 }
 
 impl App {
     fn eye_height(&self) -> f64 {
         if let Some(e) = self.ride.eye(self.keys[K_LSHIFT] && self.screen == Screen::Play) {
+            e
+        } else if let Some(e) = self.special.eye() {
             e
         } else if self.keys[K_LSHIFT] && self.screen == Screen::Play {
             physics::SNEAK_EYE
@@ -355,6 +359,7 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
         particles: None,
         creative: crate::creative::Screen::new(),
         ride: crate::riding::Rider::new(),
+        special: crate::special::Special::new(),
     };
     let atlas = sys::read_file(&format!("{}/atlas.bin", crate::data_dir())).ok_or("cannot read atlas.bin (see README.md)")?;
     app.r.load_atlas(&app.v.gl, &atlas)?;
@@ -1124,12 +1129,15 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         if !k(K_W) {
             self.double_w = false;
         }
-        let sprint = want_sprint && !(self.mover.horizontal_collision && self.mover.on_ground && !self.sprinting);
+        let sprint = want_sprint && !(self.mover.horizontal_collision && self.mover.on_ground && !self.sprinting) && self.special.sprint_allowed(self.sprinting, k(K_W));
         if sprint != self.sprinting {
             self.sprinting = sprint;
             g.command(if sprint { 1 } else { 2 })?;
         }
         inp.sprint = self.sprinting;
+        // Swimming, the pose's box, crawling, a glide starting (special.rs).
+        let on_vehicle = g.riding.vehicle_of.contains_key(&g.entity_id);
+        self.special.before(g, &mut self.mover, &mut inp, k(K_SPACE), shift, on_vehicle)?;
         if inp.sneak && !g.flying {
             inp.forward *= 0.3;
             inp.strafe *= 0.3;
@@ -1157,7 +1165,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         } else if g.world.loaded(math::ifloor(self.mover.pos[0]), math::ifloor(self.mover.pos[2])) && g.loaded_sent {
             let fluid = self.fluid_at(g);
             self.mover.effects = g.effects.movement();
-            self.mover.tick(&g.world, &g.blocks, &inp, g.player.yaw, g.flying, fluid);
+            let rocket = self.entities.as_ref().and_then(|t| t.types.iter().position(|x| x.name == "firework_rocket")).map_or(-1, |i| i as i32);
+            if !self.special.travel(g, &mut self.mover, &inp, fluid, rocket) {
+                self.mover.tick(&g.world, &g.blocks, &inp, g.player.yaw, g.flying, fluid);
+            }
             // LocalPlayer.aiStep: landing ends flight (except in spectator mode).
             if g.flying && self.mover.on_ground && g.game_mode != 3 {
                 g.set_flying(false)?;
@@ -1238,6 +1249,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         // Minecraft.handleKeybinds: a use ends as soon as the use key is up (a screen opening
         // releases every key, and its mouse-up never reaches the game).
         if self.using.is_some() && (!self.right_down || !play) {
+            // A riptide trident throws the player (TridentItem.releaseUsing).
+            if let Some((t, _)) = self.using {
+                self.special.release_use(g, &mut self.mover, t, g.rain_level > 0.2);
+            }
             self.using = None;
             g.dig(RELEASE_USE_ITEM, 0, 0, 0, 0)?;
         }

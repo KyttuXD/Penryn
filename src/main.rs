@@ -36,6 +36,7 @@ mod sdl;
 mod skins;
 mod signs;
 mod sky;
+mod special;
 mod net;
 mod options;
 mod particles;
@@ -245,7 +246,7 @@ fn selftest() -> Result<(), String> {
                 check(what, got, want);
             }
             let w = test_world(&b, &[]);
-            for (what, got, want) in riding::selftest(&b, &w) {
+            for (what, got, want) in riding::selftest(&b, &w).into_iter().chain(special::selftest()) {
                 check(what, got, want);
             }
             for (what, got, want) in signs::selftest(Some(&b)).into_iter().chain(effects::selftest(&b)).chain(moving::selftest(&b)).chain(particles::selftest(&b, &w)) {

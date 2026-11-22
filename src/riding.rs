@@ -75,6 +75,8 @@ pub struct Links {
     /// ClientboundSetEntityMotion for us (a firework, a riptide are client-side, this is the
     /// server's knockback): the velocity, until the mover takes it.
     pub motion: Option<[f64; 3]>,
+    /// Our own shared flags (Entity.DATA_SHARED_FLAGS_ID) as the server last sent them.
+    pub own_flags: Option<u8>,
 }
 
 impl Links {
