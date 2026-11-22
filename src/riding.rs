@@ -269,12 +269,24 @@ pub fn passenger_attachment(t: &EntityTable, v: &Entity, index: usize, count: us
         "skeleton_horse" | "zombie_horse" => up(1.31875),
         "pig" if baby => up(0.5),
         "pig" => up(0.86875),
-        // Camel.getPassengerAttachmentPoint: two seats along its back, lower while sitting.
+        // Camel.getPassengerAttachmentPoint: half a block ahead at the body anchor (its height
+        // less 0.375; sitting, 0.2 above the sitting box's), the second seat 0.7 behind, an
+        // animal 0.2 further ahead; a baby's at 0.6 (pose transitions not followed).
         "camel" | "camel_husk" => {
-            let sitting = v.d(18) < 0;
-            let y = if sitting { 0.845 } else { 2.375 };
-            let z = if count > 1 { if index == 0 { 0.5 } else { -0.7 } } else { 0.0 };
-            [0.0, y * if baby { 0.45 } else { 1.0 }, z]
+            let sitting = v.d(19) < 0;
+            let scale = if baby { 0.6f32 } else { 1.0 };
+            let h = if sitting { if baby { 0.425 } else { 2.375 - 1.43 } } else { t.dims(v).1 };
+            let y = h as f64 - if baby { 0.09375 } else { 0.375 } + if sitting { (scale * 1.43 - (scale * 1.43 - scale * 0.2)) as f64 } else { 0.0 };
+            let mut z = 0.5f32;
+            if count > 1 {
+                if index != 0 {
+                    z = -0.7;
+                }
+                if rider_animal {
+                    z += 0.2;
+                }
+            }
+            [0.0, y, (z * scale) as f64]
         }
         "strider" => [0.0, 1.6, 0.0],
         "llama" | "trader_llama" if baby => [0.0, 0.81f32 as f64, -0.15f32 as f64],
@@ -294,10 +306,10 @@ pub fn passenger_attachment(t: &EntityTable, v: &Entity, index: usize, count: us
     }
 }
 
-/// Vec3.yRot(-yaw) of an attachment point.
+/// Vec3.yRot(-yaw) of an attachment point (Mth's sine table).
 fn rotated(a: [f64; 3], yaw: f32) -> [f64; 3] {
-    let r = -(yaw as f32 * (math::PI as f32 / 180.0)) as f64;
-    let (s, c) = (math::sin(r), math::cos(r));
+    let r = (-yaw * 0.017453292f32) as f64;
+    let (s, c) = (msin(r) as f64, mcos(r) as f64);
     [a[0] * c + a[2] * s, a[1], a[2] * c - a[0] * s]
 }
 
@@ -391,7 +403,6 @@ pub struct Keys {
     pub left: bool,
     pub right: bool,
     pub jump: bool,
-    pub shift: bool,
     pub sprint: bool,
 }
 
@@ -451,10 +462,6 @@ impl Rider {
             prev_seat: [0.0; 3],
             fresh: true,
         }
-    }
-
-    pub fn riding(&self) -> bool {
-        self.vehicle >= 0
     }
 
     /// Whether this client moves vehicle `e` of kind `k` that we ride as passenger `index`
@@ -711,7 +718,7 @@ impl Rider {
                 strafe = xxa * 0.5;
                 forward = if zza <= 0.0 { zza * 0.25 } else { zza };
                 speed = if kind == Kind::Camel { speed_attr as f32 + if k.sprint && self.dash_cooldown == 0 { 0.1 } else { 0.0 } } else { speed_attr as f32 };
-                if kind == Kind::Camel && e.d(18) < 0 {
+                if kind == Kind::Camel && e.d(19) < 0 {
                     // Sitting (refuseToMove): no input.
                     strafe = 0.0;
                     forward = 0.0;
