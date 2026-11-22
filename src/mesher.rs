@@ -282,13 +282,14 @@ extern "C" fn worker(arg: *mut c_void) -> *mut c_void {
 }
 
 /// The workers, started on first use: one less than the processors, at most four. None when
-/// threads cannot be made (then meshing stays on the main thread).
+/// threads cannot be made or PENRYN_MESH_THREADS=0 (then meshing stays on the main thread).
 fn pool() -> Option<&'static Shared> {
     unsafe {
         if let Some(p) = *core::ptr::addr_of!(POOL) {
             return if p.workers > 0 { Some(p) } else { None };
         }
-        let n = (crate::sys::processors() - 1).clamp(1, 4);
+        let off = crate::sys::env("PENRYN_MESH_THREADS").map_or(false, |v| v.trim() == "0");
+        let n = if off { 0 } else { (crate::sys::processors() - 1).clamp(1, 4) };
         let sh: &'static mut Shared = alloc::boxed::Box::leak(alloc::boxed::Box::new(Shared {
             lock: AtomicBool::new(false),
             jobs: UnsafeCell::new(VecDeque::new()),
@@ -316,7 +317,7 @@ fn pool() -> Option<&'static Shared> {
 
 /// Whether meshing runs on worker threads (else the caller meshes itself).
 pub fn threaded() -> bool {
-    crate::sys::env("PENRYN_MESH_THREADS").map_or(true, |v| v.trim() != "0") && pool().is_some()
+    pool().is_some()
 }
 
 pub fn workers() -> u32 {
