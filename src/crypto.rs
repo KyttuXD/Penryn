@@ -1,6 +1,7 @@
 //! What an online-mode join needs, written out so the program has no dependencies:
 //! AES-128 in CFB8 mode (the connection cipher), RSA PKCS#1 v1.5 encryption with the
-//! server's key, SHA-1 and Minecraft's signed-hex "server hash".
+//! server's key, SHA-1 and Minecraft's signed-hex "server hash"; SHA-256 and RSA PKCS#1 v1.5
+//! signatures (SHA256withRSA) for secure chat.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -426,5 +427,334 @@ impl RsaKey {
         em[pad_end + 1..].copy_from_slice(msg);
         let c = Big::from_be(&em).modpow(&self.e, &self.n);
         Some(c.to_be(self.size))
+    }
+}
+
+// ------------------------------------------------------------------ SHA-256
+
+const K256: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+    0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
+    0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+/// SHA-256 (FIPS 180-4): what secure chat signs (SHA256withRSA).
+pub struct Sha256 {
+    h: [u32; 8],
+    buf: [u8; 64],
+    fill: usize,
+    len: u64,
+}
+
+impl Sha256 {
+    pub fn new() -> Sha256 {
+        Sha256 {
+            h: [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19],
+            buf: [0; 64],
+            fill: 0,
+            len: 0,
+        }
+    }
+    pub fn update(&mut self, mut d: &[u8]) {
+        self.len += d.len() as u64;
+        while !d.is_empty() {
+            let n = (64 - self.fill).min(d.len());
+            self.buf[self.fill..self.fill + n].copy_from_slice(&d[..n]);
+            self.fill += n;
+            d = &d[n..];
+            if self.fill == 64 {
+                let b = self.buf;
+                self.block(&b);
+                self.fill = 0;
+            }
+        }
+    }
+    fn block(&mut self, b: &[u8; 64]) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let [mut a, mut bb, mut c, mut d, mut e, mut f, mut g, mut h] = self.h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(K256[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & bb) ^ (a & c) ^ (bb & c);
+            let t2 = s0.wrapping_add(maj);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = bb;
+            bb = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (x, v) in self.h.iter_mut().zip([a, bb, c, d, e, f, g, h]) {
+            *x = x.wrapping_add(v);
+        }
+    }
+    pub fn finish(mut self) -> [u8; 32] {
+        let bits = self.len.wrapping_mul(8);
+        let l = self.len;
+        self.update(&[0x80]);
+        while self.fill != 56 {
+            self.update(&[0]);
+        }
+        self.update(&bits.to_be_bytes());
+        self.len = l;
+        let mut out = [0u8; 32];
+        for i in 0..8 {
+            out[4 * i..4 * i + 4].copy_from_slice(&self.h[i].to_be_bytes());
+        }
+        out
+    }
+}
+
+pub fn sha256(d: &[u8]) -> [u8; 32] {
+    let mut s = Sha256::new();
+    s.update(d);
+    s.finish()
+}
+
+// ------------------------------------------------------------------ RSA signatures
+
+impl Big {
+    fn add(&self, o: &Big) -> Big {
+        let n = self.0.len().max(o.0.len());
+        let mut r = Vec::with_capacity(n + 1);
+        let mut carry = 0u64;
+        for i in 0..n {
+            let t = self.0.get(i).copied().unwrap_or(0) as u64 + o.0.get(i).copied().unwrap_or(0) as u64 + carry;
+            r.push(t as u32);
+            carry = t >> 32;
+        }
+        if carry != 0 {
+            r.push(carry as u32);
+        }
+        let mut b = Big(r);
+        b.trim();
+        b
+    }
+}
+
+/// Montgomery arithmetic modulo an odd `m` (CIOS, 32-bit limbs): RSA's modular powers in a
+/// few milliseconds instead of the bit-by-bit remainder's seconds.
+struct Mont {
+    m: Vec<u32>,
+    /// -m^-1 mod 2^32.
+    inv: u32,
+    /// R^2 mod m, R = 2^(32 n).
+    rr: Vec<u32>,
+}
+
+impl Mont {
+    fn new(m: &Big) -> Option<Mont> {
+        let m0 = *m.0.first()?;
+        if m0 & 1 == 0 {
+            return None;
+        }
+        // Newton's iteration for m0^-1 mod 2^32.
+        let mut x: u32 = 1;
+        for _ in 0..5 {
+            x = x.wrapping_mul(2u32.wrapping_sub(m0.wrapping_mul(x)));
+        }
+        let n = m.0.len();
+        let mut r2 = alloc::vec![0u32; 2 * n + 1];
+        r2[2 * n] = 1;
+        let rr = Big(r2).rem(m);
+        let mut rr = rr.0;
+        rr.resize(n, 0);
+        Some(Mont { m: m.0.clone(), inv: x.wrapping_neg(), rr })
+    }
+    /// a b R^-1 mod m, for a, b < m (n limbs each).
+    fn mul(&self, a: &[u32], b: &[u32], t: &mut Vec<u32>) -> Vec<u32> {
+        let n = self.m.len();
+        t.clear();
+        t.resize(n + 2, 0);
+        for i in 0..n {
+            let bi = b[i] as u64;
+            let mut c = 0u64;
+            for j in 0..n {
+                let s = t[j] as u64 + a[j] as u64 * bi + c;
+                t[j] = s as u32;
+                c = s >> 32;
+            }
+            let s = t[n] as u64 + c;
+            t[n] = s as u32;
+            t[n + 1] = (s >> 32) as u32;
+            let q = t[0].wrapping_mul(self.inv) as u64;
+            let s = t[0] as u64 + q * self.m[0] as u64;
+            let mut c = s >> 32;
+            for j in 1..n {
+                let s = t[j] as u64 + q * self.m[j] as u64 + c;
+                t[j - 1] = s as u32;
+                c = s >> 32;
+            }
+            let s = t[n] as u64 + c;
+            t[n - 1] = s as u32;
+            t[n] = t[n + 1] + (s >> 32) as u32;
+        }
+        let mut r: Vec<u32> = t[..n].to_vec();
+        let ge = t[n] != 0 || {
+            let mut ge = true;
+            for i in (0..n).rev() {
+                if r[i] != self.m[i] {
+                    ge = r[i] > self.m[i];
+                    break;
+                }
+            }
+            ge
+        };
+        if ge {
+            let mut borrow = 0i64;
+            for i in 0..n {
+                let d = r[i] as i64 - self.m[i] as i64 - borrow;
+                r[i] = d as u32;
+                borrow = (d < 0) as i64;
+            }
+        }
+        r
+    }
+    fn pow(&self, base: &Big, e: &Big) -> Big {
+        let n = self.m.len();
+        let mut b = base.rem(&Big(self.m.clone())).0;
+        b.resize(n, 0);
+        let mut t = Vec::with_capacity(n + 2);
+        let x = self.mul(&b, &self.rr, &mut t);
+        let mut one = alloc::vec![0u32; n];
+        one[0] = 1;
+        let mut acc = self.mul(&one, &self.rr, &mut t);
+        for i in (0..e.bits()).rev() {
+            acc = self.mul(&acc, &acc, &mut t);
+            if e.bit(i) {
+                acc = self.mul(&acc, &x, &mut t);
+            }
+        }
+        let mut r = Big(self.mul(&acc, &one, &mut t));
+        r.trim();
+        r
+    }
+}
+
+/// EMSA-PKCS1-v1_5 for SHA-256: 00 01 FF.. 00, the DigestInfo, the hash.
+fn pkcs1_sha256(msg: &[u8], k: usize) -> Option<Vec<u8>> {
+    const INFO: [u8; 19] = [0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20];
+    if k < 19 + 32 + 11 {
+        return None;
+    }
+    let mut em = alloc::vec![0xFFu8; k];
+    em[0] = 0;
+    em[1] = 1;
+    let t = k - 32 - 19;
+    em[t - 1] = 0;
+    em[t..t + 19].copy_from_slice(&INFO);
+    em[t + 19..].copy_from_slice(&sha256(msg));
+    Some(em)
+}
+
+impl RsaKey {
+    /// The modulus, big-endian.
+    pub fn modulus(&self) -> Vec<u8> {
+        self.n.to_be(self.size)
+    }
+
+    /// RSASSA-PKCS1-v1_5 verification with SHA-256 (SHA256withRSA).
+    pub fn verify_sha256(&self, msg: &[u8], sig: &[u8]) -> bool {
+        if sig.len() != self.size {
+            return false;
+        }
+        let s = Big::from_be(sig);
+        if s.ge(&self.n) {
+            return false;
+        }
+        let Some(m) = Mont::new(&self.n) else { return false };
+        let em = m.pow(&s, &self.e).to_be(self.size);
+        pkcs1_sha256(msg, self.size).map_or(false, |want| want == em)
+    }
+}
+
+/// An RSA private key (PKCS#1 RSAPrivateKey, or wrapped in PKCS#8): the profile key pair's
+/// private half that signs chat. The CRT values make a 2048-bit signature take milliseconds.
+pub struct RsaPrivate {
+    pub public: RsaKey,
+    d: Big,
+    crt: Option<(Big, Big, Big, Big, Big)>,
+}
+
+impl RsaPrivate {
+    pub fn from_der(der_bytes: &[u8]) -> Option<RsaPrivate> {
+        let (tag, seq, _) = der(der_bytes)?;
+        if tag != 0x30 {
+            return None;
+        }
+        let (t, _version, rest) = der(seq)?;
+        if t != 0x02 {
+            return None;
+        }
+        // PKCS#8: AlgorithmIdentifier, then the RSAPrivateKey in an OCTET STRING.
+        if rest.first() == Some(&0x30) {
+            let (_, alg, rest) = der(rest)?;
+            let (_, oid, _) = der(alg)?;
+            if oid != [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01] {
+                return None;
+            }
+            let (t, inner, _) = der(rest)?;
+            if t != 0x04 {
+                return None;
+            }
+            return RsaPrivate::from_der(inner);
+        }
+        let mut ints = Vec::new();
+        let mut rest = rest;
+        while !rest.is_empty() && ints.len() < 8 {
+            let (t, v, r) = der(rest)?;
+            if t != 0x02 {
+                return None;
+            }
+            ints.push(Big::from_be(v));
+            rest = r;
+        }
+        if ints.len() < 3 {
+            return None;
+        }
+        let n = ints[0].clone();
+        let size = (n.bits() + 7) / 8;
+        let crt = if ints.len() == 8 {
+            Some((ints[3].clone(), ints[4].clone(), ints[5].clone(), ints[6].clone(), ints[7].clone()))
+        } else {
+            None
+        };
+        Some(RsaPrivate { public: RsaKey { n, e: ints[1].clone(), size }, d: ints[2].clone(), crt })
+    }
+
+    /// RSASSA-PKCS1-v1_5 with SHA-256 (Java's SHA256withRSA): deterministic.
+    pub fn sign_sha256(&self, msg: &[u8]) -> Option<Vec<u8>> {
+        let k = self.public.size;
+        let m = Big::from_be(&pkcs1_sha256(msg, k)?);
+        let s = match &self.crt {
+            Some((p, q, dp, dq, qinv)) => {
+                let m1 = Mont::new(p)?.pow(&m, dp);
+                let m2 = Mont::new(q)?.pow(&m, dq);
+                // h = qinv (m1 - m2) mod p; s = m2 + h q
+                let m2p = m2.rem(p);
+                let mut diff = if m1.ge(&m2p) { m1.clone() } else { m1.add(p) };
+                diff.sub(&m2p);
+                let h = qinv.mul(&diff).rem(p);
+                m2.add(&h.mul(q))
+            }
+            None => Mont::new(&self.public.n)?.pow(&m, &self.d),
+        };
+        Some(s.to_be(k))
     }
 }
