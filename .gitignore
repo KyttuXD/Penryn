@@ -1,0 +1,5 @@
+/target/
+/dist/
+# Game files are made from your own copy of Minecraft: never commit them.
+*.bin
+account.txt

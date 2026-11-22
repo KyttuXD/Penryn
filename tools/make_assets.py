@@ -1,0 +1,1546 @@
+#!/usr/bin/env python3
+"""Penryn's game data, made from the player's own copy of Minecraft 26.3.
+
+    tools/make_assets.py PREPARED_DIR [--jar CLIENT_JAR] OUT_DIR
+
+PREPARED_DIR is what Horizon's `horizon-prepare` writes from the player's game
+(.local/horizon-client/26.3): the block registry order, every state's properties, hardness,
+outline shapes and tags. Block models, block states and textures are read from CLIENT_JAR
+(the 26.3 client the launcher downloaded for the signed-in account) when given, else from
+PREPARED_DIR/assets.
+
+Writes OUT_DIR/blocks.bin and OUT_DIR/atlas.bin. Nothing from Mojang is kept in this
+repository: these files are made on the player's machine and stay with their copy of the game.
+
+blocks.bin (little-endian), "PNB9":
+    u32 states, u32 blocks, u32 boxes, u32 quads, u32 items, u32 collision boxes
+    per state: u16 block, u16 hardness x100 (65535: unbreakable), u8 flags (1 needs the right
+               tool, 2 full collision, 4 replaceable, 8 opaque full cube, 16 a bubble column
+               that drags down, 32 holds a fluid, 64 open), u8 box count,
+               u16 first box, u32 first quad, u16 quad count, u16 facing (0 north 1 south 2 west
+               3 east 4 down 5 up, 255 none), u32 first collision
+               box, u8 collision box count, u8 dynamic collision rule (DYNAMIC_COLLISION;
+               0: the boxes), u16 pad
+    per box: u8 x0 y0 z0 x1 y1 z1 in sixteenths (the outline shape)
+    per collision box: i8 x0 y0 z0 x1 y1 z1 in 1/32 block (vanilla's collision shape)
+    per quad (48 bytes): 4 x (i16 x, y, z in 1/1024 block; u16 u, v in 1/65535 of the atlas),
+               u8 cull (0 down 1 up 2 north 3 south 4 west 5 east, 6 none), u8 flags (1 tinted,
+               2 cutout, 4 translucent, 8 unshaded, 16 on the cull face's boundary), u8 light
+               (shade x255), u8 pad, i32 pad
+    per block: u8 kind, u8 tint (0 none, 1 grass, 2 foliage, 3 birch, 4 spruce, 5 water,
+               6 redstone, 7 stem), u8 mineable, u8 incorrect-for tiers, u8[3] map colour,
+               u8 name length, name, u16[5] sound events, u8 volume, u8 pitch (x100),
+               f32 friction, f32 speed factor, f32 jump factor, u8 offset (1 model, 2 outline,
+               4 also vertical), f32 largest horizontal offset, f32 largest vertical offset
+    per item: u8 name length, name
+    then: 4 x f32, the atlas rectangle of water_still, and 4 x f32 of lava_still
+kind: 0 air, 1 solid, 2 cutout, 3 plant (no collision), 4 water, 5 lava, 6 invisible solid
+
+atlas.bin: "PNA1", u16 width, u16 height, then width x height RGBA (16x16 tiles).
+"""
+import json
+import math
+import os
+import struct
+import sys
+import zipfile
+import zlib
+
+TILE = 16
+
+
+# ------------------------------------------------------------------ files
+
+class Assets:
+    """assets/minecraft/... from a jar or a folder."""
+
+    def __init__(self, jar, folder):
+        self.zip = zipfile.ZipFile(jar) if jar else None
+        self.folder = folder
+
+    def read(self, rel):
+        if self.zip:
+            try:
+                return self.zip.read("assets/minecraft/" + rel)
+            except KeyError:
+                return None
+        p = os.path.join(self.folder, "assets", "minecraft", rel)
+        try:
+            with open(p, "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def json(self, rel):
+        d = self.read(rel)
+        if d is None:
+            return None
+        try:
+            return json.loads(d)
+        except ValueError:
+            return None
+
+
+def png_decode(data):
+    """(width, height, RGBA bytes) of a non-interlaced PNG, or None."""
+    if not data or data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    pos, idat, plte, trns = 8, b"", None, None
+    w = h = depth = ctype = 0
+    while pos < len(data):
+        n = struct.unpack(">I", data[pos:pos + 4])[0]
+        kind = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + n]
+        pos += 12 + n
+        if kind == b"IHDR":
+            w, h, depth, ctype, _, _, interlace = struct.unpack(">IIBBBBB", body)
+            if interlace:
+                return None
+        elif kind == b"PLTE":
+            plte = body
+        elif kind == b"tRNS":
+            trns = body
+        elif kind == b"IDAT":
+            idat += body
+    ch = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ctype)
+    if ch is None or depth not in (1, 2, 4, 8, 16):
+        return None
+    raw = zlib.decompress(idat)
+    bpp = ch * depth
+    stride = (w * bpp + 7) // 8
+    unit = max(1, bpp // 8)
+    prev = bytearray(stride)
+    out = bytearray(w * h * 4)
+    # tRNS for grey and truecolour images: one colour that is transparent (compared after
+    # the samples are scaled to 8 bits, as they are stored here).
+    mask_ = (1 << depth) - 1
+    scale_ = (lambda v: v * 255 // mask_) if depth < 8 else ((lambda v: v >> 8) if depth == 16 else (lambda v: v))
+    grey_key = scale_(struct.unpack(">H", trns[:2])[0]) if ctype == 0 and trns and len(trns) >= 2 else None
+    rgb_key = tuple(scale_(v) for v in struct.unpack(">HHH", trns[:6])) if ctype == 2 and trns and len(trns) >= 6 else None
+    p = 0
+    for y in range(h):
+        f = raw[p]
+        line = bytearray(raw[p + 1:p + 1 + stride])
+        p += 1 + stride
+        for i in range(stride):
+            a = line[i - unit] if i >= unit else 0
+            b = prev[i]
+            c = prev[i - unit] if i >= unit else 0
+            if f == 1:
+                line[i] = (line[i] + a) & 255
+            elif f == 2:
+                line[i] = (line[i] + b) & 255
+            elif f == 3:
+                line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                pr = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+                line[i] = (line[i] + pr) & 255
+        prev = line
+        if depth == 8:
+            s = line
+        elif depth == 16:
+            s = line[0::2]
+        else:
+            s = bytearray()
+            per = 8 // depth
+            mask = (1 << depth) - 1
+            for i in range(w * ch):
+                v = (line[i // per] >> (8 - depth * (i % per + 1))) & mask
+                s.append(v if ctype == 3 else v * 255 // mask)
+        for x in range(w):
+            o = (y * w + x) * 4
+            if ctype == 6:
+                out[o:o + 4] = s[4 * x:4 * x + 4]
+            elif ctype == 2:
+                out[o:o + 3] = s[3 * x:3 * x + 3]
+                out[o + 3] = 255
+            elif ctype == 3:
+                i = s[x]
+                out[o:o + 3] = plte[3 * i:3 * i + 3]
+                out[o + 3] = trns[i] if trns and i < len(trns) else 255
+            elif ctype == 4:
+                out[o] = out[o + 1] = out[o + 2] = s[2 * x]
+                out[o + 3] = s[2 * x + 1]
+            else:
+                out[o] = out[o + 1] = out[o + 2] = s[x]
+                out[o + 3] = 0 if grey_key is not None and s[x] == grey_key else 255
+            if ctype == 2 and rgb_key is not None and tuple(out[o:o + 3]) == rgb_key:
+                out[o + 3] = 0
+    return w, h, bytes(out)
+
+
+def tile_of(img):
+    """The first frame of a texture, scaled to 16x16 (nearest)."""
+    w, h, px = img
+    side = min(w, h)  # animated textures: frames stacked downwards
+    out = bytearray(TILE * TILE * 4)
+    for y in range(TILE):
+        for x in range(TILE):
+            sx, sy = x * side // TILE, y * side // TILE
+            o = (sy * w + sx) * 4
+            out[(y * TILE + x) * 4:(y * TILE + x) * 4 + 4] = px[o:o + 4]
+    return bytes(out)
+
+
+# ------------------------------------------------------------------ blocks
+
+PLANT_CLASSES = {
+    "BushBlock", "VegetationBlock", "FlowerBlock", "TallGrassBlock", "SaplingBlock", "CropBlock",
+    "MushroomBlock", "DoublePlantBlock", "TorchBlock", "WallTorchBlock", "RedstoneWireBlock",
+    "VineBlock", "SugarCaneBlock", "FireBlock", "SoulFireBlock", "SeagrassBlock",
+    "TallSeagrassBlock", "KelpBlock", "KelpPlantBlock", "RailBlock", "BaseRailBlock", "ButtonBlock",
+    "LeverBlock", "SignBlock", "WallSignBlock", "StandingSignBlock", "CeilingHangingSignBlock",
+    "WallHangingSignBlock", "PressurePlateBlock", "WeightedPressurePlateBlock", "TripWireBlock",
+    "TripWireHookBlock", "CobwebBlock", "WebBlock", "BannerBlock", "WallBannerBlock",
+    "SweetBerryBushBlock", "NetherSproutsBlock", "RootsBlock", "DeadBushBlock",
+    "DryVegetationBlock", "ShortDryGrassBlock", "TallDryGrassBlock", "FireflyBushBlock",
+    "LeafLitterBlock", "FlowerBedBlock", "PinkPetalsBlock", "GlowLichenBlock", "MultifaceBlock",
+    "SculkVeinBlock", "HangingRootsBlock", "SporeBlossomBlock", "CaveVinesBlock",
+    "CaveVinesPlantBlock", "SmallDripleafBlock", "CoralPlantBlock", "CoralFanBlock",
+    "CoralWallFanBlock", "BaseCoralPlantBlock", "BaseCoralFanBlock", "BaseCoralWallFanBlock",
+    "WaterlilyBlock", "LilyPadBlock", "NetherWartBlock", "StemBlock", "AttachedStemBlock",
+    "TwistingVinesBlock", "TwistingVinesPlantBlock", "WeepingVinesBlock", "WeepingVinesPlantBlock",
+    "PitcherCropBlock", "TorchflowerCropBlock", "BeetrootBlock", "CarrotBlock", "PotatoBlock",
+    "CocoaBlock", "BambooSaplingBlock", "EyeblossomBlock", "CactusFlowerBlock", "BushBlock",
+    "HangingMossBlock", "MossyCarpetBlock_none",
+}
+
+
+def read_nbt(raw):
+    """A whole NBT file (gzip or not) as Python values."""
+    import gzip
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    pos = [0]
+
+    def take(fmt):
+        v = struct.unpack_from(">" + fmt, raw, pos[0])
+        pos[0] += struct.calcsize(">" + fmt)
+        return v[0]
+
+    def name():
+        n = take("H")
+        v = raw[pos[0]:pos[0] + n].decode("utf-8", "replace")
+        pos[0] += n
+        return v
+
+    def payload(t):
+        if t in (1, 2, 3, 4, 5, 6):
+            return take("bhiqfd"[t - 1])
+        if t == 7:
+            n = take("i")
+            v = raw[pos[0]:pos[0] + n]
+            pos[0] += n
+            return v
+        if t == 8:
+            return name()
+        if t == 9:
+            et, n = take("b"), take("i")
+            return [payload(et) for _ in range(n)]
+        if t == 10:
+            d = {}
+            while True:
+                tt = take("b")
+                if tt == 0:
+                    return d
+                k = name()
+                d[k] = payload(tt)
+        if t in (11, 12):
+            n = take("i")
+            f = ">%d%s" % (n, "i" if t == 11 else "q")
+            v = list(struct.unpack_from(f, raw, pos[0]))
+            pos[0] += struct.calcsize(f)
+            return v
+        raise ValueError("bad NBT tag %d" % t)
+
+    t = take("b")
+    name()
+    return payload(t)
+
+
+def shape_boxes(sh):
+    """A cached VoxelShape (coordinates + occupied cells) as merged boxes in blocks."""
+    bits = lambda v: struct.unpack(">d", struct.pack(">q", v))[0]
+    xs, ys, zs = ([bits(v) for v in sh[k]] for k in ("x", "y", "z"))
+    nx, ny, nz = len(xs) - 1, len(ys) - 1, len(zs) - 1
+    if nx <= 0 or ny <= 0 or nz <= 0:
+        return []
+    # "cube" only says the grid is a power-of-two one: the cells are always in "occupied".
+    occ = sh.get("occupied", b"")
+    assert len(occ) == nx * ny * nz, "cached shape without a full occupancy grid"
+    full = lambda x, y, z: (x * ny + y) * nz + z < len(occ) and occ[(x * ny + y) * nz + z] != 0
+    used = set()
+    out = []
+    for x in range(nx):
+        for y in range(ny):
+            for z in range(nz):
+                if not full(x, y, z) or (x, y, z) in used:
+                    continue
+                z1 = z
+                while z1 + 1 < nz and full(x, y, z1 + 1) and (x, y, z1 + 1) not in used:
+                    z1 += 1
+                y1 = y
+                while y1 + 1 < ny and all(full(x, y1 + 1, k) and (x, y1 + 1, k) not in used for k in range(z, z1 + 1)):
+                    y1 += 1
+                x1 = x
+                while x1 + 1 < nx and all(full(x1 + 1, j, k) and (x1 + 1, j, k) not in used
+                                          for j in range(y, y1 + 1) for k in range(z, z1 + 1)):
+                    x1 += 1
+                for i in range(x, x1 + 1):
+                    for j in range(y, y1 + 1):
+                        for k in range(z, z1 + 1):
+                            used.add((i, j, k))
+                out.append((xs[x], ys[y], zs[z], xs[x1 + 1], ys[y1 + 1], zs[z1 + 1]))
+    return out
+
+
+# Blocks whose collision depends on the entity or the world (dynamic_shape): their own rules
+# in physics.rs. 1 bamboo stalk, 2 scaffolding, 3 powder snow, 4 the outline moved by the
+# block's offset (pointed dripstone, sulfur spike), 5 the outline (shulker boxes, closed).
+DYNAMIC_COLLISION = {"bamboo": 1, "scaffolding": 2, "powder_snow": 3, "pointed_dripstone": 4,
+                     "sulfur_spike": 4}
+
+
+def kind_of(short, cls, facts):
+    if short in ("air", "cave_air", "void_air", "structure_void", "light"):
+        return 0
+    if short == "barrier":
+        return 6
+    if short in ("water", "bubble_column"):
+        return 4
+    if short == "lava":
+        return 5
+    # Plants by class that vanilla still gives a collision shape equal to their outline.
+    if short in ("lily_pad", "azalea", "flowering_azalea", "cocoa", "sea_pickle"):
+        return 2
+    if any(c in PLANT_CLASSES for c in cls) or (not facts.get("full_collision") and not facts.get("outline")):
+        if not any(c in ("LadderBlock", "SnowLayerBlock") for c in cls):
+            return 3
+    if facts.get("solid_render") and facts.get("can_occlude"):
+        return 1
+    return 2 if not facts.get("can_occlude") else 1
+
+
+def tint_of(short):
+    if short in ("grass_block", "short_grass", "tall_grass", "fern", "large_fern", "potted_fern",
+                 "sugar_cane", "bush"):
+        return 1
+    if short in ("birch_leaves",):
+        return 3
+    if short in ("spruce_leaves",):
+        return 4
+    if short.endswith("_leaves") and short not in ("cherry_leaves", "azalea_leaves",
+                                                    "flowering_azalea_leaves", "pale_oak_leaves"):
+        return 2
+    if short in ("vine", "leaf_litter"):
+        return 2
+    if short in ("water", "bubble_column", "water_cauldron"):
+        return 5
+    if short == "redstone_wire":
+        return 6
+    if short in ("pumpkin_stem", "melon_stem", "attached_pumpkin_stem", "attached_melon_stem"):
+        return 7
+    return 0
+
+
+# ------------------------------------------------------------------ models
+
+DIRS = ["down", "up", "north", "south", "west", "east"]
+NORMAL = {"down": (0, -1, 0), "up": (0, 1, 0), "north": (0, 0, -1), "south": (0, 0, 1),
+          "west": (-1, 0, 0), "east": (1, 0, 0)}
+SHADE = {"down": 0.5, "up": 1.0, "north": 0.8, "south": 0.8, "west": 0.6, "east": 0.6}
+
+
+def face_corners(d, f, t):
+    """The face's corners counter-clockwise from outside, each with its (s, t) on the
+    texture rectangle (0..1, s along u, t along v)."""
+    x0, y0, z0 = f
+    x1, y1, z1 = t
+    if d == "up":
+        return [((x0, y1, z0), (0, 0)), ((x0, y1, z1), (0, 1)), ((x1, y1, z1), (1, 1)), ((x1, y1, z0), (1, 0))]
+    if d == "down":
+        return [((x0, y0, z1), (0, 0)), ((x0, y0, z0), (0, 1)), ((x1, y0, z0), (1, 1)), ((x1, y0, z1), (1, 0))]
+    if d == "north":
+        return [((x1, y1, z0), (0, 0)), ((x1, y0, z0), (0, 1)), ((x0, y0, z0), (1, 1)), ((x0, y1, z0), (1, 0))]
+    if d == "south":
+        return [((x0, y1, z1), (0, 0)), ((x0, y0, z1), (0, 1)), ((x1, y0, z1), (1, 1)), ((x1, y1, z1), (1, 0))]
+    if d == "west":
+        return [((x0, y1, z0), (0, 0)), ((x0, y0, z0), (0, 1)), ((x0, y0, z1), (1, 1)), ((x0, y1, z1), (1, 0))]
+    # east
+    return [((x1, y1, z1), (0, 0)), ((x1, y0, z1), (0, 1)), ((x1, y0, z0), (1, 1)), ((x1, y1, z0), (1, 0))]
+
+
+def default_uv(d, f, t):
+    x0, y0, z0 = f
+    x1, y1, z1 = t
+    return {
+        "down": [x0, 16 - z1, x1, 16 - z0],
+        "up": [x0, z0, x1, z1],
+        "north": [16 - x1, 16 - y1, 16 - x0, 16 - y0],
+        "south": [x0, 16 - y1, x1, 16 - y0],
+        "west": [z0, 16 - y1, z1, 16 - y0],
+        "east": [16 - z1, 16 - y1, 16 - z0, 16 - y0],
+    }[d]
+
+
+def rot_point(p, axis, deg, origin, rescale):
+    a = math.radians(deg)
+    c, s = math.cos(a), math.sin(a)
+    x, y, z = p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]
+    if axis == "x":
+        y, z = y * c - z * s, y * s + z * c
+        k = (1 / c) if rescale else 1
+        y, z = y * k, z * k
+    elif axis == "y":
+        x, z = x * c + z * s, -x * s + z * c
+        k = (1 / c) if rescale else 1
+        x, z = x * k, z * k
+    else:
+        x, y = x * c - y * s, x * s + y * c
+        k = (1 / c) if rescale else 1
+        x, y = x * k, y * k
+    return (x + origin[0], y + origin[1], z + origin[2])
+
+
+def variant_rotate(p, xr, yr):
+    """Blockstate x then y rotation (multiples of 90) about the block's centre, in sixteenths."""
+    x, y, z = p
+    for _ in range((xr // 90) % 4):  # x=90: up -> north, north -> down
+        y, z = 16 - z, y
+    for _ in range((yr // 90) % 4):  # y=90: north -> east
+        x, z = 16 - z, x
+    return (x, y, z)
+
+
+def dir_rotate(d, xr, yr):
+    n = NORMAL[d]
+    x, y, z = n
+    for _ in range((xr // 90) % 4):
+        y, z = -z, y
+    for _ in range((yr // 90) % 4):
+        x, z = -z, x
+    for k, v in NORMAL.items():
+        if v == (x, y, z):
+            return k
+    return d
+
+
+class Models:
+    def __init__(self, assets):
+        self.a = assets
+        self.cache = {}
+
+    def load(self, ref, depth=0):
+        """(textures, elements) with parents resolved."""
+        ref = ref.split(":", 1)[-1]
+        if ref in self.cache:
+            return self.cache[ref]
+        m = self.a.json("models/" + ref + ".json") or {}
+        tex, elements = {}, None
+        if "parent" in m and depth < 16:
+            pt, pe = self.load(m["parent"], depth + 1)
+            tex.update(pt)
+            elements = pe
+        tex.update(m.get("textures", {}))
+        if "elements" in m:
+            elements = m["elements"]
+        self.cache[ref] = (tex, elements)
+        return tex, elements
+
+
+def resolve_tex(tex, v):
+    for _ in range(12):
+        if isinstance(v, dict):  # 26.x: {"sprite": ..., "force_translucent": ...}
+            v = v.get("sprite")
+        if not isinstance(v, str):
+            return None
+        if not v.startswith("#"):
+            return v.split(":", 1)[-1]
+        v = tex.get(v[1:])
+    return None
+
+
+def matches(cond, props):
+    if "OR" in cond:
+        return any(matches(c, props) for c in cond["OR"])
+    if "AND" in cond:
+        return all(matches(c, props) for c in cond["AND"])
+    for k, v in cond.items():
+        if str(props.get(k)) not in str(v).split("|"):
+            return False
+    return True
+
+
+def applied_models(bs, props):
+    out = []
+    if not bs:
+        return out
+    if "variants" in bs:
+        for key, v in bs["variants"].items():
+            want = dict(kv.split("=", 1) for kv in key.split(",") if "=" in kv)
+            if all(str(props.get(k)) == val for k, val in want.items()):
+                out.append(v[0] if isinstance(v, list) else v)
+                break
+    for part in bs.get("multipart", []):
+        if "when" not in part or matches(part["when"], props):
+            a = part["apply"]
+            out.append(a[0] if isinstance(a, list) else a)
+    return out
+
+
+# ------------------------------------------------------------------ main
+
+def main():
+    args = sys.argv[1:]
+    jar = None
+    if "--jar" in args:
+        i = args.index("--jar")
+        jar = args[i + 1]
+        del args[i:i + 2]
+    res, out_dir = args[0], args[1]
+    os.makedirs(out_dir, exist_ok=True)
+    assets = Assets(jar, res)
+    models = Models(assets)
+
+    beh = json.load(open(os.path.join(res, "block-behaviours.json")))["blocks"]
+    states = json.load(open(os.path.join(res, "model-states.json")))
+    reg = json.load(open(os.path.join(res, "registries.json")))
+    names = [k for k, _ in sorted(reg["minecraft:block"]["entries"].items(), key=lambda kv: kv[1]["protocol_id"])]
+    items = [k for k, _ in sorted(reg["minecraft:item"]["entries"].items(), key=lambda kv: kv[1]["protocol_id"])]
+    by_name = {b["name"]: b for b in beh}
+    assert names == [b["name"] for b in beh], "registry order differs from block-behaviours.json"
+    facts = json.load(open(os.path.join(res, "gameplay-facts.json")))["states"]
+    # Vanilla's collision shape of every state (getCollisionShape at the origin), as
+    # horizon-prepare caches it.
+    coll_nbt = read_nbt(open(os.path.join(res, "cached-collision.nbt"), "rb").read())
+    coll_of_state = coll_nbt["cached_shapes"]
+    coll_shapes = coll_nbt["shapes"]
+    assert len(coll_of_state) == len(facts), "cached-collision.nbt is for another version"
+    coll_boxes = []       # (x0, y0, z0, x1, y1, z1) in 1/32 block, signed bytes
+    coll_index = {}       # shape id -> (first, count)
+    coll_inexact = set()
+    raw_tags = json.load(open(os.path.join(res, "block-tags.json")))
+    sound_names = [k for k, _ in sorted(reg["minecraft:sound_event"]["entries"].items(), key=lambda kv: kv[1]["protocol_id"])]
+    sound_ids = {n: i for i, n in enumerate(sound_names)}
+    emodels = json.load(open(os.path.join(res, "entity-models.json")))
+
+    def tag(name, seen=()):
+        v = raw_tags.get(name)
+        if v is None or name in seen:
+            return set()
+        if isinstance(v, str):
+            v = json.loads(v)
+        out = set()
+        for e in v.get("values", []):
+            e = e["id"] if isinstance(e, dict) else e
+            out |= tag(e[1:], seen + (name,)) if e.startswith("#") else {e}
+        return out
+
+    mine_tags = [tag("minecraft:mineable/" + t) for t in ("pickaxe", "axe", "shovel", "hoe")]
+    sword = tag("minecraft:sword_efficient") | {"minecraft:cobweb"}
+    bad_tags = [tag("minecraft:incorrect_for_%s_tool" % t)
+                for t in ("wooden", "stone", "copper", "iron", "gold", "diamond", "netherite")]
+
+    # ---- textures into the atlas, as they are first used
+    tiles = []          # RGBA 16x16
+    tile_index = {}     # texture path -> (index, alpha class: 0 opaque, 1 cutout, 2 translucent)
+    missing = set()
+
+    def texture(path):
+        if path in tile_index:
+            return tile_index[path]
+        img = png_decode(assets.read("textures/" + path + ".png"))
+        if img is None:
+            missing.add(path)
+            path = "__missing__"
+            if path in tile_index:
+                return tile_index[path]
+            t = bytearray()
+            for y in range(TILE):
+                for x in range(TILE):
+                    t += bytes([248, 0, 248, 255] if (x // 8 + y // 8) % 2 else [0, 0, 0, 255])
+            t = bytes(t)
+        else:
+            t = tile_of(img)
+        alphas = t[3::4]
+        cls = 0
+        if any(0 < a < 255 for a in alphas):
+            cls = 2
+        elif any(a == 0 for a in alphas):
+            cls = 1
+        tile_index[path] = (len(tiles) + RESERVED, cls)
+        tiles.append(t)
+        return tile_index[path]
+
+    # The first rows of the atlas hold 64x64 block-entity textures (chests), 16 to a row.
+    BIG_ROWS = 8
+    RESERVED = BIG_ROWS * 64
+    big = {}  # path -> (x, y, w, h, rgba)
+
+    def big_texture(path):
+        if path in big:
+            return big[path]
+        img = png_decode(assets.read("textures/" + path + ".png"))
+        if img is None:
+            return None
+        w, h, px = img
+        n = len(big)
+        x, y = (n % 16) * 64, (n // 16) * 64
+        if y + 64 > BIG_ROWS * TILE or w > 64 or h > 64:
+            return None
+        big[path] = (x, y, w, h, px)
+        return big[path]
+
+    CHEST_TEX = {"chest": "normal", "trapped_chest": "trapped", "ender_chest": "ender"}
+    for stage in ("", "exposed_", "weathered_", "oxidized_"):
+        for wax in ("", "waxed_"):
+            CHEST_TEX[wax + stage + "copper_chest"] = "copper" + ("_" + stage[:-1] if stage else "")
+
+    def chest_quads(short, facing, kind):
+        """ChestRenderer's model as block quads: the chest (or one half of a double chest),
+        turned by -facing.toYRot() about the block's centre."""
+        base = "entity/chest/" + CHEST_TEX[short]
+        key = "minecraft:chest#main"
+        if kind in ("left", "right") and short != "ender_chest":
+            key = "minecraft:double_chest_%s#main" % kind
+            base += "_" + kind
+        tex = big_texture(base)
+        model = emodels.get(key)
+        if tex is None or model is None:
+            return []
+        bx, by, tw, th, _ = tex
+        rot = {"south": 0, "west": 90, "north": 180, "east": 270}.get(facing, 0)
+        a = math.radians(-rot)
+        ca, sa = math.cos(a), math.sin(a)
+        out = []
+
+        def walk(part, off):
+            pose = part.get("pose", [0] * 9)
+            o = (off[0] + pose[0], off[1] + pose[1], off[2] + pose[2])
+            for poly, nrm in zip(part.get("polygons", []), part.get("normals", []) or [[0, 1, 0]] * 99):
+                q = bytearray()
+                for vtx in poly[:4]:
+                    x, y, z = vtx[0] + o[0] - 8, vtx[1] + o[1], vtx[2] + o[2] - 8
+                    x, z = x * ca + z * sa, -x * sa + z * ca
+                    au = (bx + vtx[3] * tw) / (64 * TILE)
+                    av16 = int(round((by + vtx[4] * th) * 16))
+                    q += struct.pack("<hhhHH", int(round((x + 8) * 64)), int(round(y * 64)), int(round((z + 8) * 64)),
+                                     int(round(au * 65535)), min(65535, av16))
+                nx, nz = nrm[0] * ca + nrm[2] * sa, -nrm[0] * sa + nrm[2] * ca
+                ny = nrm[1]
+                d = "up" if ny > 0.5 else "down" if ny < -0.5 else ("east" if nx > 0.5 else "west" if nx < -0.5 else ("south" if nz > 0 else "north"))
+                q += struct.pack("<BBBBi", 6, 2, int(round(SHADE[d] * 255)), 0, 0)
+                out.append(bytes(q))
+            for child in part.get("children", {}).values():
+                walk(child, o)
+
+        walk(model, (0, 0, 0))
+        return out
+
+    # Water and lava are drawn by the program itself; their textures go in first.
+    texture("block/water_still")
+    texture("block/lava_still")
+    for i in range(10):
+        texture("block/destroy_stage_%d" % i)
+
+    quads = []        # bytes
+    quad_lists = {}   # tuple of quad bytes -> first index
+
+    def bake_state(short, props, kind):
+        bs = assets.json("blockstates/" + short + ".json")
+        out = []
+        for ap in applied_models(bs, props):
+            out.extend(bake_model(ap))
+        return out
+
+    def bake_model(ap):
+        out = []
+        if True:
+            xr, yr = int(ap.get("x", 0)), int(ap.get("y", 0))
+            tex, elements = models.load(ap["model"])
+            for el in elements or []:
+                f, t = el["from"], el["to"]
+                rot = el.get("rotation")
+                shade_el = el.get("shade", True)
+                for d, face in el.get("faces", {}).items():
+                    path = resolve_tex(tex, face.get("texture"))
+                    if not path:
+                        continue
+                    ti, alpha = texture(path)
+                    uv = face.get("uv") or default_uv(d, f, t)
+                    corners = face_corners(d, f, t)
+                    frot = (int(face.get("rotation", 0)) // 90) % 4
+                    verts = []
+                    for p, (s_, t_) in corners:
+                        for _ in range(frot):
+                            s_, t_ = t_, 1 - s_
+                        u = uv[0] + (uv[2] - uv[0]) * s_
+                        v = uv[1] + (uv[3] - uv[1]) * t_
+                        if rot:
+                            p = rot_point(p, rot.get("axis", "y"), float(rot.get("angle", 0)),
+                                          rot.get("origin", [8, 8, 8]), rot.get("rescale", False))
+                        p = variant_rotate(p, xr, yr)
+                        verts.append((p, u, v))
+                    cull = face.get("cullface")
+                    cull = DIRS.index(dir_rotate(cull, xr, yr)) if cull in NORMAL else 6
+                    nd = dir_rotate(d, xr, yr)
+                    # A face lying flat on the block boundary in its own direction.
+                    n = NORMAL[nd]
+                    axis = 0 if n[0] else (1 if n[1] else 2)
+                    plane = 16 if sum(n) > 0 else 0
+                    on_edge = all(abs(vv[0][axis] - plane) < 1e-4 for vv in verts) and not rot
+                    flags = (1 if face.get("tintindex", -1) >= 0 else 0) | (2 if alpha == 1 else 0) \
+                        | (4 if alpha == 2 else 0) | (0 if shade_el else 8) | (16 if on_edge else 0)
+                    light = int(round(SHADE[nd] * 255)) if shade_el else 255
+                    col, row = ti % 64, ti // 64
+                    q = bytearray()
+                    for p, u, v in verts:
+                        au = (col * TILE + max(0.0, min(16.0, u))) / (64 * TILE)
+                        # v in atlas pixels x16 for now: made a fraction once the height is known
+                        av16 = int(round((row * TILE + max(0.0, min(16.0, v))) * 16))
+                        q += struct.pack("<hhhHH", int(round(p[0] * 64)), int(round(p[1] * 64)),
+                                         int(round(p[2] * 64)), int(round(au * 65535)), min(65535, av16))
+                    q += struct.pack("<BBBBi", cull, flags, light, 0, 0)
+                    out.append(bytes(q))
+        return out
+
+    blocks_out = []
+    state_rows = []
+    boxes = []
+    box_index = {}
+    sid = 0
+    for name in names:
+        short = name.split(":", 1)[1]
+        b = by_name[name]
+        sl = states.get(name, {"states": [{}]})["states"]
+        first = facts[sid]
+        kind = kind_of(short, b.get("class", []), first)
+        mine = sum(1 << i for i, t in enumerate(mine_tags) if name in t) | (16 if name in sword else 0)
+        bad = sum(1 << i for i, t in enumerate(bad_tags) if name in t)
+        mc = first.get("map_color", 0)
+        snd = first.get("sound") or {}
+        sids = [sound_ids.get((snd.get(k) or {}).get("id", ""), 0xFFFF) for k in ("break", "step", "place", "hit", "fall")]
+        sv = (int(round(float(snd.get("volume", 1.0)) * 100)), int(round(float(snd.get("pitch", 1.0)) * 100)))
+        # Movement: Block.friction, speedFactor, jumpFactor, and the random offset of plants,
+        # bamboo and dripstone (BlockBehaviour.OffsetType, maxHorizontalOffset).
+        off = (1 if first.get("offset") else 0) | (2 if first.get("outline_offset") else 0) \
+            | (4 if short in ("short_grass", "fern", "short_dry_grass", "tall_dry_grass", "small_dripleaf") else 0)
+        max_h = 0.125 if short in ("pointed_dripstone", "sulfur_spike") else 0.25
+        max_v = 0.1 if short == "small_dripleaf" else 0.2
+        move = (float(first.get("friction", 0.6)), float(first.get("speed_factor", 1.0)),
+                float(first.get("jump_factor", 1.0)), off, max_h, max_v)
+        blocks_out.append((kind, tint_of(short), mine, bad, ((mc >> 16) & 255, (mc >> 8) & 255, mc & 255), short, sids, sv, move))
+        bidx = len(blocks_out) - 1
+        for props in sl:
+            fct = facts[sid]
+            assert fct["id"] == sid
+            sid += 1
+            h = fct.get("hardness", 0.0)
+            hard = 65535 if h < 0 else min(65534, int(round(h * 100)))
+            bx = []
+            for o in fct.get("outline", []):
+                q = tuple(max(0, min(16, int(round(v * 16)))) for v in o)
+                if q[0] < q[3] and q[1] < q[4] and q[2] < q[5]:
+                    bx.append(q)
+            if kind in (0, 4, 5):
+                bx = [] if kind == 0 else [(0, 0, 0, 16, 14 if kind == 4 else 16, 16)]
+            full = kind == 1 and bx == [(0, 0, 0, 16, 16, 16)] and fct.get("can_occlude") and fct.get("solid_render")
+            flags = (1 if fct.get("requires_tool") else 0) | (2 if fct.get("full_collision") else 0) \
+                | (4 if fct.get("replaceable") else 0) | (8 if full else 0) \
+                | (16 if short == "bubble_column" and props.get("drag") == "true" else 0) \
+                | (32 if props.get("waterlogged") == "true" or short in ("seagrass", "tall_seagrass", "kelp", "kelp_plant",
+                                                                        "bubble_column") else 0) \
+                | (64 if props.get("open") == "true" else 0)
+            facing = {"north": 0, "south": 1, "west": 2, "east": 3, "down": 4, "up": 5}.get(props.get("facing"), 255)
+            # The collision shape: vanilla's, or a rule of its own for dynamic shapes.
+            special = DYNAMIC_COLLISION.get(short, 0)
+            if special == 0 and short.endswith("shulker_box"):
+                special = 5
+            sh_id = coll_of_state[sid - 1]
+            if sh_id not in coll_index:
+                first_c = len(coll_boxes)
+                for c in shape_boxes(coll_shapes[sh_id]):
+                    q = tuple(int(round(v * 32)) for v in c)
+                    if any(abs(v * 32 - round(v * 32)) > 1e-6 for v in c):
+                        coll_inexact.add(short)
+                    q = tuple(max(-128, min(127, v)) for v in q)
+                    if q[0] < q[3] and q[1] < q[4] and q[2] < q[5]:
+                        coll_boxes.append(q)
+                coll_index[sh_id] = (first_c, len(coll_boxes) - first_c)
+            fc, nc = coll_index[sh_id]
+            if special:
+                fc, nc = 0, 0
+            key = tuple(bx)
+            if key not in box_index:
+                box_index[key] = len(boxes)
+                boxes.extend(bx)
+            if short in CHEST_TEX:
+                ql = chest_quads(short, props.get("facing", "south"), props.get("type", "single"))
+            else:
+                ql = [] if kind in (0, 4, 5, 6) else bake_state(short, props, kind)
+            qk = tuple(ql)
+            if qk not in quad_lists:
+                quad_lists[qk] = len(quads)
+                quads.extend(ql)
+            state_rows.append((bidx, hard, flags, len(bx), box_index[key], quad_lists[qk], len(ql), fc, nc, special, facing))
+    assert sid == len(facts)
+    if coll_inexact:
+        print("collision shapes rounded to 1/32 for:", ", ".join(sorted(coll_inexact)))
+
+
+    # ---- items: a flat icon (layer textures into the block atlas) or a 3D model
+    def find_model(m, depth=0):
+        """The first plain model in a 26.x item definition (conditions, selects, ranges and
+        special renderers fall back to a model they name)."""
+        if not isinstance(m, dict) or depth > 12:
+            return None, []
+        t = m.get("type", "minecraft:model")
+        if t == "minecraft:model":
+            return m.get("model"), m.get("tints", [])
+        if t == "minecraft:special":
+            return m.get("base"), []
+        if t == "minecraft:composite":
+            parts = m.get("models", [])
+            if parts:
+                return find_model(parts[0], depth + 1)
+        for key in ("fallback", "on_false", "on_true", "model"):
+            if isinstance(m.get(key), dict):
+                r = find_model(m[key], depth + 1)
+                if r[0]:
+                    return r
+        for key in ("cases", "entries", "models"):
+            for c in m.get(key, []) or []:
+                r = find_model(c.get("model", c) if isinstance(c, dict) else c, depth + 1)
+                if r[0]:
+                    return r
+        return None, []
+
+    def parents(ref):
+        out = []
+        ref = ref.split(":", 1)[-1]
+        for _ in range(16):
+            out.append(ref)
+            m = assets.json("models/" + ref + ".json") or {}
+            if "parent" not in m:
+                break
+            ref = m["parent"].split(":", 1)[-1]
+        return out
+
+    def display(ref, ctx, default):
+        for r in parents(ref):
+            m = assets.json("models/" + r + ".json") or {}
+            g = m.get("display", {}).get(ctx)
+            if g:
+                return (g.get("rotation", [0, 0, 0]), g.get("translation", [0, 0, 0]), g.get("scale", [1, 1, 1]))
+        return default
+
+    def gui_display(ref):
+        return display(ref, "gui", ([30, 225, 0], [0, 0, 0], [0.625, 0.625, 0.625]))
+
+    def hand_display(ref):
+        return display(ref, "firstperson_righthand", ([0, 45, 0], [0, 0, 0], [0.4, 0.4, 0.4]))
+
+    def tint_value(t):
+        if not isinstance(t, dict):
+            return 0
+        if t.get("type") == "minecraft:grass":
+            return 0xFF91BD59
+        if t.get("type") == "minecraft:foliage":
+            return 0xFF77AB2F
+        v = t.get("value", t.get("default"))
+        if isinstance(v, int):
+            return v & 0xFFFFFFFF | 0xFF000000
+        if isinstance(v, list) and len(v) >= 3:
+            return 0xFF000000 | int(v[0] * 255) << 16 | int(v[1] * 255) << 8 | int(v[2] * 255)
+        return 0
+
+    item_icons = []
+    item_hands = []
+    for name in items:
+        short = name.split(":", 1)[1]
+        d = assets.json("items/" + short + ".json")
+        ref, tints = find_model(d.get("model") if d else None)
+        icon = (0,)
+        if ref:
+            chain = parents(ref)
+            tex, elements = models.load(ref)
+            if "builtin/generated" in chain:
+                layers = []
+                for i in range(5):
+                    path = resolve_tex(tex, tex.get("layer%d" % i))
+                    if not path:
+                        break
+                    ti, _ = texture(path)
+                    layers.append((ti, tint_value(tints[i]) if i < len(tints) else 0))
+                if layers:
+                    icon = (1, layers)
+            elif elements:
+                ql = bake_model({"model": ref})
+                # A composite (a bed: head and foot) adds its other plain parts, moved.
+                if d and d.get("model", {}).get("type") == "minecraft:composite":
+                    for part in d["model"].get("models", [])[1:]:
+                        if part.get("type", "minecraft:model") != "minecraft:model":
+                            continue
+                        tr = (part.get("transformation") or {}).get("translation", [0, 0, 0])
+                        for q in bake_model({"model": part["model"]}):
+                            q = bytearray(q)
+                            for k in range(4):
+                                o = k * 10
+                                for a in range(3):
+                                    v = struct.unpack("<h", q[o + 2 * a:o + 2 * a + 2])[0] + int(round(tr[a] * 1024))
+                                    q[o + 2 * a:o + 2 * a + 2] = struct.pack("<h", max(-32768, min(32767, v)))
+                            ql.append(bytes(q))
+                qk = tuple(ql)
+                if qk not in quad_lists:
+                    quad_lists[qk] = len(quads)
+                    quads.extend(ql)
+                tint = tint_value(tints[0]) if tints else 0
+                icon = (2, quad_lists[qk], len(ql), gui_display(ref), tint)
+            else:
+                path = resolve_tex(tex, tex.get("particle"))
+                if path:
+                    ti, _ = texture(path)
+                    icon = (1, [(ti, 0)])
+        if short in CHEST_TEX:
+            ql = chest_quads(short, "south", "single")
+            if ql:
+                qk = tuple(ql)
+                if qk not in quad_lists:
+                    quad_lists[qk] = len(quads)
+                    quads.extend(ql)
+                icon = (2, quad_lists[qk], len(ql), ([30, 45, 0], [0, 0, 0], [0.625, 0.625, 0.625]), 0)
+        item_icons.append(icon)
+        item_hands.append(hand_display(ref) if ref else ([0, 45, 0], [0, 0, 0], [0.4, 0.4, 0.4]))
+
+    # ---- biome colours
+    def colormap(path):
+        img = png_decode(assets.read("textures/colormap/%s.png" % path))
+        return img
+
+    grass_map, foliage_map = colormap("grass"), colormap("foliage")
+
+    def from_map(img, temp, down, default):
+        if not img:
+            return default
+        w, h, px = img
+        t = max(0.0, min(1.0, temp))
+        d = max(0.0, min(1.0, down)) * t
+        i = int((1.0 - t) * 255)
+        j = int((1.0 - d) * 255)
+        o = (j * w + i) * 4
+        if o + 3 >= len(px):
+            return default
+        return px[o] << 16 | px[o + 1] << 8 | px[o + 2]
+
+    def hexcol(v, default):
+        if isinstance(v, str) and v.startswith("#"):
+            return int(v[1:], 16)
+        if isinstance(v, int):
+            return v & 0xFFFFFF
+        return default
+
+    biome_rows = []
+    bdir = os.path.join(res, "data", "minecraft", "worldgen", "biome")
+    for fn in sorted(os.listdir(bdir)) if os.path.isdir(bdir) else []:
+        if not fn.endswith(".json"):
+            continue
+        b = json.load(open(os.path.join(bdir, fn)))
+        eff = b.get("effects", {})
+        temp, down = float(b.get("temperature", 0.8)), float(b.get("downfall", 0.4))
+        grass = hexcol(eff.get("grass_color"), None)
+        if grass is None:
+            grass = from_map(grass_map, temp, down, 0x91BD59)
+        mod = eff.get("grass_color_modifier")
+        if mod == "swamp":
+            grass = 0x6A7039
+        elif mod == "dark_forest":
+            grass = ((grass & 0xFEFEFE) + 0x28340A) >> 1
+        foliage = hexcol(eff.get("foliage_color"), None)
+        if foliage is None:
+            foliage = from_map(foliage_map, temp, down, 0x77AB2F)
+        water = hexcol(eff.get("water_color"), 0x3F76E4)
+        sky = hexcol(b.get("attributes", {}).get("minecraft:visual/sky_color"), 0x78A7FF)
+        biome_rows.append(("minecraft:" + fn[:-5], (grass, foliage, water, sky)))
+
+    # ---- atlas: 64 tiles a row, height a power of two
+    rows = (len(tiles) + RESERVED + 63) // 64
+    height = 1
+    while height < rows * TILE:
+        height *= 2
+    width = 64 * TILE
+    atlas = bytearray(width * height * 4)
+    for i, t in enumerate(tiles):
+        slot = i + RESERVED
+        cx, cy = (slot % 64) * TILE, (slot // 64) * TILE
+        for y in range(TILE):
+            o = ((cy + y) * width + cx) * 4
+            atlas[o:o + TILE * 4] = t[y * TILE * 4:(y + 1) * TILE * 4]
+    for bx_, by_, bw_, bh_, bpx in big.values():
+        for y in range(bh_):
+            o = ((by_ + y) * width + bx_) * 4
+            atlas[o:o + bw_ * 4] = bpx[y * bw_ * 4:(y + 1) * bw_ * 4]
+    # v was stored in atlas pixels x16; make it a fraction of the height.
+    fixed = []
+    for q in quads:
+        q = bytearray(q)
+        for k in range(4):
+            o = k * 10 + 8
+            px16 = struct.unpack("<H", q[o:o + 2])[0]
+            q[o:o + 2] = struct.pack("<H", min(65535, int(round(px16 / 16 / height * 65535))))
+        fixed.append(bytes(q))
+    quads = fixed
+
+    def rect(path):
+        i = tile_index[path][0]
+        cx, cy = (i % 64) * TILE, (i // 64) * TILE
+        return struct.pack("<ffff", cx / width, cy / height, (cx + TILE) / width, (cy + TILE) / height)
+
+    with open(os.path.join(out_dir, "blocks.bin"), "wb") as f:
+        f.write(b"PNB9" + struct.pack("<IIIIII", len(state_rows), len(blocks_out), len(boxes), len(quads), len(items),
+                                      len(coll_boxes)))
+        for blk, hard, flags, nbx, fbx, fq, nq, fc, nc, special, facing in state_rows:
+            f.write(struct.pack("<HHBBHIHHIBBH", blk, hard, flags, nbx, fbx, fq, nq, facing, fc, nc, special, 0))
+        for bx in boxes:
+            f.write(bytes(bx))
+        for c in coll_boxes:
+            f.write(struct.pack("<6b", *c))
+        for q in quads:
+            f.write(q)
+        for kind, tint, mine, bad, mc, short, sids, sv, move in blocks_out:
+            nb = short.encode()[:255]
+            f.write(bytes([kind, tint, mine, bad]) + bytes(mc) + bytes([len(nb)]) + nb)
+            f.write(struct.pack("<5HBB", *sids, min(255, sv[0]), min(255, sv[1])))
+            f.write(struct.pack("<fffBff", *move))
+        for n in items:
+            nb = n.split(":", 1)[1].encode()[:255]
+            f.write(bytes([len(nb)]) + nb)
+        f.write(rect("block/water_still") + rect("block/lava_still"))
+        for i in range(10):
+            f.write(rect("block/destroy_stage_%d" % i))
+        # Biomes by name: grass, foliage, water and sky colours (BiomeSpecialEffects, the
+        # colour maps for temperature and downfall, the swamp and dark forest modifiers).
+        f.write(struct.pack("<I", len(biome_rows)))
+        for name, cols in biome_rows:
+            nb = name.encode()
+            f.write(bytes([len(nb)]) + nb + struct.pack("<4I", *cols))
+    with open(os.path.join(out_dir, "atlas.bin"), "wb") as f:
+        f.write(b"PNA1" + struct.pack("<HH", width, height) + bytes(atlas))
+
+    # ---- the GUI: vanilla's sprites, the font, the item icons
+    sprites = {}  # name -> (w, h, rgba, nine-slice or None)
+
+    def add_sprite(name, rel, crop=None):
+        img = png_decode(assets.read("textures/" + rel + ".png"))
+        if img is None:
+            return
+        w, h, px = img
+        if crop:
+            cw, ch = crop
+            out = bytearray()
+            for y in range(ch):
+                out += px[(y * w) * 4:(y * w + cw) * 4]
+            w, h, px = cw, ch, bytes(out)
+        nine = None
+        meta = assets.read("textures/" + rel + ".png.mcmeta")
+        if meta:
+            try:
+                sc = json.loads(meta).get("gui", {}).get("scaling", {})
+                if sc.get("type") == "nine_slice":
+                    b = sc.get("border", 0)
+                    b = b if isinstance(b, int) else b.get("left", 0)
+                    nine = (b, sc.get("width", w), sc.get("height", h))
+            except ValueError:
+                pass
+        sprites[name] = (w, h, px, nine)
+
+    listing = assets.zip.namelist() if assets.zip else []
+    if not assets.zip:
+        base = os.path.join(res, "assets", "minecraft", "textures")
+        for root, _, files in os.walk(os.path.join(base, "gui", "sprites")):
+            for fn in files:
+                listing.append("assets/minecraft/textures/" + os.path.relpath(os.path.join(root, fn), base).replace(os.sep, "/"))
+    for full in listing:
+        for folder in ("hud/", "widget/", "tooltip/", "container/slot/", "container/inventory/", "container/furnace/",
+                       "container/blast_furnace/", "container/smoker/"):
+            pre = "assets/minecraft/textures/gui/sprites/" + folder
+            if full.startswith(pre) and full.endswith(".png"):
+                rel = full[len("assets/minecraft/textures/"):-4]
+                add_sprite(rel[len("gui/sprites/"):], rel)
+    add_sprite("container/inventory", "gui/container/inventory", crop=(176, 166))
+    # The sky: sun, the eight moon phases (MoonPhase order), clouds.
+    add_sprite("sky/sun", "environment/celestial/sun")
+    for phase in ("full_moon", "waning_gibbous", "third_quarter", "waning_crescent", "new_moon", "waxing_crescent",
+                  "first_quarter", "waxing_gibbous"):
+        add_sprite("sky/moon/" + phase, "environment/celestial/moon/" + phase)
+    add_sprite("sky/clouds", "environment/clouds")
+    for name, crop in (("generic_54", (176, 222)), ("dispenser", (176, 166)), ("crafting_table", (176, 166)),
+                       ("furnace", (176, 166)), ("smoker", (176, 166)), ("blast_furnace", (176, 166)),
+                       ("hopper", (176, 133)), ("shulker_box", (176, 166))):
+        add_sprite("container/" + name, "gui/container/" + name, crop=crop)
+
+    # The default skins (DefaultPlayerSkin's order: slim then wide), for the player model.
+    SKINS = ["alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri"]
+    for kind in ("slim", "wide"):
+        for n in SKINS:
+            add_sprite("skin/%s/%s" % (kind, n), "entity/player/%s/%s" % (kind, n))
+
+    # Entity models (vanilla's ModelPart trees, exported by horizon-prepare): loaded above.
+    model_out = []
+    for key in ("minecraft:player#main", "minecraft:player_slim#main"):
+        parts = []
+
+        def walk(name, part, parent):
+            idx = len(parts)
+            parts.append((name, parent, part.get("pose", [0] * 6 + [1] * 3), part.get("polygons", []), part.get("normals", [])))
+            for cn, child in sorted(part.get("children", {}).items()):
+                walk(cn, child, idx)
+
+        if key in emodels:
+            walk("root", emodels[key], -1)
+        model_out.append((key, parts))
+
+    # The font: bitmap providers in order (the first that has a character wins), widths as
+    # vanilla's BitmapProvider finds them, and the space provider's advances.
+    glyphs = {}
+    font_pages = []
+
+    def font_refs(ref, out, depth=0):
+        d = assets.json("font/" + ref.split(":", 1)[-1] + ".json")
+        for pr in (d or {}).get("providers", []):
+            if pr.get("type") == "reference" and depth < 4:
+                if pr.get("filter", {}).get("uniform") is True:
+                    continue
+                font_refs(pr["id"], out, depth + 1)
+            else:
+                out.append(pr)
+        return out
+
+    for pr in font_refs("minecraft:default", []):
+        if pr.get("type") == "space":
+            for ch, adv in pr.get("advances", {}).items():
+                glyphs.setdefault(ord(ch), (None, 0, 0, 0, 0, int(adv), 0, 0))
+            continue
+        if pr.get("type") != "bitmap":
+            continue
+        rel = "textures/" + pr["file"].split(":", 1)[-1]
+        img = png_decode(assets.read(rel))
+        if img is None:
+            continue
+        w, h, px = img
+        rows = pr["chars"]
+        cw, chh = w // max(len(r) for r in rows), h // len(rows)
+        fh = pr.get("height", 8)
+        ascent = pr["ascent"]
+        scale = fh / chh
+        page = len(font_pages)
+        font_pages.append(("font/page%d" % page, rel))
+        sprites["font/page%d" % page] = (w, h, px, None)
+        for ry, row in enumerate(rows):
+            for rx, ch in enumerate(row):
+                cp = ord(ch)
+                if cp == 0 or cp in glyphs:
+                    continue
+                gwid = 0
+                for gx_ in range(cw - 1, -1, -1):
+                    if any(px[((ry * chh + gy_) * w + rx * cw + gx_) * 4 + 3] for gy_ in range(chh)):
+                        gwid = gx_ + 1
+                        break
+                adv = int(0.5 + gwid * scale) + 1
+                glyphs[cp] = (page, rx * cw, ry * chh, cw, chh, adv, fh, 7 - ascent)
+
+
+    SKINS = ["alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri"]
+
+    # ---- entities: each type's model (exported ModelPart tree) and texture
+    TEX_OF = {
+        "elder_guardian": "guardian_elder", "skeleton_horse": "horse/horse_skeleton",
+        "zombie_horse": "horse/horse_zombie", "ender_dragon": "enderdragon/dragon",
+        "mooshroom": "cow/red_mooshroom", "ocelot": "cat/ocelot", "trader_llama": "llama/creamy",
+        "llama": "llama/creamy", "giant": "zombie/zombie", "armor_stand": "armorstand/wood",
+        "arrow": "projectiles/arrow", "spectral_arrow": "projectiles/spectral_arrow",
+        "polar_bear": "bear/polarbear", "magma_cube": "slime/magmacube", "zombified_piglin": "piglin/zombified_piglin",
+        "piglin_brute": "piglin/piglin_brute", "wither_skeleton": "skeleton/wither_skeleton",
+        "glow_squid": "squid/glow_squid", "cave_spider": "spider/cave_spider", "iron_golem": "iron_golem/iron_golem",
+        "snow_golem": "snow_golem", "wolf": "wolf/wolf", "cat": "cat/tabby", "horse": "horse/horse_brown",
+        "fox": "fox/fox", "rabbit": "rabbit/brown", "parrot": "parrot/parrot_red_blue", "bee": "bee/bee",
+        "panda": "panda/panda", "frog": "frog/temperate_frog", "axolotl": "axolotl/axolotl_lucy",
+        "tropical_fish": "fish/tropical_a", "cod": "fish/cod", "salmon": "fish/salmon", "pufferfish": "fish/pufferfish",
+        "boat": "boat/oak", "chest_boat": "chest_boat/oak", "minecart": "minecart",
+    }
+    ent_files = [x[len("assets/minecraft/textures/"):-4] for x in listing if x.startswith("assets/minecraft/textures/entity/") and x.endswith(".png")] \
+        if assets.zip else []
+    if not assets.zip:
+        base = os.path.join(res, "assets", "minecraft", "textures")
+        for root, _, files in os.walk(os.path.join(base, "entity")):
+            for fn in files:
+                if fn.endswith(".png"):
+                    ent_files.append(os.path.relpath(os.path.join(root, fn), base)[:-4].replace(os.sep, "/"))
+    ent_set = set(ent_files)
+
+    def entity_texture(short):
+        if short in TEX_OF and "entity/" + TEX_OF[short] in ent_set:
+            return "entity/" + TEX_OF[short]
+        if short.endswith("_minecart") and "entity/minecart" in ent_set:
+            return "entity/minecart"
+        for c in ("entity/%s" % short, "entity/%s/%s" % (short, short), "entity/%s/%s_temperate" % (short, short),
+                  "entity/%s/temperate_%s" % (short, short)):
+            if c in ent_set:
+                return c
+        flat = short.replace("_", "")
+        cands = [f for f in ent_files if f.rsplit("/", 1)[-1] in (short, flat)]
+        if cands:
+            return sorted(cands, key=len)[0]
+        cands = sorted(f for f in ent_files if f.startswith("entity/%s/" % short))
+        warm = [f for f in cands if "temperate" in f]
+        return (warm or cands or [None])[0]
+
+    etypes = [k for k, _ in sorted(reg["minecraft:entity_type"]["entries"].items(), key=lambda kv: kv[1]["protocol_id"])]
+    edims = json.load(open(os.path.join(res, "entity-types.json")))
+    ent_models, ent_model_index, ent_rows = [], {}, []
+    ent_sprites = {}
+    for et in etypes:
+        short = et.split(":", 1)[1]
+        key = et + "#main"
+        if short == "player":
+            key = None  # players: the skins in gui.bin
+        mi = -1
+        if key and key in emodels:
+            if key not in ent_model_index:
+                parts = []
+
+                def walk2(name, part, parent):
+                    idx = len(parts)
+                    parts.append((name, parent, part.get("pose", [0] * 6 + [1] * 3), part.get("polygons", []), part.get("normals", [])))
+                    for cn, child in sorted(part.get("children", {}).items()):
+                        walk2(cn, child, idx)
+
+                walk2("root", emodels[key], -1)
+                ent_model_index[key] = len(ent_models)
+                ent_models.append((key, parts))
+            mi = ent_model_index[key]
+        tex = entity_texture(short) if mi >= 0 else None
+        if tex and tex not in ent_sprites:
+            img = png_decode(assets.read("textures/" + tex + ".png"))
+            if img:
+                ent_sprites[tex] = img
+        dims = edims.get(et, {})
+        ent_rows.append((mi, tex if tex in ent_sprites else None, float(dims.get("width", 0.6)), float(dims.get("height", 1.8))))
+    # Render layers drawn over a type's model: (type, model, texture, kind 1 wool / 2 undercoat).
+    LAYERS = [("sheep", "minecraft:sheep#wool", "entity/sheep/sheep_wool", 1),
+              ("sheep", "minecraft:sheep#wool_undercoat", "entity/sheep/sheep_wool_undercoat", 2)]
+    ent_layers = []
+    for short, key, tex, lk in LAYERS:
+        if key not in emodels or "minecraft:" + short not in etypes:
+            continue
+        if key not in ent_model_index:
+            parts = []
+
+            def walk3(name, part, parent):
+                idx = len(parts)
+                parts.append((name, parent, part.get("pose", [0] * 6 + [1] * 3), part.get("polygons", []), part.get("normals", [])))
+                for cn, child in sorted(part.get("children", {}).items()):
+                    walk3(cn, child, idx)
+
+            walk3("root", emodels[key], -1)
+            ent_model_index[key] = len(ent_models)
+            ent_models.append((key, parts))
+        if tex not in ent_sprites:
+            img = png_decode(assets.read("textures/" + tex + ".png"))
+            if not img:
+                continue
+            ent_sprites[tex] = img
+        ent_layers.append((etypes.index("minecraft:" + short), ent_model_index[key], tex, lk))
+    # Players: both player models and the 18 default skins (DefaultPlayerSkin order).
+    player_models = []
+    for key in ("minecraft:player_slim#main", "minecraft:player#main"):
+        if key not in ent_model_index and key in emodels:
+            parts = []
+
+            def walk4(name, part, parent):
+                idx = len(parts)
+                parts.append((name, parent, part.get("pose", [0] * 6 + [1] * 3), part.get("polygons", []), part.get("normals", [])))
+                for cn, child in sorted(part.get("children", {}).items()):
+                    walk4(cn, child, idx)
+
+            walk4("root", emodels[key], -1)
+            ent_model_index[key] = len(ent_models)
+            ent_models.append((key, parts))
+        player_models.append(ent_model_index.get(key, -1))
+    skin_paths = []
+    for kind in ("slim", "wide"):
+        for n in SKINS:
+            tex = "entity/player/%s/%s" % (kind, n)
+            img = png_decode(assets.read("textures/" + tex + ".png"))
+            if img:
+                ent_sprites[tex] = img
+                skin_paths.append(tex)
+    # pack
+    eorder = sorted(ent_sprites, key=lambda k: -ent_sprites[k][1])
+    ew, eplaced = 2048, {}
+    x = y = shelf = 0
+    for k in eorder:
+        w, h, _ = ent_sprites[k]
+        if x + w > ew:
+            x, y, shelf = 0, y + shelf, 0
+        eplaced[k] = (x, y)
+        x += w
+        shelf = max(shelf, h)
+    eh = 1
+    while eh < y + shelf:
+        eh *= 2
+    eatlas = bytearray(ew * eh * 4)
+    for k, (px0, py0) in eplaced.items():
+        w, h, px = ent_sprites[k]
+        for yy in range(h):
+            o = ((py0 + yy) * ew + px0) * 4
+            eatlas[o:o + w * 4] = px[yy * w * 4:(yy + 1) * w * 4]
+    with open(os.path.join(out_dir, "entities.bin"), "wb") as f:
+        f.write(b"PNE2" + struct.pack("<HH", ew, eh) + bytes(eatlas))
+        f.write(struct.pack("<I", len(ent_models)))
+        for key, parts in ent_models:
+            kb = key.encode()
+            f.write(bytes([len(kb)]) + kb + struct.pack("<I", len(parts)))
+            for name, parent, pose, polys, normals in parts:
+                nb = name.encode()
+                f.write(bytes([len(nb)]) + nb + struct.pack("<h9f", parent, *[float(v) for v in (list(pose) + [1, 1, 1])[:9]]))
+                f.write(struct.pack("<H", len(polys)))
+                for i, poly in enumerate(polys):
+                    for vtx in poly[:4]:
+                        f.write(struct.pack("<5f", *[float(v) for v in vtx[:5]]))
+                    nrm = normals[i] if i < len(normals) else [0, 0, 1]
+                    f.write(struct.pack("<3f", *[float(v) for v in nrm]))
+        f.write(struct.pack("<I", len(ent_rows)))
+        for mi, tex, ewid, ehei in ent_rows:
+            if tex:
+                px0, py0 = eplaced[tex]
+                w, h, _ = ent_sprites[tex]
+                f.write(struct.pack("<hHHHHff", mi, px0, py0, w, h, ewid, ehei))
+            else:
+                f.write(struct.pack("<hHHHHff", -1, 0, 0, 0, 0, ewid, ehei))
+    with open(os.path.join(out_dir, "entities.bin"), "ab") as f:
+        f.write(struct.pack("<I", len(ent_layers)))
+        for ti, mi, tex, lk in ent_layers:
+            px0, py0 = eplaced[tex]
+            w, h, _ = ent_sprites[tex]
+            f.write(struct.pack("<HhHHHHB", ti, mi, px0, py0, w, h, lk))
+        f.write(struct.pack("<hhI", player_models[0], player_models[1], len(skin_paths)))
+        for tex in skin_paths:
+            px0, py0 = eplaced[tex]
+            w, h, _ = ent_sprites[tex]
+            f.write(struct.pack("<HHHH", px0, py0, w, h))
+        f.write(struct.pack("<i", etypes.index("minecraft:player") if "minecraft:player" in etypes else -1))
+    print("entities.bin: %d types, %d with a model and texture, atlas %dx%d"
+          % (len(ent_rows), sum(1 for r in ent_rows if r[1]), ew, eh))
+
+    # Shelf-pack the sprites into a power-of-two atlas.
+    order = sorted(sprites, key=lambda k: -sprites[k][1])
+    gw = 1024
+    placed = {}
+    x = y = shelf = 0
+    for k in order:
+        w, h, _, _ = sprites[k]
+        if x + w > gw:
+            x, y, shelf = 0, y + shelf, 0
+        placed[k] = (x, y)
+        x += w + 1
+        shelf = max(shelf, h + 1)
+    gh = 1
+    while gh < y + shelf:
+        gh *= 2
+    gatlas = bytearray(gw * gh * 4)
+    for k, (px0, py0) in placed.items():
+        w, h, px, _ = sprites[k]
+        for yy in range(h):
+            o = ((py0 + yy) * gw + px0) * 4
+            gatlas[o:o + w * 4] = px[yy * w * 4:(yy + 1) * w * 4]
+
+    with open(os.path.join(out_dir, "gui.bin"), "wb") as f:
+        f.write(b"PNG2" + struct.pack("<HH", gw, gh) + bytes(gatlas))
+        names_ = [k for k in sprites if not k.startswith("font/")]
+        f.write(struct.pack("<I", len(names_)))
+        for k in names_:
+            w, h, _, nine = sprites[k]
+            nb = k.encode()
+            px0, py0 = placed[k]
+            f.write(bytes([len(nb)]) + nb + struct.pack("<HHHH", px0, py0, w, h))
+            f.write(struct.pack("<BBHH", 1 if nine else 0, nine[0] if nine else 0, nine[1] if nine else w, nine[2] if nine else h))
+        f.write(struct.pack("<I", len(glyphs)))
+        for cp, (page, gx, gy, cw, chh, adv, fh, yoff) in sorted(glyphs.items()):
+            if page is None:
+                f.write(struct.pack("<IHHBBBBbB", cp, 0, 0, 0, 0, adv, 0, 0, 0))
+            else:
+                px0, py0 = placed["font/page%d" % page]
+                f.write(struct.pack("<IHHBBBBbB", cp, px0 + gx, py0 + gy, cw, chh, adv, fh, yoff, 0))
+        f.write(struct.pack("<I", len(model_out)))
+        for key, parts in model_out:
+            kb = key.encode()
+            f.write(bytes([len(kb)]) + kb + struct.pack("<I", len(parts)))
+            for name, parent, pose, polys, normals in parts:
+                nb = name.encode()
+                f.write(bytes([len(nb)]) + nb + struct.pack("<h9f", parent, *[float(v) for v in pose[:9]]))
+                f.write(struct.pack("<H", len(polys)))
+                for i, poly in enumerate(polys):
+                    for vtx in poly[:4]:
+                        f.write(struct.pack("<5f", *[float(v) for v in vtx[:5]]))
+                    nrm = normals[i] if i < len(normals) else [0, 0, 1]
+                    f.write(struct.pack("<3f", *[float(v) for v in nrm]))
+        # Each item's first-person transform (display.firstperson_righthand).
+        f.write(struct.pack("<I", len(item_hands)))
+        for rot, tr, sc in item_hands:
+            f.write(struct.pack("<9f", *(list(rot) + list(tr) + list(sc))))
+        lang = assets.json("lang/en_us.json") or {}
+        f.write(struct.pack("<I", len(lang)))
+        for k, v in sorted(lang.items()):
+            kb, vb = k.encode()[:65535], v.encode()[:65535]
+            f.write(struct.pack("<H", len(kb)) + kb + struct.pack("<H", len(vb)) + vb)
+        f.write(struct.pack("<I", len(item_icons)))
+        for icon in item_icons:
+            if icon[0] == 1:
+                layers = icon[1]
+                f.write(bytes([1, len(layers)]))
+                for ti, tint in layers:
+                    f.write(struct.pack("<HI", ti, tint))
+            elif icon[0] == 2:
+                _, fq, nq, (rot, tr, sc), tint = icon
+                f.write(bytes([2, 0]) + struct.pack("<IHI", fq, nq, tint))
+                f.write(struct.pack("<9f", *(list(rot) + list(tr) + list(sc))))
+            else:
+                f.write(bytes([0, 0]))
+    print("gui.bin: %d sprites, %d glyphs, %d translations, atlas %dx%d; %d items (%d flat, %d 3D)"
+          % (len(sprites) - len(font_pages), len(glyphs), len(lang), gw, gh, len(item_icons),
+             sum(1 for i in item_icons if i[0] == 1), sum(1 for i in item_icons if i[0] == 2)))
+    make_sounds(res, out_dir, sound_names)
+    print("blocks.bin: %d states, %d blocks, %d quads; atlas %dx%d with %d textures%s"
+          % (len(state_rows), len(blocks_out), len(quads), width, height, len(tiles),
+             (", missing: " + ", ".join(sorted(missing))) if missing else ""))
+
+
+def find_objects():
+    """The asset index and objects folder of an installed 26.3 (Horizon's launcher, the
+    official launcher, Prism...)."""
+    home = os.path.expanduser("~")
+    for base in (os.path.join(home, ".local/share/horizon-launcher/minecraft/assets"),
+                 os.path.join(home, ".minecraft/assets"),
+                 os.path.join(home, "Library/Application Support/minecraft/assets"),
+                 os.path.join(home, "AppData/Roaming/.minecraft/assets")):
+        idx = os.path.join(base, "indexes")
+        if not os.path.isdir(idx):
+            continue
+        for n in sorted(os.listdir(idx), reverse=True):
+            if n.endswith(".json"):
+                return os.path.join(idx, n), os.path.join(base, "objects")
+    return None, None
+
+
+def make_sounds(res, out_dir, sound_names):
+    """sounds.bin, "PNS1": the game's sound files (Ogg Vorbis, as they are) and its sound
+    events (sounds.json), indexed by the sound-event registry ids the server sends.
+
+        u32 files; per file: u16 name length, name, u64 offset, u32 size
+        u32 events (registry order); per event: u16 entries; per entry: u32 file, f32 volume,
+            f32 pitch, u16 weight, u8 stream, u8 attenuation distance
+        u32 extra events by name (sounds.json events outside the registry, e.g. music):
+            u16 name length, name, then the same entry list
+        u32 registry names (without "minecraft:"), in id order
+        then the file bytes, at their offsets (from the start of the file)."""
+    index_path, objects = find_objects()
+    prepared_index = os.path.join(res, "asset-index.json")
+    if os.path.isfile(prepared_index):
+        index_path = prepared_index
+    if not index_path or not objects or not os.path.isdir(objects):
+        print("sounds.bin: no installed game assets found: no sound")
+        return
+    idx = json.load(open(index_path))
+    objs = idx.get("objects", idx)
+
+    def obj_path(key):
+        o = objs.get(key)
+        if not o:
+            return None
+        p = os.path.join(objects, o["hash"][:2], o["hash"])
+        return p if os.path.isfile(p) else None
+
+    sj = obj_path("minecraft/sounds.json")
+    if not sj:
+        print("sounds.bin: sounds.json missing: no sound")
+        return
+    events = json.load(open(sj))
+    files, file_index = [], {}
+
+    def file_of(name):
+        name = name.split(":", 1)[-1]
+        if name in file_index:
+            return file_index[name]
+        p = obj_path("minecraft/sounds/" + name + ".ogg")
+        if not p:
+            return None
+        file_index[name] = len(files)
+        files.append((name, p))
+        return file_index[name]
+
+    def entries(ev, depth=0):
+        out = []
+        for e in (events.get(ev.split(":", 1)[-1]) or {}).get("sounds", []):
+            if isinstance(e, str):
+                e = {"name": e}
+            if e.get("type") == "event":
+                if depth < 4:
+                    for sub in entries(e["name"], depth + 1):
+                        out.append(sub)
+                continue
+            fi = file_of(e["name"])
+            if fi is None:
+                continue
+            out.append((fi, float(e.get("volume", 1.0)), float(e.get("pitch", 1.0)), int(e.get("weight", 1)),
+                        1 if e.get("stream") else 0, int(e.get("attenuation_distance", 16))))
+        return out
+
+    reg_entries = [entries(n) for n in sound_names]
+    named = set(n.split(":", 1)[-1] for n in sound_names)
+    extra = [(k, entries(k)) for k in sorted(events) if k not in named]
+    head = bytearray()
+    head += struct.pack("<I", len(files))
+    sizes = [os.path.getsize(p) for _, p in files]
+    # Offsets are filled once the header's length is known.
+    file_rows_at = []
+    for (name, _), size in zip(files, sizes):
+        nb = name.encode()
+        head += struct.pack("<H", len(nb)) + nb
+        file_rows_at.append(len(head))
+        head += struct.pack("<QI", 0, size)
+
+    def ent_bytes(lst):
+        b = struct.pack("<H", len(lst))
+        for fi, vol, pit, w, st, att in lst:
+            b += struct.pack("<IffHBB", fi, vol, pit, min(65535, w), st, min(255, att))
+        return b
+
+    head += struct.pack("<I", len(reg_entries))
+    for lst in reg_entries:
+        head += ent_bytes(lst)
+    head += struct.pack("<I", len(extra))
+    for name, lst in extra:
+        nb = name.encode()
+        head += struct.pack("<H", len(nb)) + nb + ent_bytes(lst)
+    # The registry's names, so the client can play its own sounds by name.
+    head += struct.pack("<I", len(sound_names))
+    for n in sound_names:
+        nb = n.split(":", 1)[-1].encode()
+        head += struct.pack("<H", len(nb)) + nb
+    base = 4 + len(head)
+    off = base
+    for at, size in zip(file_rows_at, sizes):
+        head[at:at + 8] = struct.pack("<Q", off)
+        off += size
+    with open(os.path.join(out_dir, "sounds.bin"), "wb") as f:
+        f.write(b"PNS1")
+        f.write(head)
+        for _, p in files:
+            with open(p, "rb") as src:
+                f.write(src.read())
+    print("sounds.bin: %d files, %d events, %.0f MB" % (len(files), len(reg_entries) + len(extra), off / 1e6))
+
+
+if __name__ == "__main__":
+    main()

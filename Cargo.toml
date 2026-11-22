@@ -1,0 +1,18 @@
+[package]
+name = "penryn"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A small Minecraft Java Edition 26.3 client for old Macs (Mac OS X 10.6, OpenGL 2.1)"
+
+# No crates: the program is `no_std` so that one source builds for Linux (where it is tested)
+# and for Mac OS X 10.6, whose system lacks what Rust's standard library needs (see README.md).
+[dependencies]
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+debug = false
+
+[profile.dev]
+panic = "abort"
