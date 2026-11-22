@@ -717,8 +717,7 @@ impl EntityTable {
             (head_y, head_x),
             attack.map(|a| a as f64),
         );
-        // A piglin's weapon swing replaces the attack's own animation.
-        let attack = if crate::mobanim::replaces_attack(&f) { None } else { attack };
+        let before = crate::mobanim::swing_before_attack(&f);
         mats.clear();
         for p in m.parts.iter() {
             let parent = if p.parent >= 0 { mats[p.parent as usize] } else { base };
@@ -726,10 +725,16 @@ impl EntityTable {
             let mut at_part = [q[0] as f64, q[1] as f64, q[2] as f64];
             let mut turn = [q[3] as f64, q[4] as f64, q[5] as f64];
             crate::mobanim::walk(&f, &p.name, &mut at_part, &mut turn);
+            // PiglinModel: swingWeaponDown sets the arms, then the humanoid attack moves them on.
+            if before {
+                crate::mobanim::override_arm(&f, &p.name, &mut turn);
+            }
             if let Some(a) = attack {
                 attack_part(&p.name, a as f32, e.swing_off, head_x, &mut at_part, &mut turn);
             }
-            crate::mobanim::override_arm(&f, &p.name, &mut turn);
+            if !before {
+                crate::mobanim::override_arm(&f, &p.name, &mut turn);
+            }
             // Riding, crouching, rowing (poses.rs).
             crate::poses::part(name, e, partial, &p.name, &mut at_part, &mut turn);
             crate::mobanim::post(&f, &p.name, &mut turn);

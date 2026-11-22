@@ -296,8 +296,8 @@ impl<'a> Frame<'a> {
         if self.hands.left_handed { self.hands.left } else { self.hands.right }
     }
 
-    /// A piglin's swing with its weapon replaces the attack animation (PiglinModel
-    /// .setupAttackAnimation's swingWeaponDown): the body does not turn.
+    /// A piglin's swing with its weapon (PiglinModel.setupAttackAnimation's swingWeaponDown,
+    /// which runs before the humanoid attack in every case, so the body still turns).
     pub fn weapon_swing(&self) -> bool {
         is_piglin(self.name) && self.attack.is_some() && self.main_arm() == Arm::Weapon
     }
@@ -478,14 +478,16 @@ pub fn walk(f: &Frame, part: &str, pos: &mut [f64; 3], turn: &mut [f64; 3]) {
     }
 }
 
-/// Whether the part's attack animation is replaced by the piglin's weapon swing.
-pub fn replaces_attack(f: &Frame) -> bool {
+/// Whether the part's arms are set by the piglin's weapon swing before the attack's own
+/// animation (entities.rs applies the override first, then the attack's additive moves).
+pub fn swing_before_attack(f: &Frame) -> bool {
     f.weapon_swing()
 }
 
-/// The overrides after the attack: the zombies' arms (AnimationUtils.animateZombieArms), a
-/// skeleton's aggressive arms without a bow, a piglin's weapon swing (swingWeaponDown).
-/// These set the arm's angles as they stand; the attack moved only the arm's place.
+/// The absolute arm angles that override the attack: the zombies' arms
+/// (AnimationUtils.animateZombieArms, after the attack), a skeleton's aggressive arms without
+/// a bow (SkeletonModel.setupAnim, after the attack), a piglin's weapon swing (swingWeaponDown,
+/// before the attack: entities.rs calls this first for it, see `swing_before_attack`).
 pub fn override_arm(f: &Frame, part: &str, turn: &mut [f64; 3]) {
     let right = match part {
         "right_arm" => true,
@@ -626,6 +628,12 @@ pub fn selftest() -> alloc::vec::Vec<(&'static str, alloc::string::String, &'sta
     let mut r = [0.0; 3];
     override_arm(&zf, "left_arm", &mut r);
     v.push(("aggressive zombie arm", format!("{:.4} {:.4}", r[0], r[1]), "-2.0944 0.1000"));
+    // A piglin swinging its sword: swingWeaponDown sets the arms before the humanoid attack.
+    let mut pg = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    pg.equipment[0] = Some((2, 1));
+    pg.data.insert(15, 4);
+    let pf = Frame::new("piglin", &pg, 0.0, &items, false, 0.0, 0.0, (0.0, 0.0), Some(0.0));
+    v.push(("piglin weapon swing first", format!("{}", swing_before_attack(&pf)), "true"));
     // A spider's legs at rest of the cycle: the hind leg turns out by 0.4 at full speed.
     let sp = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
     let spf = Frame::new("spider", &sp, 0.0, &items, false, 0.0, 1.0, (0.0, 0.0), None);
