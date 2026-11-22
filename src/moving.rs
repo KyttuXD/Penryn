@@ -19,8 +19,6 @@ use core::ffi::c_void;
 /// blocks.rs facing codes (0 north, 1 south, 2 west, 3 east, 4 down, 5 up): step and axis.
 const STEP: [[i32; 3]; 6] = [[0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0]];
 const AXIS: [usize; 6] = [2, 2, 0, 0, 1, 1];
-/// Direction.from3DDataValue (down, up, north, south, west, east) as facing codes.
-const FROM_3D: [u8; 6] = [4, 5, 0, 1, 2, 3];
 const NONE: u8 = 255;
 
 fn sign(d: u8) -> f64 {
@@ -304,19 +302,22 @@ pub fn on_block_event(world: &mut World, b: &Blocks, r: &mut In) {
 
 /// PistonBaseBlock.triggerEvent (0 extend, 1 and 2 retract; b1 the facing) and
 /// ShulkerBoxBlockEntity.triggerEvent (1, how many have it open).
-pub fn block_event(world: &mut World, b: &Blocks, pos: [i32; 3], b0: u8, b1: u8, block: i32) {
+pub fn block_event(world: &mut World, b: &Blocks, pos: [i32; 3], b0: u8, b1: u8, _block: i32) {
+    // Level.blockEvent: the event goes to the block the client has there (the packet's block
+    // only names it), and a piston's direction is its own state's facing.
     let here = world.get(pos[0], pos[1], pos[2]);
     world.moving.ensure(b);
     let ids = world.moving.ids.as_ref().unwrap();
-    let block = block as u16;
-    if block == ids.piston.block || block == ids.sticky.block {
-        let sticky = block == ids.sticky.block;
-        let f = FROM_3D[(b1 % 6) as usize];
+    if ids.is_piston(here) {
+        let sticky = ids.sticky.has(here);
+        let f = b.state(here).facing;
         if crate::sys::env("PENRYN_DEBUG").is_some() {
             crate::say!("piston event at {:?}: {} {}", pos, b0, b1);
         }
-        piston_event(world, b, pos, f, sticky, b0);
-    } else if b0 == 1 && ids.shulkers.contains(&block) {
+        if f < 6 && b0 <= 2 {
+            piston_event(world, b, pos, f, sticky, b0);
+        }
+    } else if b0 == 1 && ids.shulkers.contains(&b.state(here).block) {
         let facing = match b.state(here).facing {
             f if f < 6 => f,
             _ => 5,
@@ -749,8 +750,8 @@ fn move_collided(world: &mut World, b: &Blocks, mover: &mut Mover, p: &Piston, n
     if !meets(&area, &pb) {
         return;
     }
-    // A slime block pushed into the player throws them along.
-    if slime && p.extending {
+    // A slime block moved into the player throws them along (pushed or pulled).
+    if slime {
         mover.vel[AXIS[dir as usize]] = sign(dir);
     }
     let mut far = 0.0f64;
