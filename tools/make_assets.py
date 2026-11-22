@@ -1898,7 +1898,7 @@ def main():
             gatlas[o:o + w * 4] = px[yy * w * 4:(yy + 1) * w * 4]
 
     with open(os.path.join(out_dir, "gui.bin"), "wb") as f:
-        f.write(b"PNG3" + struct.pack("<HH", gw, gh) + bytes(gatlas))
+        f.write(b"PNG4" + struct.pack("<HH", gw, gh) + bytes(gatlas))
         names_ = [k for k in sprites if not k.startswith("font/")]
         f.write(struct.pack("<I", len(names_)))
         for k in names_:

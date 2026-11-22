@@ -145,7 +145,7 @@ pub fn logout() {
 /// The format each game file must have: a file from another version of Penryn is fetched again.
 pub const BLOCKS_MAGIC: &[u8; 4] = b"PNBA";
 pub const ATLAS_MAGIC: &[u8; 4] = b"PNA2";
-pub const GUI_MAGIC: &[u8; 4] = b"PNG3";
+pub const GUI_MAGIC: &[u8; 4] = b"PNG4";
 pub const ENTITIES_MAGIC: &[u8; 4] = b"PNE3";
 pub const SOUNDS_MAGIC: &[u8; 4] = b"PNS1";
 pub const WEATHER_MAGIC: &[u8; 4] = b"PNW1";
