@@ -12,6 +12,9 @@ Penryn asks this relay, over plain HTTP on the local network, to do them:
     Edition, and hand Penryn the Minecraft token and profile;
   * refresh that sign-in later without asking again;
   * make the session-server "join" call an online-mode server checks;
+  * download servers' resource packs and bake them, with the player's own packs from
+    DATA/resourcepacks, into the game files they change (GET /pack/list, POST /pack/download,
+    POST /pack/bake, GET /pack/files/...);
   * serve the game files Penryn draws with (blocks.bin, atlas.bin, gui.bin, entities.bin, signs.bin, weather.bin, effects.bin and sounds.bin), made from your own copy
     of Minecraft 26.3: an existing install (Horizon's launcher, the official launcher, Prism),
     or the 26.3 client downloaded from Mojang for your signed-in account (as Horizon does).
@@ -360,6 +363,7 @@ def local_packs(data_dir):
     """DATA/resourcepacks: zips and folders with a pack.mcmeta, as vanilla's FolderRepositorySource.
     (id, compatible, description) sorted by id."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.dont_write_bytecode = True
     import make_assets  # noqa: E402 - the same reader the bake uses
     folder = os.path.join(data_dir, "resourcepacks")
     out = []
