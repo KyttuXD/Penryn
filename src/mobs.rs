@@ -594,6 +594,12 @@ pub fn look(t: &EntityTable, e: &Entity, vs: &Variants, game_time: i64) -> Vec<D
             None => {}
         }
     }
+    // WingsLayer: an elytra in the chest slot, its wings drawn by the entity's own pose (mobanim.rs).
+    if matches!(short, "player" | "mannequin") && !baby {
+        if let (Some(a), Some(mm)) = (equip(4), m("elytra#main")) {
+            wear(&mut out, Some(mm), &layers_of(a, "wings"));
+        }
+    }
     // ---- HumanoidArmorLayer: the armour models of the body model.
     if let Some(base) = body_model.and_then(|i| t.models.get(i as usize)).and_then(|mm| mm.name.strip_suffix("#main")) {
         for (slot, layer) in [(5usize, "helmet"), (4, "chestplate"), (3, "leggings"), (2, "feet")] {

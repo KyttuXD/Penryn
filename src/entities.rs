@@ -73,6 +73,9 @@ pub struct Entity {
     pub target_yaw: f32,
     pub target_pitch: f32,
     pub steps: u32,
+    /// The client-side animation the poses read (mobanim.rs): the chicken's flap, the elytra's
+    /// wings, the swim amount.
+    pub anim: crate::mobanim::Anim,
 }
 
 impl Entity {
@@ -114,6 +117,7 @@ impl Entity {
             villager: [0, 0, 1],
             variant: -1,
             version: 0,
+            anim: crate::mobanim::Anim::new(),
         }
     }
 
@@ -215,6 +219,7 @@ impl Entity {
         } else {
             self.death_time = 0;
         }
+        crate::mobanim::tick(self);
         self.age += 1;
     }
 
@@ -464,11 +469,6 @@ fn rgb(c: u32) -> [u8; 3] {
     [(c >> 16) as u8, (c >> 8) as u8, c as u8]
 }
 
-/// The zombies' arms (AbstractZombieModel / ZombifiedPiglinModel: animateZombieArms).
-fn zombie_arms(name: &str) -> bool {
-    matches!(name, "zombie" | "husk" | "drowned" | "zombie_villager" | "giant" | "zombified_piglin")
-}
-
 impl EntityTable {
     pub fn texture(&self) -> u32 {
         self.tex
@@ -660,7 +660,7 @@ impl EntityTable {
 
     /// The model pose of every part (LivingEntityRenderer: position, body turn, the death
     /// fall, the species' scale; the parts' setupAnim), in pixels from the model's origin.
-    fn pose(&self, m: &Model, e: &Entity, partial: f32, at: [f64; 3], held: [bool; 2], mats: &mut Vec<M>) {
+    fn pose(&self, m: &Model, e: &Entity, partial: f32, at: [f64; 3], items: &[String], mats: &mut Vec<M>) {
         let ty = self.types.get(e.kind as usize);
         let name = ty.map_or("", |t| t.name.as_str());
         let mut base = mul(&tr(at[0], at[1], at[2]), &rot(1, math::to_rad((180.0 - e.body_rot(partial)) as f64)));
@@ -700,60 +700,39 @@ impl EntityTable {
         let speed = e.prev_limb_speed + (e.limb_speed - e.prev_limb_speed) * partial;
         // The limb swing's position in this frame (babies swing 3 times as fast: positionScale).
         let scale = if self.is_baby(e) { 3.0 } else { 1.0 };
-        let swing = e.walk_pos(partial, scale) as f64 * 0.6662;
         let amount = speed.min(1.0) as f64;
         let head_y = math::to_rad(wrap_deg(e.head_rot(partial) - e.body_rot(partial)) as f64);
         let head_x = math::to_rad(e.pitch_lerp(partial) as f64);
         let attack = e.swing_progress(partial).filter(|a| *a > 0.0);
-        let zombie = zombie_arms(name);
-        let age = e.age as f64 + partial as f64;
+        // The poses of this frame (mobanim.rs): the walk, the arms' items and bows, the
+        // overrides of zombies, skeletons and piglins, the bob and the swimmer's strokes.
+        let f = crate::mobanim::Frame::new(
+            name,
+            e,
+            partial,
+            items,
+            self.is_baby(e),
+            e.walk_pos(partial, scale) as f64,
+            amount,
+            (head_y, head_x),
+            attack.map(|a| a as f64),
+        );
+        // A piglin's weapon swing replaces the attack's own animation.
+        let attack = if crate::mobanim::replaces_attack(&f) { None } else { attack };
         mats.clear();
         for p in m.parts.iter() {
             let parent = if p.parent >= 0 { mats[p.parent as usize] } else { base };
             let q = p.pose;
-            let (mut xr, mut yr, mut zr) = (q[3] as f64, q[4] as f64, q[5] as f64);
-            match p.name.as_str() {
-                "head" => {
-                    yr += head_y;
-                    xr += head_x;
-                }
-                // HumanoidModel: legs 1.4, arms 1.0 (x 0.5 of 2.0), opposite phases.
-                "right_leg" => xr += math::cos(swing) * 1.4 * amount,
-                "left_leg" => xr += math::cos(swing + math::PI) * 1.4 * amount,
-                "right_arm" | "left_arm" if zombie => {
-                    // animateZombieArms (not attacking), then bobArms.
-                    let right = p.name == "right_arm";
-                    xr = -math::PI / 2.25;
-                    yr = if right { -0.1 } else { 0.1 };
-                    let bob = math::cos(age * 0.09) * 0.05 + 0.05;
-                    zr += if right { bob } else { -bob };
-                    xr += if right { 1.0 } else { -1.0 } * math::sin(age * 0.067) * 0.05;
-                }
-                "right_arm" => {
-                    xr += math::cos(swing + math::PI) * amount;
-                    // HumanoidModel.ArmPose.ITEM.
-                    if held[0] {
-                        xr = xr * 0.5 - math::PI / 10.0;
-                    }
-                }
-                "left_arm" => {
-                    xr += math::cos(swing) * amount;
-                    if held[1] {
-                        xr = xr * 0.5 - math::PI / 10.0;
-                    }
-                }
-                // QuadrupedModel
-                "right_hind_leg" | "left_front_leg" => xr += math::cos(swing) * 1.4 * amount,
-                "left_hind_leg" | "right_front_leg" => xr += math::cos(swing + math::PI) * 1.4 * amount,
-                _ => {}
-            }
-            // Riding, crouching, rowing (poses.rs).
             let mut at_part = [q[0] as f64, q[1] as f64, q[2] as f64];
-            let mut turn = [xr, yr, zr];
+            let mut turn = [q[3] as f64, q[4] as f64, q[5] as f64];
+            crate::mobanim::walk(&f, &p.name, &mut at_part, &mut turn);
             if let Some(a) = attack {
-                attack_part(&p.name, a, e.swing_off, head_x, &mut at_part, &mut turn);
+                attack_part(&p.name, a as f32, e.swing_off, head_x, &mut at_part, &mut turn);
             }
+            crate::mobanim::override_arm(&f, &p.name, &mut turn);
+            // Riding, crouching, rowing (poses.rs).
             crate::poses::part(name, e, partial, &p.name, &mut at_part, &mut turn);
+            crate::mobanim::post(&f, &p.name, &mut turn);
             let [xr, yr, zr] = turn;
             let mut t = mul(&parent, &tr(at_part[0], at_part[1], at_part[2]));
             t = mul(&t, &rot(2, zr));
@@ -851,7 +830,7 @@ impl EntityTable {
                     continue;
                 }
                 let Some(m) = self.models.get(dr.model as usize) else { continue };
-                self.pose(m, e, partial, p, held, &mut mats);
+                self.pose(m, e, partial, p, &cx.blocks.items, &mut mats);
                 // EquipmentLayerRenderer draws with NO_OVERLAY: armour never turns red.
                 if !(own_skin && !dr.worn) {
                     self.emit(v, m, &mats, dr.rect, rgb(dr.tint), red && !dr.worn);
@@ -866,7 +845,7 @@ impl EntityTable {
             if held[0] || held[1] {
                 if first.is_none() {
                     if let Some(dr) = looks.first() {
-                        self.pose(&self.models[dr.model as usize], e, partial, p, held, &mut body);
+                        self.pose(&self.models[dr.model as usize], e, partial, p, &cx.blocks.items, &mut body);
                         first = Some(dr.model as usize);
                     }
                 }
@@ -1095,8 +1074,7 @@ impl EntityTable {
             // A rectangle the size of the atlas maps the model's uvs onto themselves.
             let m = &self.models[mi as usize];
             let mut mats: Vec<M> = Vec::new();
-            let held = [e.equipment[0].is_some(), e.equipment[1].is_some()];
-            self.pose(m, e, partial, at, held, &mut mats);
+            self.pose(m, e, partial, at, &[], &mut mats);
             self.emit(&mut v, m, &mats, [0, 0, self.aw as u16, self.ah as u16], [255; 3], e.hurt > 0 || e.death_time > 0);
         }
         v.iter().map(|q| (q.p, q.uv, q.c)).collect()
