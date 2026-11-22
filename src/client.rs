@@ -1201,10 +1201,11 @@ fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option<()> {
                 // VillagerData: type, profession, level.
                 e.villager = [r.varint()?, r.varint()?, r.varint()?];
             }
+            // A particle, a list of them (LivingEntity.DATA_EFFECT_PARTICLES).
+            16 => crate::mobs::skip_particle(r)?,
             17 => {
-                // Particles: only an empty list is read past.
-                if r.varint()? != 0 {
-                    return None;
+                for _ in 0..r.varint()?.max(0) {
+                    crate::mobs::skip_particle(r)?;
                 }
             }
             33 => {

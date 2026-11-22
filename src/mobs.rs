@@ -79,7 +79,8 @@ fn nbt_strings(r: &mut In, t: u8, path: &str, out: &mut Vec<(String, String)>, d
         9 => {
             let et = r.u8()?;
             let n = r.i32()?;
-            for _ in 0..n.max(0) {
+            // A list of ends holds nothing (and must not spin through a huge count).
+            for _ in 0..if et == 0 { 0 } else { n.max(0) } {
                 nbt_strings(r, et, path, out, depth + 1)?;
             }
         }
@@ -101,6 +102,68 @@ fn nbt_strings(r: &mut In, t: u8, path: &str, out: &mut Vec<(String, String)>, d
             r.take(8 * n.max(0) as usize)?;
         }
         _ => return None,
+    }
+    Some(())
+}
+
+/// ParticleTypes.STREAM_CODEC: a `minecraft:particle_type` id (26.3's registry order, as
+/// Horizon's protocol table has it) and that type's options. None for one it cannot read
+/// past (an item particle's stack), so the caller stops there.
+pub fn skip_particle(r: &mut In) -> Option<()> {
+    match r.varint()? {
+        // block, block_marker, falling_dust, dust_pillar, block_crumble: a block state.
+        1 | 2 | 36 | 121 | 125 => {
+            r.varint()?;
+        }
+        // entity_effect, tinted_leaves, flash: an ARGB colour.
+        28 | 46 | 52 => {
+            r.take(4)?;
+        }
+        // dust: colour and scale; effect, instant_effect: colour and power.
+        21 | 23 | 56 => {
+            r.take(8)?;
+        }
+        // dust_color_transition: two colours and a scale.
+        22 => {
+            r.take(12)?;
+        }
+        // dragon_breath, sculk_charge: a float.
+        15 | 48 => {
+            r.take(4)?;
+        }
+        // shriek: a delay.
+        115 => {
+            r.varint()?;
+        }
+        // trail: a target, a colour, a duration.
+        59 => {
+            r.take(28)?;
+            r.varint()?;
+        }
+        // vibration: a block or an entity source, then its travel time.
+        58 => {
+            match r.varint()? {
+                0 => {
+                    r.take(8)?;
+                }
+                1 => {
+                    r.varint()?;
+                    r.take(4)?;
+                }
+                _ => return None,
+            }
+            r.varint()?;
+        }
+        // geyser, geyser_plume: a water count; geyser_base, geyser_poof: and an impulse.
+        7 | 10 => {
+            r.take(4)?;
+        }
+        8 | 9 => {
+            r.take(8)?;
+        }
+        // item: an item stack template.
+        57 => return None,
+        _ => {}
     }
     Some(())
 }
@@ -605,6 +668,16 @@ pub fn selftest_checks(t: &EntityTable) -> Vec<(&'static str, String, &'static s
         names(&villager, &vs),
         "villager#main=entity/villager/villager villager_no_hat#main=entity/villager/type/desert villager#main=entity/villager/profession/librarian villager#main=entity/villager/profession_level/gold",
     ));
+    // LivingEntity.DATA_EFFECT_PARTICLES: an entity_effect (a colour), a dust (colour and
+    // scale) and a trail are read past, so the values after them (a baby flag) are kept.
+    let mut b = alloc::vec![28u8, 1, 2, 3, 4, 21];
+    b.extend_from_slice(&[0; 8]);
+    b.push(59);
+    b.extend_from_slice(&[0; 28]);
+    b.extend_from_slice(&[40, 0xAB]);
+    let mut r = In::new(&b);
+    let ok = (0..3).all(|_| skip_particle(&mut r).is_some());
+    v.push(("effect particles read past", format!("{} {:?}", ok, r.rest()), "true [171]"));
     let mut horse = Entity::new(kind("horse"), [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
     horse.data.insert(19, 4 | 3 << 8);
     v.push(("black horse, white dots", names(&horse, &vs), "horse#main=entity/horse/horse_black horse#main=entity/horse/horse_markings_whitedots"));

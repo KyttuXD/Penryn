@@ -190,6 +190,8 @@ pub struct EntityTable {
     pub item_third: Vec<[f32; 9]>,
     /// The looks of the entities drawn lately, by entity id: (version key, draws).
     cache: RefCell<BTreeMap<i32, (u32, Vec<Draw>)>>,
+    /// The vertex lists of the last frame (bodies, held items), kept for their capacity.
+    scratch: RefCell<(Vec<V>, Vec<V>)>,
 }
 
 /// DyeColor.textureDiffuseColor, by dye id.
@@ -416,6 +418,7 @@ impl EntityTable {
             item_equip,
             item_third,
             cache: RefCell::new(BTreeMap::new()),
+            scratch: RefCell::new((Vec::new(), Vec::new())),
         })
     }
 
@@ -574,33 +577,29 @@ impl EntityTable {
         }
     }
 
-    /// The draws of an entity, from the cache while nothing they depend on changed.
-    fn looks(&self, id: i32, e: &Entity, cx: &DrawCx) -> Vec<Draw> {
+    /// The draws of an entity, rebuilt in the cache only when something they depend on changed.
+    fn looks<'c>(&self, cache: &'c mut BTreeMap<i32, (u32, Vec<Draw>)>, id: i32, e: &Entity, cx: &DrawCx) -> &'c [Draw] {
         // A wolf's or a bee's anger running out changes its texture.
         let angry = [19u8, 22].iter().any(|i| e.data.get(i).map_or(false, |&t| t > cx.game_time)) as u32;
         let key = e.version.wrapping_mul(2) | angry;
-        let mut cache = self.cache.borrow_mut();
-        if let Some((k, v)) = cache.get(&id) {
-            if *k == key {
-                return v.clone();
-            }
+        let slot = cache.entry(id).or_insert_with(|| (key ^ 1, Vec::new()));
+        if slot.0 != key {
+            *slot = (key, crate::mobs::look(self, e, cx.variants, cx.game_time));
         }
-        let v = crate::mobs::look(self, e, cx.variants, cx.game_time);
-        cache.insert(id, (key, v.clone()));
-        v
+        &slot.1
     }
 
     /// Draws every entity near the eye (vertices relative to the eye, under `view`): bodies,
     /// layers and armour, held items, then name tags.
     pub fn draw(&self, gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entity>, partial: f32, skip: i32, cx: &DrawCx) {
-        let mut v: Vec<V> = Vec::new();
-        let mut items: Vec<V> = Vec::new();
+        let mut scratch = self.scratch.borrow_mut();
+        let (v, items) = &mut *scratch;
+        v.clear();
+        items.clear();
         let mut tags: Vec<([f64; 3], &str, bool)> = Vec::new();
-        {
-            let mut cache = self.cache.borrow_mut();
-            if cache.len() > ents.len() * 2 + 64 {
-                cache.retain(|id, _| ents.contains_key(id));
-            }
+        let mut cache = self.cache.borrow_mut();
+        if cache.len() > ents.len() * 2 + 64 {
+            cache.retain(|id, _| ents.contains_key(id));
         }
         // The entity under the crosshair (Minecraft.crosshairPickEntity), for its name.
         let (yr, pr) = (math::to_rad(cx.yaw as f64), math::to_rad(cx.pitch as f64));
@@ -620,7 +619,7 @@ impl EntityTable {
             let invisible = e.d(0) & 0x20 != 0;
             let red = e.hurt > 0 || e.death_time > 0;
             let held = [e.equipment[0].is_some(), e.equipment[1].is_some()];
-            let looks = self.looks(id, e, cx);
+            let looks = self.looks(&mut cache, id, e, cx);
             let mut first: Option<usize> = None;
             for dr in looks.iter() {
                 if invisible && !dr.worn {
@@ -628,7 +627,8 @@ impl EntityTable {
                 }
                 let Some(m) = self.models.get(dr.model as usize) else { continue };
                 self.pose(m, e, partial, p, held, &mut mats);
-                self.emit(&mut v, m, &mats, dr.rect, rgb(dr.tint), red);
+                // EquipmentLayerRenderer draws with NO_OVERLAY: armour never turns red.
+                self.emit(v, m, &mats, dr.rect, rgb(dr.tint), red && !dr.worn);
                 if first.is_none() {
                     first = Some(dr.model as usize);
                     body.clear();
@@ -645,12 +645,15 @@ impl EntityTable {
                 }
                 let mats = &body;
                 if let Some(m) = first.and_then(|mi| self.models.get(mi)) {
-                    let left_handed = e.kind != self.player_type && e.d(15) & 2 != 0;
+                    // Mob.isLeftHanded (DATA_MOB_FLAGS_ID 2), or a player's or mannequin's main
+                    // arm (Avatar.DATA_PLAYER_MAIN_HAND, 0 left).
+                    let avatar = matches!(self.types.get(e.kind as usize).map(|t| t.name.as_str()), Some("player" | "mannequin"));
+                    let left_handed = if avatar { e.data.get(&15) == Some(&0) } else { e.d(15) & 2 != 0 };
                     for (slot, arm) in [(0usize, "right_arm"), (1, "left_arm")] {
                         let Some((item, _)) = e.equipment[slot] else { continue };
                         let arm = if left_handed { if arm == "right_arm" { "left_arm" } else { "right_arm" } } else { arm };
                         let Some(ai) = m.parts.iter().position(|q| q.name == arm) else { continue };
-                        self.held_item(&mut items, &mats[ai], item, arm == "left_arm", cx);
+                        self.held_item(items, &mats[ai], item, arm == "left_arm", cx);
                     }
                 }
             }
@@ -683,7 +686,7 @@ impl EntityTable {
             // Vanilla's LEQUAL: a layer on the same faces as the body (a baby sheep's wool,
             // villager clothes) draws over it.
             (gl.DepthFunc)(LEQUAL);
-            for (tex, list) in [(self.tex, &v), (cx.atlas, &items)] {
+            for (tex, list) in [(self.tex, &*v), (cx.atlas, &*items)] {
                 if list.is_empty() {
                     continue;
                 }
@@ -779,7 +782,8 @@ fn name_tags(gl: &Gl, view: &[f32; 16], gui: &crate::gui::Gui, tags: &mut Vec<([
     let (mut bg_d, mut faint_d) = (Vec::new(), Vec::new());
     for (at, text, discrete) in tags.iter() {
         let w = gui.text_width(text);
-        let x0 = -(w / 2.0).floor_f();
+        // SubmitNodeCollection.submitNameTag: -width / 2 as a float.
+        let x0 = -w / 2.0;
         let place = |x: f32, y: f32| -> [f32; 3] {
             let (x, y) = (x as f64 * 0.025, -(y as f64) * 0.025);
             [(at[0] + right[0] * x + up[0] * y) as f32, (at[1] + right[1] * x + up[1] * y) as f32, (at[2] + right[2] * x + up[2] * y) as f32]
@@ -791,7 +795,8 @@ fn name_tags(gl: &Gl, view: &[f32; 16], gui: &crate::gui::Gui, tags: &mut Vec<([
             out.push(V { p: place(x1, y0), uv: [uv[2], uv[1]], c });
         };
         let b = if *discrete { &mut bg_d } else { &mut bg };
-        quad(b, x0 - 1.0, -1.0, x0 + w, 8.0, [0.0; 4], [0, 0, 0, 0x40]);
+        // Font.PreparedTextBuilder.markBackground: one unit left and up, to the line's 9 down.
+        quad(b, x0 - 1.0, -1.0, x0 + w, 9.0, [0.0; 4], [0, 0, 0, 0x40]);
         let f = if *discrete { &mut faint_d } else { &mut faint };
         gui.glyph_quads(text, |gx0, gy0, gx1, gy1, uv| {
             quad(f, x0 + gx0, gy0, x0 + gx1, gy1, uv, [255, 255, 255, 0x80]);
@@ -845,16 +850,6 @@ fn name_tags(gl: &Gl, view: &[f32; 16], gui: &crate::gui::Gui, tags: &mut Vec<([
         (gl.DisableClientState)(TEXTURE_COORD_ARRAY);
         (gl.Enable)(CULL_FACE);
         (gl.Enable)(FOG);
-    }
-}
-
-trait FloorF {
-    fn floor_f(self) -> f32;
-}
-
-impl FloorF for f32 {
-    fn floor_f(self) -> f32 {
-        math::floor(self as f64) as f32
     }
 }
 
