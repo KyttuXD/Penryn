@@ -140,9 +140,11 @@ impl BlockEntities {
 
     /// A block changed: its block entity goes unless the block is still a sign (vanilla keeps a
     /// block entity while the new state's block has the same type).
-    pub fn block_changed(&mut self, blocks: &Blocks, x: i32, y: i32, z: i32, state: u16) {
+    pub fn block_changed(&mut self, blocks: &Blocks, old: u16, x: i32, y: i32, z: i32, state: u16) {
         if self.signs.contains_key(&(x, y, z)) {
-            if sign_kind(blocks, state).is_none() {
+            // Signs and hanging signs are two block entity types: one does not become the other.
+            let hanging = |s: u16| sign_kind(blocks, s).map(|k| k.hanging);
+            if hanging(state).is_none() || (hanging(old).is_some() && hanging(state) != hanging(old)) {
                 self.signs.remove(&(x, y, z));
             }
             self.version += 1;
@@ -219,6 +221,9 @@ fn sign_text(r: &mut In) -> Option<SignText> {
             (b"messages", 9) => {
                 let et = r.u8()?;
                 let n = r.i32()?;
+                if et == 0 && n > 0 {
+                    return None;
+                }
                 for i in 0..n.max(0) as usize {
                     let line = crate::nbt::text_payload(r, et)?;
                     if i < 4 {
@@ -558,6 +563,9 @@ pub fn draw_world(gl: &Gl, view: &[f32; 16], eye: [f64; 3], be: &BlockEntities, 
         }
         (gl.BindBuffer)(ARRAY_BUFFER, 0);
         (gl.Enable)(CULL_FACE);
+        (gl.Disable)(ALPHA_TEST);
+        (gl.Disable)(TEXTURE_2D);
+        (gl.DisableClientState)(TEXTURE_COORD_ARRAY);
     }
 }
 
@@ -903,6 +911,17 @@ pub fn selftest(blocks: Option<&Blocks>) -> Vec<(&'static str, String, &'static 
         alloc::format!("{} {:?} {:?} {} {} {}", ok, sg.front.lines[0], plain(&sg.front.lines[1]), DYE_NAMES[sg.front.color as usize], sg.front.glow, sg.waxed)
     });
     out.push(("sign block entity read", got, "true \"Hi\" \"Red\" blue true true"));
+    // A malformed tag (a list of End tags with a huge count) fails at once instead of spinning.
+    let mut bad: Vec<u8> = alloc::vec![10, 10];
+    s(&mut bad, "front_text");
+    bad.push(9);
+    s(&mut bad, "messages");
+    bad.push(0);
+    bad.extend_from_slice(&i32::MAX.to_be_bytes());
+    let mut be2 = BlockEntities::new();
+    let t0 = crate::sys::now_ms();
+    let failed = be2.read_tag(0, 0, 0, &mut In::new(&bad)).is_none();
+    out.push(("malformed sign tag rejected fast", alloc::format!("{} {}", failed, crate::sys::now_ms() - t0 < 50), "true true"));
     // The transform: a standing sign at rotation 0 shows its front text to the south, above
     // the block's middle; a wall sign facing north sits against the block's south side.
     let k = Kind { hanging: false, wall: false, angle: 0.0, wood: "oak" };

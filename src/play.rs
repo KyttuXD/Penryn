@@ -768,6 +768,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         } else if !g.dead && self.screen == Screen::Dead {
             self.set_screen(Screen::Play);
         }
+        // Another screen took the sign editor's place (death, a container): its text still goes
+        // to the server (AbstractSignEditScreen.removed).
+        if self.screen != Screen::Sign && g.block_entities.editor.is_some() {
+            crate::signs::close(g)?;
+        }
         // The held item's name shows for 2 s when it changes.
         let held = (g.selected, g.held());
         if held != self.last_held {

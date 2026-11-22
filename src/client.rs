@@ -397,7 +397,7 @@ impl Game {
                     }
                     self.chunks_received += 1;
                 }
-                // Then the heightmaps' block entities: signs' text.
+                // Then the chunk's block entities: signs' text.
                 if self.block_entities.read_chunk(x, z, &mut r).is_none() {
                     crate::warn!("chunk {} {}: could not read its block entities", x, z);
                 }
@@ -417,8 +417,9 @@ impl Game {
                 let s = r.varint().unwrap_or(0) as u16;
                 let (x, y, z) = ((v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32);
                 let blocks = &self.blocks;
+                let old = self.world.get(x, y, z);
                 self.world.set(x, y, z, s, &|s| blocks.kind(s) == crate::blocks::AIR);
-                self.block_entities.block_changed(blocks, x, y, z, s);
+                self.block_entities.block_changed(blocks, old, x, y, z, s);
                 // The block this client placed: its place sound (BlockItem.place plays it).
                 if let Some((pp, at)) = self.placing {
                     if pp == [x, y, z] && crate::sys::now_ms() < at + 1500 && blocks.kind(s) != crate::blocks::AIR {
@@ -445,8 +446,9 @@ impl Game {
                     let state = (c >> 12) as u16;
                     let (x, z, y) = ((c >> 8 & 15) as i32, (c >> 4 & 15) as i32, (c & 15) as i32);
                     let blocks = &self.blocks;
+                    let old = self.world.get(sx * 16 + x, sy * 16 + y, sz * 16 + z);
                     self.world.set(sx * 16 + x, sy * 16 + y, sz * 16 + z, state, &|s| blocks.kind(s) == crate::blocks::AIR);
-                    self.block_entities.block_changed(blocks, sx * 16 + x, sy * 16 + y, sz * 16 + z, state);
+                    self.block_entities.block_changed(blocks, old, sx * 16 + x, sy * 16 + y, sz * 16 + z, state);
                 }
             }
             play::C_BLOCK_ENTITY_DATA | play::C_OPEN_SIGN_EDITOR => {

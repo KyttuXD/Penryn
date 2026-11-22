@@ -34,6 +34,10 @@ fn skip(r: &mut In, t: u8, depth: u32) -> Option<()> {
         9 => {
             let et = r.u8()?;
             let n = r.i32()?;
+            // A list of End tags holds nothing: a count there would only spin.
+            if et == 0 && n > 0 {
+                return None;
+            }
             for _ in 0..n.max(0) {
                 skip(r, et, depth + 1)?;
             }
@@ -110,6 +114,9 @@ fn text_in(r: &mut In, t: u8, out: &mut String, depth: u32, parent: &str) -> Opt
         9 => {
             let et = r.u8()?;
             let n = r.i32()?;
+            if et == 0 && n > 0 {
+                return None;
+            }
             for _ in 0..n.max(0) {
                 text_of(r, et, out, depth + 1)?;
             }
