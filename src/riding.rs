@@ -543,6 +543,9 @@ impl Rider {
         self.prev_yaw = self.yaw;
         if let Some((p, yaw, pitch)) = g.riding.moved.take() {
             // ClientboundMoveVehiclePacket: the server's correction.
+            if crate::sys::env("PENRYN_DEBUG").is_some() {
+                crate::say!("server moved the vehicle from {:.2} {:.2} {:.2} to {:.2} {:.2} {:.2}", self.pos[0], self.pos[1], self.pos[2], p[0], p[1], p[2]);
+            }
             self.pos = p;
             self.prev = p;
             self.yaw = yaw;
