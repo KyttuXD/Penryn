@@ -69,6 +69,8 @@ pub struct Editor {
     pub front: bool,
     pub lines: [String; 4],
     pub line: usize,
+    /// The cursor in the line, in characters (TextFieldHelper's cursor; no selection).
+    pub cursor: usize,
     pub opened: u64,
     pub hanging: bool,
     pub wall: bool,
@@ -243,10 +245,11 @@ pub fn sign_kind(blocks: &Blocks, s: u16) -> Option<Kind<'_>> {
     while first > 0 && blocks.states[first as usize - 1].block == st.block {
         first -= 1;
     }
-    let idx = (s - first) as f64;
+    let idx = (s - first) as u32;
     // Direction.toYRot: south 0, west 90, north 180, east 270 (facing: 0 north 1 south 2 west 3 east).
     let wall_rot = [180.0, 0.0, 90.0, 270.0].get(st.facing as usize).copied().unwrap_or(0.0);
-    let rot16 = |i: f64| (math_floor(i / 2.0) % 16.0) * 22.5;
+    // RotationSegment.convertToDegrees (integer maths: no fmod on Mac OS X 10.6's stubs).
+    let rot16 = |i: u32| (i / 2 % 16) as f64 * 22.5;
     Some(if let Some(w) = name.strip_suffix("_wall_hanging_sign") {
         Kind { hanging: true, wall: true, angle: wall_rot, wood: w }
     } else if let Some(w) = name.strip_suffix("_hanging_sign") {
@@ -256,10 +259,6 @@ pub fn sign_kind(blocks: &Blocks, s: u16) -> Option<Kind<'_>> {
     } else {
         Kind { hanging: false, wall: false, angle: rot16(idx), wood: name.strip_suffix("_sign").unwrap_or(name) }
     })
-}
-
-fn math_floor(x: f64) -> f64 {
-    crate::math::floor(x)
 }
 
 /// ARGB.scaleRGB(color, 0.4): the shade of text without glow ink.
@@ -534,7 +533,8 @@ pub fn open_editor(g: &mut Game, pos: [i32; 3], front: bool) -> bool {
     let t = if front { &sign.front } else { &sign.back };
     let color = if t.glow { DYE_TEXT[t.color as usize & 15] } else { dark_color(t) };
     let lines = [plain(&t.lines[0]), plain(&t.lines[1]), plain(&t.lines[2]), plain(&t.lines[3])];
-    be.editor = Some(Editor { pos, front, lines, line: 0, opened: crate::sys::now_ms(), hanging, wall, wood, color });
+    let cursor = lines[0].chars().count();
+    be.editor = Some(Editor { pos, front, lines, line: 0, cursor, opened: crate::sys::now_ms(), hanging, wall, wood, color });
     true
 }
 
@@ -547,6 +547,17 @@ fn show_in_world(be: &mut BlockEntities) {
     }
 }
 
+/// The byte offset of character `n` of `s` (its end when shorter).
+fn byte_at(s: &str, n: usize) -> usize {
+    s.char_indices().nth(n).map_or(s.len(), |(i, _)| i)
+}
+
+/// The editor goes when its sign does (AbstractSignEditScreen.isValid; the server closes it
+/// when the player walks away).
+pub fn editor_valid(g: &Game) -> bool {
+    g.block_entities.editor.as_ref().map_or(false, |ed| sign_kind(&g.blocks, g.world.get(ed.pos[0], ed.pos[1], ed.pos[2])).is_some())
+}
+
 /// Typed text into the current line, as far as it fits the sign
 /// (SharedConstants.isAllowedChatCharacter, and the sign's widest line).
 pub fn type_text(g: &mut Game, gui: &Gui, s: &str) {
@@ -557,9 +568,12 @@ pub fn type_text(g: &mut Game, gui: &Gui, s: &str) {
             continue;
         }
         let line = &mut ed.lines[ed.line];
-        line.push(c);
+        let at = byte_at(line, ed.cursor);
+        line.insert(at, c);
         if gui.text_width(line) > max || line.len() > 384 {
-            line.pop();
+            line.remove(at);
+        } else {
+            ed.cursor += 1;
         }
     }
     show_in_world(&mut g.block_entities);
@@ -573,17 +587,36 @@ pub fn key(g: &mut Game, sc: usize) -> Result<bool, String> {
     const K_DOWN: usize = 81;
     const K_UP: usize = 82;
     const K_KP_ENTER: usize = 88;
+    const K_DELETE: usize = 76;
+    const K_HOME: usize = 74;
+    const K_END: usize = 77;
+    const K_RIGHT: usize = 79;
+    const K_LEFT: usize = 80;
     let Some(ed) = g.block_entities.editor.as_mut() else { return Ok(true) };
+    let len = ed.lines[ed.line].chars().count();
     match sc {
         K_ESC => {
             close(g)?;
             return Ok(true);
         }
-        K_UP => ed.line = (ed.line + 3) & 3,
-        K_DOWN | K_RETURN | K_KP_ENTER => ed.line = (ed.line + 1) & 3,
-        K_BACKSPACE => {
-            ed.lines[ed.line].pop();
-            show_in_world(&mut g.block_entities);
+        // Another line: the cursor to its end (TextFieldHelper.setCursorToEnd).
+        K_UP | K_DOWN | K_RETURN | K_KP_ENTER => {
+            ed.line = if sc == K_UP { (ed.line + 3) & 3 } else { (ed.line + 1) & 3 };
+            ed.cursor = ed.lines[ed.line].chars().count();
+        }
+        K_LEFT => ed.cursor = ed.cursor.saturating_sub(1),
+        K_RIGHT => ed.cursor = (ed.cursor + 1).min(len),
+        K_HOME => ed.cursor = 0,
+        K_END => ed.cursor = len,
+        K_BACKSPACE | K_DELETE => {
+            let at = if sc == K_BACKSPACE { ed.cursor.checked_sub(1) } else { Some(ed.cursor).filter(|c| *c < len) };
+            if let Some(at) = at {
+                let line = &mut ed.lines[ed.line];
+                let b = byte_at(line, at);
+                line.remove(b);
+                ed.cursor = at;
+                show_in_world(&mut g.block_entities);
+            }
         }
         _ => {}
     }
@@ -723,8 +756,15 @@ pub fn draw_editor(gui: &mut Gui, gl: &Gl, w: i32, h: i32, g: &mut Game, mx: f32
         let y = cy + i as f32 * lh as f32 - top;
         gui.text_plain(line, x, y, color);
         if i == ed.line && blink {
-            // TextCursorUtils.extractAppendCursor: "_" after the text.
-            gui.text_plain("_", x + lw, y, color);
+            let at = byte_at(line, ed.cursor);
+            if at >= line.len() {
+                // TextCursorUtils.extractAppendCursor: "_" after the text.
+                gui.text_plain("_", x + lw, y, color);
+            } else {
+                // extractInsertCursor: a bar the line's height before the character.
+                let cx = x + gui.text_width(&line[..at]);
+                gui.fill(cx, y - 1.0, cx + 1.0, y + lh as f32 - 1.0, color);
+            }
         }
     }
     done_button(gui).draw(gui, mx, my);
@@ -738,11 +778,13 @@ pub fn test_type(g: &mut Game, gui: &Gui, close_after: bool) -> Result<bool, Str
         for (i, s) in ["Penryn", "signs work", "on 10.6", ""].iter().enumerate() {
             if let Some(ed) = g.block_entities.editor.as_mut() {
                 ed.line = i;
+                ed.cursor = 0;
             }
             type_text(g, gui, s);
         }
         if let Some(ed) = g.block_entities.editor.as_mut() {
-            ed.line = 3;
+            ed.line = 0;
+            ed.cursor = 3;
         }
     }
     let opened = g.block_entities.editor.as_ref().map_or(0, |e| e.opened);

@@ -478,7 +478,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if down && repeat && self.screen == Screen::Chat && sc == K_BACKSPACE {
                     self.chat_line.pop();
                 }
-                if down && repeat && self.screen == Screen::Sign && sc == K_BACKSPACE {
+                if down && repeat && self.screen == Screen::Sign && sc != K_ESC {
                     crate::signs::key(g, sc)?;
                 }
             }
@@ -752,7 +752,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             }
         }
         if self.screen == Screen::Sign {
-            if g.block_entities.editor.is_none() {
+            if !crate::signs::editor_valid(g) {
+                crate::signs::close(g)?;
                 self.set_screen(Screen::Play);
             } else if let (true, Some(gui)) = (self.test_keys.contains('N') || self.test_keys.contains('M'), self.gui.as_ref()) {
                 if crate::signs::test_type(g, gui, self.test_keys.contains('N'))? {
