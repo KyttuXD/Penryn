@@ -14,8 +14,9 @@
 //! loading chunks never waits for the card. A section bigger than a page gets a page of its own
 //! (with 32-bit indices).
 //!
-//! A section's quads come in runs (render.rs): seven by facing (down, up, north, south,
-//! west, east, any) for the solid and cut-out quads, then the translucent ones.
+//! A section's quads come in runs (mesher.rs): seven by facing (down, up, north, south,
+//! west, east, any) for the solid and cut-out quads, then leaves forced opaque, then the
+//! translucent quads.
 
 use crate::render::CV;
 use crate::sdl::*;
@@ -23,8 +24,10 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 
-pub const RUNS: usize = 8;
-pub const TRANSLUCENT: usize = 7;
+pub const RUNS: usize = 9;
+/// Leaves drawn opaque (vanilla's Cutout Leaves option off): without the alpha test.
+pub const OPAQUE: usize = 7;
+pub const TRANSLUCENT: usize = 8;
 /// The run of quads facing any way (always drawn).
 pub const ANY: usize = 6;
 const CSTRIDE: i32 = 16;
@@ -310,11 +313,17 @@ impl Terrain {
     }
 
     /// Draws the solid and cut-out runs of the selected sections (the caller has set up the
-    /// textures, fog and alpha test; `view` is the camera's rotation).
+    /// textures, fog and the alpha test; `view` is the camera's rotation), then the leaves
+    /// forced opaque without the alpha test.
     pub fn draw_opaque(&mut self, gl: &Gl, view: &[f64; 16], eye: [f64; 3], min_y: i32) {
         let mut items = core::mem::take(&mut self.items);
         items.sort_unstable_by(|a, b| a.rank.cmp(&b.rank).then(a.d2.partial_cmp(&b.d2).unwrap_or(core::cmp::Ordering::Equal)));
-        self.draw_list(gl, view, eye, min_y, &items, false);
+        self.draw_list(gl, view, eye, min_y, &items, None);
+        if items.iter().any(|it| it.first[OPAQUE] != it.first[OPAQUE + 1]) {
+            unsafe { (gl.Disable)(ALPHA_TEST) };
+            self.draw_list(gl, view, eye, min_y, &items, Some(1 << OPAQUE));
+            unsafe { (gl.Enable)(ALPHA_TEST) };
+        }
         self.items = items;
     }
 
@@ -323,11 +332,12 @@ impl Terrain {
         let mut items = core::mem::take(&mut self.items);
         items.retain(|it| it.first[TRANSLUCENT] != it.first[RUNS]);
         items.sort_unstable_by(|a, b| b.d2.partial_cmp(&a.d2).unwrap_or(core::cmp::Ordering::Equal));
-        self.draw_list(gl, view, eye, min_y, &items, true);
+        self.draw_list(gl, view, eye, min_y, &items, Some(1 << TRANSLUCENT));
         self.items = items;
     }
 
-    fn draw_list(&mut self, gl: &Gl, view: &[f64; 16], eye: [f64; 3], min_y: i32, items: &[Item], translucent: bool) {
+    /// Draws `items` (grouped by page), each with its facing runs or the runs of `mask`.
+    fn draw_list(&mut self, gl: &Gl, view: &[f64; 16], eye: [f64; 3], min_y: i32, items: &[Item], mask: Option<u16>) {
         if items.is_empty() {
             return;
         }
@@ -347,7 +357,7 @@ impl Terrain {
             while i < items.len() && items[i].region == rk && items[i].page == pg {
                 let it = &items[i];
                 i += 1;
-                let mask = if translucent { 1u16 << TRANSLUCENT } else { it.runs };
+                let mask = mask.unwrap_or(it.runs);
                 for run in 0..RUNS {
                     if mask >> run & 1 == 0 {
                         continue;

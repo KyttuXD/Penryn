@@ -62,6 +62,10 @@ pub struct Renderer {
     /// Cave culling.
     pub graph: crate::occlusion::Graph,
     eye_in_opaque: bool,
+    /// Vanilla's Cutout Leaves option (set by the caller each frame), and the value the
+    /// meshes were made with: a change meshes everything again.
+    pub cutout_leaves: bool,
+    meshed_leaves: bool,
     vis_stack: Vec<u16>,
     pub ui: Vec<V>,
     pub sections_drawn: u32,
@@ -111,6 +115,8 @@ impl Renderer {
             batch: Vec::new(),
             graph: crate::occlusion::Graph::new(),
             eye_in_opaque: false,
+            cutout_leaves: true,
+            meshed_leaves: true,
             vis_stack: Vec::new(),
             ui: Vec::new(),
             sections_drawn: 0,
@@ -194,6 +200,16 @@ impl Renderer {
         // Vanilla turns cave culling off for a spectator inside a full block (LevelRenderer
         // .setupRender): the camera then sees through the ground.
         self.eye_in_opaque = b.opaque_cube(world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2])));
+        if self.cutout_leaves != self.meshed_leaves {
+            self.meshed_leaves = self.cutout_leaves;
+            let n = world.height / 16;
+            let keys: Vec<(i32, i32)> = world.columns.keys().copied().collect();
+            for (x, z) in keys {
+                for sy in 0..n {
+                    world.dirty.insert((x, sy, z));
+                }
+            }
+        }
         let start = crate::sys::now_ms();
         let threaded = crate::mesher::threaded();
         if threaded {
@@ -282,7 +298,7 @@ impl Renderer {
             }
         }
         self.gen += 1;
-        Some(crate::mesher::Job { key: k, gen: self.gen, cache: self.cache.clone(), ids, colours: world.biome_colours.clone(), blocks: b as *const Blocks })
+        Some(crate::mesher::Job { key: k, gen: self.gen, cache: self.cache.clone(), ids, colours: world.biome_colours.clone(), blocks: b as *const Blocks, cutout_leaves: self.meshed_leaves })
     }
 
     fn fill_cache(&mut self, world: &World, (cx, sy, cz): (i32, i32, i32)) -> bool {

@@ -11,7 +11,7 @@
 
 use crate::blocks::{self, Blocks};
 use crate::render::{ci, cv, facing, shade, AO, CV, FACES};
-use crate::terrain::{RUNS, TRANSLUCENT};
+use crate::terrain::{OPAQUE, RUNS, TRANSLUCENT};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
@@ -27,8 +27,10 @@ pub struct Job {
     pub ids: Vec<u16>,
     /// Grass, foliage, water and sky colour per biome id.
     pub colours: Vec<[u32; 4]>,
-    /// The block table; it outlives every job (Renderer::wait_jobs runs before it goes).
+    /// The block table; it outlives every job (mesher::cancel_and_wait runs before it goes).
     pub blocks: *const Blocks,
+    /// Vanilla's Cutout Leaves option: off, leaves are opaque and hide each other's faces.
+    pub cutout_leaves: bool,
 }
 
 unsafe impl Send for Job {}
@@ -143,7 +145,10 @@ pub fn mesh(job: &Job, runs: &mut [Vec<CV>; RUNS], stack: &mut Vec<u16>) -> Done
                     0 => [255, 255, 255],
                     n => blocks::tint_colour(n),
                 };
-                let glassy = kind == blocks::CUTOUT && !blk.name.ends_with("leaves");
+                let leaves = blk.name.ends_with("leaves");
+                let glassy = kind == blocks::CUTOUT && !leaves;
+                // LeavesBlock.skipRendering and ModelBlockRenderer.forceOpaque.
+                let opaque_leaves = leaves && !job.cutout_leaves;
                 // Plants, bamboo and dripstone stand at their random offset (getOffset).
                 let off = b.offset_at(s, k.0 * 16 + x, k.2 * 16 + z);
                 let off = [(off[0] * 1024.0) as i16, (off[1] * 1024.0) as i16, (off[2] * 1024.0) as i16];
@@ -151,7 +156,7 @@ pub fn mesh(job: &Job, runs: &mut [Vec<CV>; RUNS], stack: &mut Vec<u16>) -> Done
                     if q.cull < 6 {
                         let d = DIR[q.cull as usize];
                         let ns = at(x + d[0], y + d[1], z + d[2]);
-                        if b.opaque_cube(ns) || (glassy && b.state(ns).block == b.state(s).block) {
+                        if b.opaque_cube(ns) || (glassy && b.state(ns).block == b.state(s).block) || (opaque_leaves && b.of_state(ns).name.ends_with("leaves")) {
                             continue;
                         }
                     }
@@ -199,7 +204,13 @@ pub fn mesh(job: &Job, runs: &mut [Vec<CV>; RUNS], stack: &mut Vec<u16>) -> Done
                             c: shade(base, k, 255),
                         };
                     }
-                    let run = if q.flags & blocks::Q_TRANSLUCENT != 0 { TRANSLUCENT } else { facing(&quad) };
+                    let run = if q.flags & blocks::Q_TRANSLUCENT != 0 {
+                        TRANSLUCENT
+                    } else if opaque_leaves {
+                        OPAQUE
+                    } else {
+                        facing(&quad)
+                    };
                     runs[run].extend_from_slice(&quad);
                 }
             }

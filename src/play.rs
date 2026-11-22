@@ -1547,6 +1547,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             let in_water = g.blocks.kind(g.world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2]))) == blocks::WATER;
             let water = if in_water { 1.0 + (6.0 / 7.0 - 1.0) * o.get(O::FovEffect) as f32 } else { 1.0 };
             self.r.fov = o.int(O::Fov) as f32 * m * water;
+            self.r.cutout_leaves = o.on(O::CutoutLeaves);
             self.menu.max_gui_scale = crate::options::auto_gui_scale(w, h);
         }
         let clouds_on = self.menu.o.int(crate::options::O::Clouds) != 0;
