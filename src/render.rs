@@ -340,7 +340,7 @@ impl Renderer {
         let far = (view_chunks as f32 + 1.0) * 16.0;
         let proj = perspective(self.fov, w as f32 / h as f32, 0.05, (far * 1.5).max(400.0));
         unsafe {
-            if exp('v') { (gl.Viewport)(0, 0, 8, 8); } else { (gl.Viewport)(0, 0, w, h); }
+            (gl.Viewport)(0, 0, w, h);
             (gl.ClearColor)(sky[0], sky[1], sky[2], 1.0);
             (gl.Clear)(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT);
             (gl.Enable)(DEPTH_TEST);
@@ -420,9 +420,7 @@ impl Renderer {
         // Solid and cut-out quads together, with the alpha test, near to far: on the cards
         // measured one pass beats two (solid without the test, then cut-out with it).
         unsafe { (gl.Enable)(ALPHA_TEST) };
-        if !exp('w') {
-            self.terrain.draw_opaque(gl, &view, eye, world.min_y);
-        }
+        self.terrain.draw_opaque(gl, &view, eye, world.min_y);
         crate::perf::lap(crate::perf::S::World);
         // Entities, between the opaque world and the water (vanilla's order).
         unsafe {
@@ -639,15 +637,6 @@ pub fn facing(q: &[CV; 4]) -> usize {
 
 /// Draws the runs `base..base + 7` picked by `mask` (or just `base` for the translucent run,
 /// mask 1) of a section in one call, merging runs that touch. Returns the quads drawn.
-static mut EXP: Option<String> = None;
-pub fn exp(c: char) -> bool {
-    unsafe {
-        if EXP.is_none() {
-            EXP = Some(crate::sys::env("PENRYN_EXP").unwrap_or_default());
-        }
-        EXP.as_ref().map_or(false, |e| e.contains(c))
-    }
-}
 /// The (up to) 64 dirty sections nearest the camera section `e`, nearest first (horizontal
 /// distance counts four times the vertical, as the order chunks come in).
 fn nearest(dirty: &alloc::collections::BTreeSet<(i32, i32, i32)>, e: (i32, i32, i32), out: &mut Vec<(i32, i32, i32)>) {
