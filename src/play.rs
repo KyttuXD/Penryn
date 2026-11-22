@@ -1081,7 +1081,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         // G: use (right click) the entity under the crosshair, sneaking with v (tests).
         if self.test_keys.contains('G') && self.screen == Screen::Play && g.loaded_sent && sys::now_ms() / 50 % 20 == 0 {
             if let Some((id, _, at)) = self.pick_entity(g) {
-                say!("using entity {}", id);
+                say!("using entity {} (type {}, sneaking {})", id, g.entities.get(&id).map_or(-1, |e| e.kind), self.keys[K_LSHIFT]);
                 g.interact(id, at, self.keys[K_LSHIFT])?;
             }
         }

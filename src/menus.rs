@@ -1885,7 +1885,7 @@ pub fn selftest(data: Option<&[u8]>) -> Vec<(&'static str, String, &'static str)
             v.push(("map colour GRASS (id 1)", format!("{:06x}", a.map_colours.get(1).copied().unwrap_or(0)), "7fb238"));
             v.push(("map pixel 4 x 1 + 1 (GRASS, normal)", format!("{:08x}", crate::maps::pixel(&a.map_colours, 5)), "ff6d9930"));
         }
-        None => v.push(("containers.bin", String::from("missing"), "present (skipped)")),
+        None => crate::say!("skip containers.bin checks: no containers.bin"),
     }
     v
 }
