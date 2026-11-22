@@ -431,7 +431,13 @@ impl Renderer {
             let (cx, cz) = (lo[0] + 8.0, lo[2] + 8.0);
             cx * cx + cz * cz <= maxd * maxd && in_frustum(&planes, lo, [lo[0] + 16.0, lo[1] + 16.0, lo[2] + 16.0]) && graph.visible(k)
         };
-        self.terrain.select(eye, world.min_y, &mut keep, &faces_seen);
+        let keep_box = |lo: [f64; 3], hi: [f64; 3]| {
+            // The nearest point of the box, horizontally.
+            let dx = if lo[0] > 0.0 { lo[0] } else if hi[0] < 0.0 { -hi[0] } else { 0.0 };
+            let dz = if lo[2] > 0.0 { lo[2] } else if hi[2] < 0.0 { -hi[2] } else { 0.0 };
+            dx * dx + dz * dz <= (maxd + 16.0) * (maxd + 16.0) && in_frustum(&planes, lo, hi)
+        };
+        self.terrain.select(eye, world.min_y, &keep_box, &mut keep, &faces_seen);
         self.sections_drawn = self.terrain.sections_drawn;
         // Solid and cut-out quads together, with the alpha test, near to far: on the cards
         // measured one pass beats two (solid without the test, then cut-out with it).

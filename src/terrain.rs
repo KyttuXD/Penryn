@@ -130,12 +130,15 @@ pub struct Terrain {
     /// Each region's pages (an emptied page is kept for reuse until the region goes).
     regions: BTreeMap<RKey, Vec<Page>>,
     slots: BTreeMap<SKey, Slot>,
+    /// The sections in each region, so a region out of view is skipped whole.
+    members: BTreeMap<RKey, Vec<SKey>>,
     /// The shared quad index buffers (0 1 2, 2 3 0 per quad, as vanilla's): 16-bit for a page,
     /// 32-bit for the pages of oversized sections.
     index16: u32,
     index32: u32,
     index32_quads: u32,
     items: Vec<Item>,
+    grouped: Vec<Item>,
     seen: Vec<(RKey, u16)>,
     counts: Vec<i32>,
     offsets: Vec<*const c_void>,
@@ -150,10 +153,12 @@ impl Terrain {
         Terrain {
             regions: BTreeMap::new(),
             slots: BTreeMap::new(),
+            members: BTreeMap::new(),
             index16: 0,
             index32: 0,
             index32_quads: 0,
             items: Vec::new(),
+            grouped: Vec::new(),
             seen: Vec::new(),
             counts: Vec::new(),
             offsets: Vec::new(),
@@ -170,11 +175,13 @@ impl Terrain {
             }
         }
         self.slots.clear();
+        self.members.clear();
     }
 
     pub fn remove(&mut self, gl: &Gl, k: SKey) {
         let Some(s) = self.slots.remove(&k) else { return };
         let rk = region_of(k);
+        self.unlist(k);
         let Some(pages) = self.regions.get_mut(&rk) else { return };
         if let Some(p) = pages.get_mut(s.page as usize) {
             p.give(s.at, s.cap);
@@ -239,7 +246,21 @@ impl Terrain {
         };
         upload(gl, pages[pi].vbo, at, &data);
         self.slots.insert(k, Slot { page: pi as u16, at, cap: need, first });
+        let m = self.members.entry(rk).or_insert_with(Vec::new);
+        if !m.contains(&k) {
+            m.push(k);
+        }
         self.ensure_index(gl, need);
+    }
+
+    fn unlist(&mut self, k: SKey) {
+        let rk = region_of(k);
+        if let Some(m) = self.members.get_mut(&rk) {
+            m.retain(|x| *x != k);
+            if m.is_empty() {
+                self.members.remove(&rk);
+            }
+        }
     }
 
     fn ensure_index(&mut self, gl: &Gl, quads: u32) {
@@ -278,34 +299,60 @@ impl Terrain {
 
     /// Picks the sections to draw this frame: `keep(k, lo)` says whether section k (corner
     /// `lo` relative to the eye) is in view; `faces(lo)` which facing runs can face the eye.
-    pub fn select(&mut self, eye: [f64; 3], min_y: i32, keep: &mut dyn FnMut((i32, i32, i32), [f64; 3]) -> bool, faces: &dyn Fn([f64; 3]) -> u8) {
+    pub fn select(&mut self, eye: [f64; 3], min_y: i32, keep_box: &dyn Fn([f64; 3], [f64; 3]) -> bool, keep: &mut dyn FnMut((i32, i32, i32), [f64; 3]) -> bool, faces: &dyn Fn([f64; 3]) -> u8) {
         self.items.clear();
-        for (&k, s) in self.slots.iter() {
-            let lo = [(k.0 * 16) as f64 - eye[0], (min_y + k.1 * 16) as f64 - eye[1], (k.2 * 16) as f64 - eye[2]];
-            if !keep(k, lo) {
+        for (&rk, members) in self.members.iter() {
+            let lo = [(rk.0 * RX * 16) as f64 - eye[0], (min_y + rk.1 * RY * 16) as f64 - eye[1], (rk.2 * RX * 16) as f64 - eye[2]];
+            let hi = [lo[0] + (RX * 16) as f64, lo[1] + (RY * 16) as f64, lo[2] + (RX * 16) as f64];
+            if !keep_box(lo, hi) {
                 continue;
             }
-            let c = [lo[0] + 8.0, lo[1] + 8.0, lo[2] + 8.0];
-            let d2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
-            let mut first = s.first;
-            for f in first.iter_mut() {
-                *f += s.at;
+            for &k in members.iter() {
+                let Some(s) = self.slots.get(&k) else { continue };
+                let lo = [(k.0 * 16) as f64 - eye[0], (min_y + k.1 * 16) as f64 - eye[1], (k.2 * 16) as f64 - eye[2]];
+                if !keep(k, lo) {
+                    continue;
+                }
+                let c = [lo[0] + 8.0, lo[1] + 8.0, lo[2] + 8.0];
+                let d2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
+                let mut first = s.first;
+                for f in first.iter_mut() {
+                    *f += s.at;
+                }
+                self.items.push(Item { rank: 0, d2, region: rk, page: s.page, first, runs: faces(lo) as u16 | 1 << ANY });
             }
-            self.items.push(Item { rank: 0, d2, region: region_of(k), page: s.page, first, runs: faces(lo) as u16 | 1 << ANY });
         }
-        // Near to far, and each page's sections together (ranked by its nearest section), so a
-        // page is one call and what is in front is drawn first.
+        // Near to far (the translucent pass goes through this backwards); then, for the opaque
+        // pass, each page's sections together, pages ranked by their nearest section, so a page
+        // is one call and what is in front is drawn first.
         self.items.sort_unstable_by(|a, b| a.d2.partial_cmp(&b.d2).unwrap_or(core::cmp::Ordering::Equal));
         self.seen.clear();
+        self.counts.clear();
         for it in self.items.iter_mut() {
             let rank = match self.seen.iter().position(|s| s.0 == it.region && s.1 == it.page) {
                 Some(i) => i,
                 None => {
                     self.seen.push((it.region, it.page));
+                    self.counts.push(0);
                     self.seen.len() - 1
                 }
             };
             it.rank = rank as u32;
+            self.counts[rank] += 1;
+        }
+        // A counting sort by rank keeps the near-to-far order within each page.
+        let mut at = 0;
+        for c in self.counts.iter_mut() {
+            let n = *c;
+            *c = at;
+            at += n;
+        }
+        self.grouped.clear();
+        self.grouped.extend_from_slice(&self.items);
+        for it in self.items.iter() {
+            let r = it.rank as usize;
+            self.grouped[self.counts[r] as usize] = *it;
+            self.counts[r] += 1;
         }
         self.sections_drawn = self.items.len() as u32;
         self.quads_drawn = 0;
@@ -316,22 +363,21 @@ impl Terrain {
     /// textures, fog and the alpha test; `view` is the camera's rotation), then the leaves
     /// forced opaque without the alpha test.
     pub fn draw_opaque(&mut self, gl: &Gl, view: &[f64; 16], eye: [f64; 3], min_y: i32) {
-        let mut items = core::mem::take(&mut self.items);
-        items.sort_unstable_by(|a, b| a.rank.cmp(&b.rank).then(a.d2.partial_cmp(&b.d2).unwrap_or(core::cmp::Ordering::Equal)));
+        let items = core::mem::take(&mut self.grouped);
         self.draw_list(gl, view, eye, min_y, &items, None);
         if items.iter().any(|it| it.first[OPAQUE] != it.first[OPAQUE + 1]) {
             unsafe { (gl.Disable)(ALPHA_TEST) };
             self.draw_list(gl, view, eye, min_y, &items, Some(1 << OPAQUE));
             unsafe { (gl.Enable)(ALPHA_TEST) };
         }
-        self.items = items;
+        self.grouped = items;
     }
 
     /// Draws the translucent runs, far to near (strictly, for the blending).
     pub fn draw_translucent(&mut self, gl: &Gl, view: &[f64; 16], eye: [f64; 3], min_y: i32) {
         let mut items = core::mem::take(&mut self.items);
         items.retain(|it| it.first[TRANSLUCENT] != it.first[RUNS]);
-        items.sort_unstable_by(|a, b| b.d2.partial_cmp(&a.d2).unwrap_or(core::cmp::Ordering::Equal));
+        items.reverse();
         self.draw_list(gl, view, eye, min_y, &items, Some(1 << TRANSLUCENT));
         self.items = items;
     }
