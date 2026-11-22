@@ -7,7 +7,6 @@ use crate::font;
 use crate::math;
 use crate::sdl::*;
 use crate::world::World;
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::c_void;
@@ -34,7 +33,6 @@ pub struct CV {
     pub c: [u8; 4],
 }
 
-const CSTRIDE: i32 = 16;
 
 fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
     CV {
@@ -45,50 +43,16 @@ fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
     }
 }
 
-/// A section's quads are kept in one vertex buffer in 15 runs: the solid quads (drawn without
-/// the alpha test, so the card can reject hidden pixels early), the cut-out quads (leaves,
-/// plants, glass: the alpha test), each split by the way the face looks (BUCKETS), then the
-/// translucent ones (water, stained glass, ice).
-const RUNS: usize = 15;
-/// Facing runs per layer: 0..6 face down, up, north, south, west, east (the cull faces'
-/// order); 6 any other way (plants' crossed quads, slanted faces).
-const BUCKETS: usize = 7;
-const SOLID: usize = 0;
-const CUTOUT: usize = 1;
-const TRANSLUCENT_RUN: usize = 14;
-/// Quads one 16-bit index buffer reaches (65536 vertices).
-const MAX_QUADS_16: u32 = 16384;
-
-struct SectionMesh {
-    vbo: u32,
-    /// Where each run starts, in quads; first[RUNS] is the total.
-    first: [u32; RUNS + 1],
-}
-
-/// A section to draw this frame: its distance, buffer, runs, matrix and the facing runs that
-/// can face the camera.
-#[derive(Clone, Copy)]
-struct Draw {
-    d2: f64,
-    vbo: u32,
-    first: [u32; RUNS + 1],
-    m: [f32; 16],
-    faces: u8,
-}
+use crate::terrain::{Terrain, RUNS, TRANSLUCENT};
 
 pub struct Renderer {
-    meshes: BTreeMap<(i32, i32, i32), SectionMesh>,
+    /// The meshed sections, on the card (terrain.rs).
+    pub terrain: Terrain,
     epoch: u32,
     cache: Vec<u16>,
+    /// A section's quads by run while it is meshed: facing down, up, north, south, west, east,
+    /// any (solid and cut-out together), then translucent.
     runs: [Vec<CV>; RUNS],
-    upload: Vec<CV>,
-    order: Vec<Draw>,
-    /// Shared index buffers turning quads into two triangles each (0 1 2, 2 3 0, as vanilla's
-    /// quad index buffer): 16-bit for sections up to MAX_QUADS_16 quads, 32-bit (made when a
-    /// section needs it) for bigger ones.
-    index16: u32,
-    index32: u32,
-    index32_quads: u32,
     /// Cave culling.
     pub graph: crate::occlusion::Graph,
     vis_stack: Vec<u16>,
@@ -130,15 +94,10 @@ fn shade(c: [u8; 3], k: f32, a: u8) -> [u8; 4] {
 impl Renderer {
     pub fn new() -> Renderer {
         Renderer {
-            meshes: BTreeMap::new(),
+            terrain: Terrain::new(),
             epoch: 0,
             cache: alloc::vec![0; (P * P * P) as usize],
             runs: Default::default(),
-            upload: Vec::new(),
-            order: Vec::new(),
-            index16: 0,
-            index32: 0,
-            index32_quads: 0,
             graph: crate::occlusion::Graph::new(),
             vis_stack: Vec::new(),
             ui: Vec::new(),
@@ -208,20 +167,11 @@ impl Renderer {
         Ok(())
     }
 
-    fn drop_mesh(gl: &Gl, m: SectionMesh) {
-        if m.vbo != 0 {
-            unsafe { (gl.DeleteBuffers)(1, &m.vbo) };
-        }
-    }
-
     /// Meshes the dirty sections nearest the camera, for up to `budget_ms`.
     pub fn update(&mut self, gl: &Gl, world: &mut World, b: &Blocks, eye: [f64; 3], budget_ms: u64) {
         if world.epoch != self.epoch {
             self.epoch = world.epoch;
-            let old = core::mem::take(&mut self.meshes);
-            for (_, m) in old {
-                Self::drop_mesh(gl, m);
-            }
+            self.terrain.clear(gl);
             self.graph.clear();
         }
         let start = crate::sys::now_ms();
@@ -242,14 +192,10 @@ impl Renderer {
             }
             let k = best.unwrap();
             world.dirty.remove(&k);
-            if let Some(m) = self.meshes.remove(&k) {
-                Self::drop_mesh(gl, m);
-            }
             if world.columns.contains_key(&(k.0, k.2)) {
-                if let Some(m) = self.build(gl, world, b, k) {
-                    self.meshes.insert(k, m);
-                }
+                self.build(gl, world, b, k);
             } else {
+                self.terrain.remove(gl, k);
                 self.graph.set(k, crate::occlusion::ALL);
             }
         }
@@ -305,10 +251,12 @@ impl Renderer {
         true
     }
 
-    fn build(&mut self, gl: &Gl, world: &World, b: &Blocks, k: (i32, i32, i32)) -> Option<SectionMesh> {
+    /// Meshes section `k` and hands it to the terrain store.
+    fn build(&mut self, gl: &Gl, world: &World, b: &Blocks, k: (i32, i32, i32)) {
         if !self.fill_cache(world, k) {
             self.graph.set(k, crate::occlusion::ALL);
-            return None;
+            self.terrain.remove(gl, k);
+            return;
         }
         {
             let cache = &self.cache;
@@ -401,7 +349,7 @@ impl Renderer {
                                 let p = [fx + cr[0] as f32, fy + if cr[1] == 1 { top } else { 0.0 }, fz + cr[2] as f32];
                                 quad[i] = cv(p, corner_uv[i], c);
                             }
-                            let run = if water { TRANSLUCENT_RUN } else { SOLID * BUCKETS + facing(&quad) };
+                            let run = if water { TRANSLUCENT } else { facing(&quad) };
                             self.runs[run].extend_from_slice(&quad);
                         }
                         continue;
@@ -472,71 +420,23 @@ impl Renderer {
                                 c: shade(base, k, 255),
                             };
                         }
-                        let run = if q.flags & blocks::Q_TRANSLUCENT != 0 {
-                            TRANSLUCENT_RUN
-                        } else if q.flags & blocks::Q_CUTOUT != 0 {
-                            CUTOUT * BUCKETS + facing(&quad)
-                        } else {
-                            SOLID * BUCKETS + facing(&quad)
-                        };
+                        let run = if q.flags & blocks::Q_TRANSLUCENT != 0 { TRANSLUCENT } else { facing(&quad) };
                         self.runs[run].extend_from_slice(&quad);
                     }
                 }
             }
         }
         let mut first = [0u32; RUNS + 1];
-        self.upload.clear();
+        let total: usize = self.runs.iter().map(|r| r.len()).sum();
+        let mut data: Vec<CV> = Vec::with_capacity(total);
         for (i, r) in self.runs.iter().enumerate() {
-            first[i] = (self.upload.len() / 4) as u32;
-            self.upload.extend_from_slice(r);
-        }
-        first[RUNS] = (self.upload.len() / 4) as u32;
-        if self.upload.is_empty() {
-            return None;
-        }
-        self.ensure_indices(gl, first[RUNS]);
-        let mut id = 0u32;
-        unsafe {
-            (gl.GenBuffers)(1, &mut id);
-            (gl.BindBuffer)(ARRAY_BUFFER, id);
-            (gl.BufferData)(ARRAY_BUFFER, (self.upload.len() * CSTRIDE as usize) as isize, self.upload.as_ptr() as *const c_void, STATIC_DRAW);
-            (gl.BindBuffer)(ARRAY_BUFFER, 0);
-        }
-        Some(SectionMesh { vbo: id, first })
-    }
-
-    /// The shared quad index buffers: the 16-bit one, and the 32-bit one grown to `quads`.
-    fn ensure_indices(&mut self, gl: &Gl, quads: u32) {
-        if self.index16 == 0 {
-            let mut ix: Vec<u16> = Vec::with_capacity(MAX_QUADS_16 as usize * 6);
-            for q in 0..MAX_QUADS_16 {
-                let v = (q * 4) as u16;
-                ix.extend_from_slice(&[v, v + 1, v + 2, v + 2, v + 3, v]);
-            }
-            unsafe {
-                (gl.GenBuffers)(1, &mut self.index16);
-                (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index16);
-                (gl.BufferData)(ELEMENT_ARRAY_BUFFER, (ix.len() * 2) as isize, ix.as_ptr() as *const c_void, STATIC_DRAW);
-                (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, 0);
+            first[i] = (data.len() / 4) as u32;
+            for v in r.iter() {
+                data.push(CV { p: crate::terrain::to_region(k, v.p), ..*v });
             }
         }
-        if quads > MAX_QUADS_16 && quads > self.index32_quads {
-            let n = quads.next_power_of_two();
-            let mut ix: Vec<u32> = Vec::with_capacity(n as usize * 6);
-            for q in 0..n {
-                let v = q * 4;
-                ix.extend_from_slice(&[v, v + 1, v + 2, v + 2, v + 3, v]);
-            }
-            unsafe {
-                if self.index32 == 0 {
-                    (gl.GenBuffers)(1, &mut self.index32);
-                }
-                (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index32);
-                (gl.BufferData)(ELEMENT_ARRAY_BUFFER, (ix.len() * 4) as isize, ix.as_ptr() as *const c_void, STATIC_DRAW);
-                (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, 0);
-            }
-            self.index32_quads = n;
-        }
+        first[RUNS] = (data.len() / 4) as u32;
+        self.terrain.put(gl, k, data, first);
     }
 
     /// Draws the world from `eye` looking along yaw/pitch (degrees, Minecraft's convention).
@@ -544,7 +444,7 @@ impl Renderer {
         let far = (view_chunks as f32 + 1.0) * 16.0;
         let proj = perspective(self.fov, w as f32 / h as f32, 0.05, (far * 1.5).max(400.0));
         unsafe {
-            (gl.Viewport)(0, 0, w, h);
+            if exp('v') { (gl.Viewport)(0, 0, 8, 8); } else { (gl.Viewport)(0, 0, w, h); }
             (gl.ClearColor)(sky[0], sky[1], sky[2], 1.0);
             (gl.Clear)(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT);
             (gl.Enable)(DEPTH_TEST);
@@ -614,48 +514,22 @@ impl Renderer {
         let layers = world.height / 16;
         let cam = (math::ifloor(eye[0]) >> 4, (math::ifloor(eye[1]) - world.min_y) >> 4, math::ifloor(eye[2]) >> 4);
         self.graph.update(cam, view_chunks + 1, layers);
-        self.order.clear();
-        for (&k, mesh) in self.meshes.iter() {
-            let lo = [(k.0 * 16) as f64 - eye[0], (world.min_y + k.1 * 16) as f64 - eye[1], (k.2 * 16) as f64 - eye[2]];
-            let c = [lo[0] + 8.0, lo[1] + 8.0, lo[2] + 8.0];
-            let d2 = c[0] * c[0] + c[2] * c[2];
-            if d2 > maxd * maxd {
-                continue;
-            }
-            if !in_frustum(&planes, lo, [lo[0] + 16.0, lo[1] + 16.0, lo[2] + 16.0]) {
-                continue;
-            }
-            if !self.graph.visible(k) {
-                continue;
-            }
-            let mut m = translate(&view, lo);
-            for i in 0..12 {
-                m[i] /= 1024.0;
-            }
-            self.order.push(Draw { d2: d2 + c[1] * c[1], vbo: mesh.vbo, first: mesh.first, m, faces: faces_seen(lo) });
-        }
-        // Near to far: what is in front hides the rest before it is shaded.
-        self.order.sort_unstable_by(|a, b| a.d2.partial_cmp(&b.d2).unwrap_or(core::cmp::Ordering::Equal));
-        self.sections_drawn = self.order.len() as u32;
-        let mut quads = 0u32;
-        unsafe {
-            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index16);
-            // Solid quads first, without the alpha test; then the cut-out ones with it.
-            (gl.Disable)(ALPHA_TEST);
-        }
-        for layer in [SOLID, CUTOUT] {
-            if layer == CUTOUT {
-                unsafe { (gl.Enable)(ALPHA_TEST) };
-            }
-            for d in self.order.iter() {
-                quads += draw_runs(gl, d, layer * BUCKETS, d.faces as u32 | 1 << 6, self.index16, self.index32);
-            }
+        let graph = &self.graph;
+        let mut keep = |k: (i32, i32, i32), lo: [f64; 3]| {
+            let (cx, cz) = (lo[0] + 8.0, lo[2] + 8.0);
+            cx * cx + cz * cz <= maxd * maxd && in_frustum(&planes, lo, [lo[0] + 16.0, lo[1] + 16.0, lo[2] + 16.0]) && graph.visible(k)
+        };
+        self.terrain.select(eye, world.min_y, &mut keep, &faces_seen);
+        self.sections_drawn = self.terrain.sections_drawn;
+        // Solid and cut-out quads together, with the alpha test, near to far: on the cards
+        // measured one pass beats two (solid without the test, then cut-out with it).
+        unsafe { (gl.Enable)(ALPHA_TEST) };
+        if !exp('w') {
+            self.terrain.draw_opaque(gl, &view, eye, world.min_y);
         }
         crate::perf::lap(crate::perf::S::World);
         // Entities, between the opaque world and the water (vanilla's order).
         unsafe {
-            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, 0);
-            (gl.BindBuffer)(ARRAY_BUFFER, 0);
             (gl.MatrixMode)(TEXTURE);
             (gl.LoadIdentity)();
             (gl.MatrixMode)(MODELVIEW);
@@ -683,13 +557,9 @@ impl Renderer {
             (gl.BlendFunc)(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
             (gl.DepthMask)(0);
             (gl.AlphaFunc)(GREATER, 0.004);
-            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, self.index16);
         }
-        for d in self.order.iter().rev() {
-            quads += draw_runs(gl, d, TRANSLUCENT_RUN, 1, self.index16, self.index32);
-        }
-        self.vertices_drawn = quads * 4;
-        unsafe { (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, 0) };
+        self.terrain.draw_translucent(gl, &view, eye, world.min_y);
+        self.vertices_drawn = self.terrain.quads_drawn * 4;
         crate::perf::lap(crate::perf::S::Water);
         unsafe {
             (gl.DepthMask)(1);
@@ -873,67 +743,15 @@ fn facing(q: &[CV; 4]) -> usize {
 
 /// Draws the runs `base..base + 7` picked by `mask` (or just `base` for the translucent run,
 /// mask 1) of a section in one call, merging runs that touch. Returns the quads drawn.
-fn draw_runs(gl: &Gl, d: &Draw, base: usize, mask: u32, index16: u32, index32: u32) -> u32 {
-    let mut counts = [0i32; BUCKETS];
-    let mut offs = [core::ptr::null::<c_void>(); BUCKETS];
-    let mut n = 0usize;
-    let mut quads = 0u32;
-    let mut open: Option<(u32, u32)> = None;
-    let big = d.first[RUNS] > MAX_QUADS_16;
-    let isz = if big { 4 } else { 2 };
-    let mut flush = |r: (u32, u32), n: &mut usize| {
-        counts[*n] = (r.1 * 6) as i32;
-        offs[*n] = (r.0 as usize * 6 * isz) as *const c_void;
-        *n += 1;
-    };
-    let list: &[usize] = if base == TRANSLUCENT_RUN { &[0] } else { &[0, 1, 2, 3, 4, 5, 6] };
-    for &b in list {
-        if mask >> b & 1 == 0 {
-            continue;
-        }
-        let run = base + b;
-        let (s, e) = (d.first[run], d.first[run + 1]);
-        if s == e {
-            continue;
-        }
-        quads += e - s;
-        open = match open {
-            Some((os, oc)) if os + oc == s => Some((os, oc + e - s)),
-            Some(r) => {
-                flush(r, &mut n);
-                Some((s, e - s))
-            }
-            None => Some((s, e - s)),
-        };
-    }
-    if let Some(r) = open {
-        flush(r, &mut n);
-    }
-    if n == 0 {
-        return 0;
-    }
+static mut EXP: Option<String> = None;
+pub fn exp(c: char) -> bool {
     unsafe {
-        (gl.LoadMatrixf)(d.m.as_ptr());
-        (gl.BindBuffer)(ARRAY_BUFFER, d.vbo);
-        (gl.VertexPointer)(3, SHORT, CSTRIDE, core::ptr::null());
-        (gl.TexCoordPointer)(2, SHORT, CSTRIDE, 8 as *const c_void);
-        (gl.ColorPointer)(4, UNSIGNED_BYTE, CSTRIDE, 12 as *const c_void);
-        if big {
-            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, index32);
+        if EXP.is_none() {
+            EXP = Some(crate::sys::env("PENRYN_EXP").unwrap_or_default());
         }
-        let ty = if big { UNSIGNED_INT } else { UNSIGNED_SHORT };
-        if n == 1 {
-            (gl.DrawElements)(TRIANGLES, counts[0], ty, offs[0]);
-        } else {
-            (gl.MultiDrawElements)(TRIANGLES, counts.as_ptr(), ty, offs.as_ptr(), n as i32);
-        }
-        if big {
-            (gl.BindBuffer)(ELEMENT_ARRAY_BUFFER, index16);
-        }
+        EXP.as_ref().map_or(false, |e| e.contains(c))
     }
-    quads
 }
-
 pub fn perspective_pub(fov_deg: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
     perspective(fov_deg, aspect, near, far)
 }

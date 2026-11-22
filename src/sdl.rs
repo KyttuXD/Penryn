@@ -182,6 +182,7 @@ api! { Gl, "gl", "system",
     GenBuffers(i32, *mut u32);
     BindBuffer(u32, u32);
     BufferData(u32, isize, *const c_void, u32);
+    BufferSubData(u32, isize, isize, *const c_void);
     DeleteBuffers(i32, *const u32);
     ReadPixels(i32, i32, i32, i32, u32, u32, *mut c_void);
     GenTextures(i32, *mut u32);

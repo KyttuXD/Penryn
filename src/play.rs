@@ -286,7 +286,7 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
     unsafe { (v.sdl.SDL_GL_SetSwapInterval)(settings.on(O::Vsync) as i32) };
     let view: i32 = settings.int(O::RenderDistance);
     say!("OpenGL: {} ({})", v.gl_string(sdl::RENDERER), v.gl_string(sdl::VERSION));
-    crate::perf::init(&v.gl);
+    crate::perf::init(&v);
     let mut app = App {
         v,
         r: Renderer::new(),
@@ -1605,7 +1605,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             sky,
             &mut |view| {
                 *world_view_ref = *view;
-                if let Some(t) = ents {
+                if let (Some(t), false) = (ents, crate::render::exp('E')) {
                     t.draw(gl, view, eye, entities, pf, own, &ent_cx);
                     crate::skins::draw(gl, view, eye, entities, pf, own, t);
                 }
@@ -1616,7 +1616,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
                 crate::moving::draw(gl, view, eye, world_ref, blocks_ref, atlas, pf);
                 crate::perf::lap(crate::perf::S::BlockEntities);
-                if let (Some(gui), false, true, None) = (gui_ref, dim, clouds_on, fog) {
+                if let (Some(gui), false, true, None, false) = (gui_ref, dim, clouds_on, fog, crate::render::exp('C')) {
                     sky_ref.draw_clouds(gl, view, gui, eye, game_time, day, radius);
                 }
                 crate::perf::lap(crate::perf::S::Clouds);
@@ -1628,7 +1628,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             &mut |view| {
                 if let Some(f) = fog.as_ref() {
                     crate::effects::apply_fog(gl, f);
-                } else if let (Some(gui), false) = (gui_ref, dim) {
+                } else if let (Some(gui), false, false) = (gui_ref, dim, crate::render::exp('S')) {
                     sky_ref.draw_celestial(gl, view, gui, day_time, day);
                 }
             },
@@ -1650,7 +1650,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             }
         }
         // ---- the hand
-        if let Some(gui) = self.gui.as_ref() {
+        if let (Some(gui), false) = (self.gui.as_ref(), crate::render::exp('H')) {
             let swing = if self.swing_ticks >= 0 { ((self.swing_ticks as f64 + partial) / 6.0) as f32 } else { 0.0 };
             let equip = self.prev_equip + (self.equip - self.prev_equip) * partial as f32;
             let walk = self.prev_walk_dist + (self.walk_dist - self.prev_walk_dist) * partial as f32;
@@ -1675,7 +1675,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         crate::perf::lap(crate::perf::S::Hand);
         // ---- 2D: vanilla's HUD and screens
-        let Some(mut gui) = self.gui.take() else {
+        let Some(mut gui) = self.gui.take().filter(|_| !crate::render::exp('G')) else {
             self.v.swap();
             crate::perf::lap(crate::perf::S::Swap);
             return;
@@ -1686,6 +1686,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let night = (1.0 - day) * (1.0 - g.effects.night_vision(partial as f32));
         if !dim && night > 0.0 {
             let a = self.menu.o.night_alpha(night * 140.0);
+            if crate::render::exp('D') && sys::now_ms() % 1000 < 3 { say!("night {} alpha {} day {}", night, a, day); }
             gui.fill(0.0, 0.0, gw, gh, ((a as u32) << 24) | 0x00_0014);
         }
         let eye_block = g.blocks.kind(g.world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2])));
