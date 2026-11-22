@@ -1834,7 +1834,8 @@ def main():
     for pr in font_refs("minecraft:default", []):
         if pr.get("type") == "space":
             for ch, adv in pr.get("advances", {}).items():
-                glyphs.setdefault(ord(ch), (None, 0, 0, 0, 0, int(adv), 0, 0))
+                # A negative advance moves the text back (CraftEngine's GUI titles do).
+                glyphs.setdefault(ord(ch), (None, 0, 0, 0, 0, max(-32768, min(32767, int(adv))), 0, 0))
             continue
         if pr.get("type") != "bitmap":
             continue
@@ -1862,6 +1863,10 @@ def main():
                         gwid = gx_ + 1
                         break
                 adv = int(0.5 + gwid * scale) + 1
+                if cw > 255 or chh > 255 or fh > 255:
+                    print("%s: glyph U+%04X is too large for gui.bin (cell %dx%d, height %d): left out"
+                          % (rel, cp, cw, chh, fh))
+                    continue
                 glyphs[cp] = (page, rx * cw, ry * chh, cw, chh, adv, fh, 7 - ascent)
 
 
@@ -1903,12 +1908,14 @@ def main():
             f.write(bytes([len(nb)]) + nb + struct.pack("<HHHH", px0, py0, w, h))
             f.write(struct.pack("<BBHH", 1 if nine else 0, nine[0] if nine else 0, nine[1] if nine else w, nine[2] if nine else h))
         f.write(struct.pack("<I", len(glyphs)))
+        # A glyph record (14 bytes, gui.rs's Glyph::at): cp, atlas x, y, cell w, h, rendered
+        # height, yoff, advance (signed, a space provider's may be negative).
         for cp, (page, gx, gy, cw, chh, adv, fh, yoff) in sorted(glyphs.items()):
             if page is None:
-                f.write(struct.pack("<IHHBBBBbB", cp, 0, 0, 0, 0, adv, 0, 0, 0))
+                f.write(struct.pack("<IHHBBBbh", cp, 0, 0, 0, 0, 0, 0, adv))
             else:
                 px0, py0 = placed["font/page%d" % page]
-                f.write(struct.pack("<IHHBBBBbB", cp, px0 + gx, py0 + gy, cw, chh, adv, fh, yoff, 0))
+                f.write(struct.pack("<IHHBBBbh", cp, px0 + gx, py0 + gy, cw, chh, fh, yoff, adv))
         f.write(struct.pack("<I", len(model_out)))
         for key, parts in model_out:
             kb = key.encode()

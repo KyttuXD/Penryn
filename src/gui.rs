@@ -22,15 +22,54 @@ pub struct Sprite {
     pub nine: Option<(u16, u16, u16)>,
 }
 
+/// One glyph of gui.bin (14 bytes): code point u32, atlas x and y u16, cell width and height u8,
+/// rendered height u8, yoff i8, then the advance i16 (a space provider's advance may be negative:
+/// resource packs move text back with them, as CraftEngine's GUI titles do).
 #[derive(Clone, Copy)]
 struct Glyph {
     x: u16,
     y: u16,
     cw: u8,
     ch: u8,
-    adv: u8,
+    adv: i16,
     height: u8,
     yoff: i8,
+}
+
+impl Glyph {
+    /// The record at `p` of gui.bin (`d` is the file), with its code point.
+    fn at(d: &[u8], p: usize) -> (u32, Glyph) {
+        let cp = rd32(d, p);
+        (cp, Glyph {
+            x: rd16(d, p + 4),
+            y: rd16(d, p + 6),
+            cw: d[p + 8],
+            ch: d[p + 9],
+            height: d[p + 10],
+            yoff: d[p + 11] as i8,
+            adv: rd16(d, p + 12) as i16,
+        })
+    }
+}
+
+/// Checks of gui.bin's glyph records (penryn selftest): the fields at their offsets, and a
+/// negative advance as a resource pack's space provider writes it.
+pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
+    let mut rec = Vec::with_capacity(14);
+    rec.extend_from_slice(&0xE000u32.to_le_bytes());
+    rec.extend_from_slice(&1200u16.to_le_bytes());
+    rec.extend_from_slice(&34u16.to_le_bytes());
+    rec.extend_from_slice(&[176, 168, 168]);
+    rec.push((-6i8) as u8);
+    rec.extend_from_slice(&(-8i16).to_le_bytes());
+    let (cp, g) = Glyph::at(&rec, 0);
+    let mut out = Vec::new();
+    out.push(("gui glyph code point", alloc::format!("{:x}", cp), "e000"));
+    out.push(("gui glyph atlas x y", alloc::format!("{} {}", g.x, g.y), "1200 34"));
+    out.push(("gui glyph cell and height", alloc::format!("{} {} {}", g.cw, g.ch, g.height), "176 168 168"));
+    out.push(("gui glyph yoff", alloc::format!("{}", g.yoff), "-6"));
+    out.push(("gui glyph negative advance", alloc::format!("{}", g.adv), "-8"));
+    out
 }
 
 pub enum Icon {
@@ -215,16 +254,8 @@ impl Gui {
         let n = rd32(d, p) as usize;
         p += 4;
         for _ in 0..n {
-            let cp = rd32(d, p);
-            glyphs.insert(cp, Glyph {
-                x: rd16(d, p + 4),
-                y: rd16(d, p + 6),
-                cw: d[p + 8],
-                ch: d[p + 9],
-                adv: d[p + 10],
-                height: d[p + 11],
-                yoff: d[p + 12] as i8,
-            });
+            let (cp, g) = Glyph::at(d, p);
+            glyphs.insert(cp, g);
             p += 14;
         }
         let models = parse_models(d, &mut p);
