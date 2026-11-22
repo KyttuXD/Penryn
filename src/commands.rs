@@ -144,6 +144,9 @@ impl Tree {
             }
             if kind == 2 {
                 node.ty = r.varint()? as u16;
+                if node.ty as usize >= ARGUMENT_TYPES.len() {
+                    return None; // a parser this client does not know
+                }
                 properties(r, node.ty, &mut node)?;
                 if flags & 16 != 0 {
                     node.suggests = Some(r.string()?);
@@ -275,12 +278,12 @@ impl Tree {
             };
             let end = match end {
                 Ok(e) if e < input.len() && input.as_bytes()[e] != b' ' => {
-                    errors.push(Error { node: child, key: String::from("command.expected.separator"), args: Vec::new(), at: e, literal: false });
+                    errors.push(Error { key: String::from("command.expected.separator"), args: Vec::new(), at: e, literal: false });
                     continue;
                 }
                 Ok(e) => e,
                 Err((key, args, at, literal)) => {
-                    errors.push(Error { node: child, key, args, at, literal });
+                    errors.push(Error { key, args, at, literal });
                     continue;
                 }
             };
@@ -379,10 +382,6 @@ impl Tree {
             }
         }
         out
-    }
-
-    pub fn is_message(&self, n: usize) -> bool {
-        self.nodes[n].kind == 2 && self.nodes[n].ty == T_MESSAGE
     }
 
     /// The suggestions of `node`'s children for `text` (input up to the cursor) from
@@ -490,7 +489,6 @@ pub struct Context {
 
 #[derive(Clone, Debug)]
 pub struct Error {
-    pub node: usize,
     /// A translation key and its arguments.
     pub key: String,
     pub args: Vec<String>,

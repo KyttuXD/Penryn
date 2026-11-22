@@ -283,9 +283,6 @@ impl Rich {
             self.push(st.under(parent), s);
         }
     }
-    pub fn is_empty(&self) -> bool {
-        self.runs.iter().all(|r| r.1.is_empty())
-    }
     /// Component.getString: the text without styles.
     pub fn string(&self) -> String {
         let mut s = String::new();

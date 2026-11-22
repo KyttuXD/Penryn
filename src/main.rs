@@ -11,6 +11,7 @@ mod blocks;
 mod font;
 mod gui;
 mod hand;
+mod chatui;
 mod client;
 mod commands;
 mod conn;
@@ -235,7 +236,7 @@ fn selftest() -> Result<(), String> {
     let data: Vec<u8> = (0..70000u32).map(|i| (i * 7 % 251) as u8).collect();
     let z = zlib::store(&data);
     check("zlib stored round trip", alloc::format!("{}", zlib::inflate(&z, data.len()) == Some(data.clone())), "true");
-    for (what, got, want) in talk::selftest().into_iter().chain(text::selftest()).chain(commands::selftest()) {
+    for (what, got, want) in talk::selftest().into_iter().chain(text::selftest()).chain(commands::selftest()).chain(chatui::selftest()) {
         check(what, got, want);
     }
     for (what, got, want) in skins::selftest() {

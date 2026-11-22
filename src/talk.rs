@@ -26,25 +26,18 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-// Packet ids of protocol 777 (Horizon's horizon-protocol ids.rs).
+// Packet ids of protocol 777 (Horizon's horizon-protocol ids.rs) that ids.rs lacks.
+use crate::ids::play::{C_DISGUISED_CHAT, C_LOGIN, C_PLAYER_CHAT, C_PLAYER_INFO_REMOVE, C_PLAYER_INFO_UPDATE, C_SYSTEM_CHAT, S_CHAT, S_CHAT_COMMAND};
 pub const C_CLEAR_TITLES: i32 = 14;
 pub const C_COMMAND_SUGGESTIONS: i32 = 15;
 pub const C_COMMANDS: i32 = 16;
 pub const C_DELETE_CHAT: i32 = 31;
-pub const C_DISGUISED_CHAT: i32 = 33;
-pub const C_LOGIN: i32 = 50;
-pub const C_PLAYER_CHAT: i32 = 66;
-pub const C_PLAYER_INFO_REMOVE: i32 = 70;
-pub const C_PLAYER_INFO_UPDATE: i32 = 71;
 pub const C_SET_ACTION_BAR_TEXT: i32 = 89;
 pub const C_SET_SUBTITLE_TEXT: i32 = 114;
 pub const C_SET_TITLE_TEXT: i32 = 116;
 pub const C_SET_TITLES_ANIMATION: i32 = 117;
-pub const C_SYSTEM_CHAT: i32 = 124;
 pub const S_CHAT_ACK: i32 = 6;
-pub const S_CHAT_COMMAND: i32 = 7;
 pub const S_CHAT_COMMAND_SIGNED: i32 = 8;
-pub const S_CHAT: i32 = 9;
 pub const S_CHAT_SESSION_UPDATE: i32 = 10;
 pub const S_COMMAND_SUGGESTION: i32 = 15;
 
@@ -589,11 +582,6 @@ impl Talk {
         if self.msgs.len() > 100 {
             self.msgs.remove(0);
         }
-    }
-
-    /// Whether the chat session signs what is sent.
-    pub fn signing(&self) -> bool {
-        self.session.is_some() && key_pair().is_some()
     }
 }
 
@@ -1215,12 +1203,22 @@ fn read_player_chat(r: &mut In, cache: &Cache) -> Option<PlayerChat> {
 const PKCS8: &str = "30820275020100300d06092a864886f70d01010105000482025f3082025b02010002818100a483a9a2ce1762edb78b7359b96415e35885db2cebb0615d36ce314623a5c3ddb5fe1dccdb6066c4dfe16125baf73ca48b4658285da6adf1ccf0bd18be0f67e3a1d68e9547fc129b6d3fe74413ed5f987123f556b54a8c3a434a0fd4a02d4599d73fbdbf403bc229ed3c6e45877fbb2a20fd3850f1a19c5adbefb703eac785eb02030100010281803e646cb68100df9516523dea1e6475e4a61305ffb0575165bfbe4d73b35b4fc04b2057fef48848118c72f69c0f9f6a9160fcc9bc6d6024821ade8668d6d412eae70f2c19d1890877c4fe46aebbbf2324ad3f304dfc7bd6ec484befe4730cc72c749a557c0d0bb6a73093ef571e4fc543ff5a5ec146e9799ca98f9a71b6c08831024100d5e071afe69c04174eea3023c16a3226a577a3ae01c0166ce68dac20791c75aec47ee115ab52a86ae0a7860ba87bfb6f37a8754d72feec7073eff4d6485dd2b3024100c4ea63df21d6711e15a431400a84c127acb6a77c22f475fc807be941a6a80fc0edd4bab09f09a157e517580777c2caf832e5fa07375fc8f3f1286e9f9e9ebbe90240609199e37975a2673fcb7ff6f502d5281bf83c207a4bd8144db95429c9656f417d1968da16e4188541708296caf9481afc7f848f76c7e1cc189d14e897fe3cff024043ba4e817774f7511ea66b9e184012e35f7f2f59fdf7d100f8fc257d4421f7d126bc0d3e24653e8e29a87ec98ac27fe72032836da9f912f7fc5128c353de4ac902401a16b013e8717963d6f938b0126db15eecc678ccd0b3b8497aa6528d522f89087112694fd5082b9838ba162de4831589195284a6aa24711fc7d54ec073dfddf1";
 const PKCS8_SPKI: &str = "30819f300d06092a864886f70d010101050003818d0030818902818100a483a9a2ce1762edb78b7359b96415e35885db2cebb0615d36ce314623a5c3ddb5fe1dccdb6066c4dfe16125baf73ca48b4658285da6adf1ccf0bd18be0f67e3a1d68e9547fc129b6d3fe74413ed5f987123f556b54a8c3a434a0fd4a02d4599d73fbdbf403bc229ed3c6e45877fbb2a20fd3850f1a19c5adbefb703eac785eb0203010001";
 const PKCS8_SIG_CHAT: &str = "3a6ed84b109a293d92a53b2120925f3fa33d3b81b686e9a9f0f1f935bd80a263b0912cf0bcd5ac5ca14ffcd3301a23cb2c3d828a092bb49cc8831a3c1f9be674a44a7c906dd8d48e00edcf7c899a75b19e2eea6d94f868507005448692f8c500192268a286988a025c09ad8fa99ffb50de52c2e892310111c22cdb8b3ac4eb8a";
+/// A 2048-bit chat key as the services hand them out (PKCS#8 with CRT values).
+const CHAT_KEY_PKCS8: &str = "308204bc020100300d06092a864886f70d0101010500048204a6308204a20201000282010100bebf25d067e367ba25767067c0464701a109a37699f90a49e413cfba58694c4e51c317e43ad90b171f08dae88aabe0f51958871becf2e62e65282fbb256b70247aa0a7f186b044db793c379d1a332ccc5b50832b8564cf31282d3229abc982439fa3d8085824a8705b1d0d2a4323e300f1ce266f82f09282bbb77ebcd02da8d11c5f118141671497c3e08201e26764f681f50c84ab1475d57bfdc3f648431dcf9c2fa9e215002093ca4c33fc6986bc7e5e430ee4fb269e6b4d04bfd6bbd9d50c9ded5d04325d298815c22334a31e156eeb18aecffa2f64899c6d344723f93691531d816b440fd12a6ede94cdcfa2b86dd32077ae1be0e39c456b5d2d06aee9350203010001028201001bd2874a3b010b3df65d6c7f61a70e8fe104a62474488454eb50ed758d944c56472c49059804d50e8a0f11592672f424e40dcae54a9e526f557f7358dd982a7b13acefda35ae6bd8c47a0155a7beebaba22d1ff8dee3e9a9cea5ab01b38638bb32e3a3ecf1a8652e40480045d815b9b48750adc009ae1bfcb8334767f488986d2978982f12a06f9763bf9eebfdeb60f617521b0bce0756ec379cab2a22d00176b058fabca90175860f66a0634a0dd4219eba51c8c43ab3abbd2d2de4466bef6a815d84585f3cd76420bceaacd15be37fd9e957869ca25d0644c50e5ad399c05359b455b885ed135d3a63b1f80705def62a29cab8904f5ae5fd0f8cfcc9f2048902818100e0611a0d0009e190af7a99e9070ddcf127b41b578515888e18c555488567c2b3ebf970695e44fc7755580245b191fda81a8f670475a4048304652fb7ea9003b2b9985fafbac9f59695132bc6d6e35a3503f407ac2e6efa8dd736d617fad4946c80aabdcf06ab67da7a5cc4a0d69d9320964dc618feb2fc2cfb39c2e11bd1295902818100d9a0afc08108ba70c0a46bb82f1d8beb12cfd50a106d5483fbdf17a7919e0e1373a4c05c4287256faf7be8c42f1788ec3dd33abead70c4a67ec30ef930800f1bb34f5a762946e6fa3c7e296356d1a1059a7068d2bdac29ef4bd5cd25203ffc1a5d10a9bb1d15f6c72e5c830ff9fe5d2f445ce3da61693e6353a8d8fca7f7a73d02818040ef18f0e62ff5dd3f4b45bb50554cb9657a13e79216173cb8227379d7519de11fcb4222dc2b2ebd022fc4089348e295818a3a8fe9d39b92a6f4f9884a137f5e7ba3831d81faec5db5aaa4a29891970b7ca7648909af0847801ed87a7c168515996ed01b579cc7234d0207cd5c0ea2036e3bf7b6480f58375444f506dc5bfd91028180276aa12a7eb47400440403b6a261f99ba4169c816c2441307e8813a2b80f2681836a8da4a8300e29c260f0f1c78dbdb0fc29abf42939c984566541eb044bcd70b8f36071125cd32cf393ee2f1de46e03b3cb345127256d9af7e34b7ab3f2a2d8ab8e7f0f72df2d8939ee6b969332ecf1c8b2025ae555c884f8fc1600fcf330090281802985deefe6ccc4ceb42bbb1ce9a2ecacea4974f5ba8090ba33049e36d0c43a7c9be2da95fc0bf2c7fb0ec2ee73ee628bfda786afa68c75fa08d996b6c1674a759f7f1ec67d95206d69c4b28234b55933748b7930feb9818fa6944bdbf0258894164706d498d2cf29e241fe1b99ec94021cd29ed8a528ee5cf4fe6e6ddcbd1d97";
 /// A PKCS#1 key without CRT values (n, e, d) and OpenSSL's SHA256withRSA of "hello".
 const TEST_N: &str = "ab026074f92450a8f726f3895bb11176ca8f065f3100cd4143bac4f7d3674edcff95b41a0525d2365a549c106ec6685881b392177420fd31ff5c144ff11ba24311e751cd2c6b5d1817b6af6686a43c95d61243613005e6945b6093cd95223cec5e8856826da9d2ee1b323362ac1cebeab3659cbc45319a9b540dda816a4798ff";
 const TEST_D: &str = "172bcb460e3c0d71d78b3f946d082105a78c99a06c535f7c6860f62f5e45b139e0a7b82f8e630188bbd49b10def1a351dac12a1a6371d4dce16ce893ac67c2247b9ee13e3a840abaf9ea685304558f1a93c4f354193f5713c3e53bd10dd275300db36e764fc081549afbd30cd00c31e6eb726720337a963913d96b50e4d8fd1";
 const TEST_SIG_HELLO: &str = "0bc8716622e44f9bf72432045e91bf1b40a96aae3c402fa86262b83758db1c90d2ed16b9fa86f29af175f2e6eedb864bf8da2667a7ada2bf5433fba36c1951af0c356e45bd5f90fb905b9a08f33a0666c4968ccffbf32fda643d736deec66f82c75fe4a8075c7f2b8a6c0ca630e0ffe4805a1f1d672506b82fc188510fb4ef80";
 
 fn unhex(s: &str) -> Vec<u8> {
+    // An odd number of digits has its leading zero left out.
+    let padded;
+    let s = if s.len() % 2 == 1 {
+        padded = alloc::format!("0{}", s);
+        padded.as_str()
+    } else {
+        s
+    };
     (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap_or(0)).collect()
 }
 
@@ -1289,6 +1287,11 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     let body = [der_int(&[0]), der_int(&unhex(TEST_N)), der_int(&[1, 0, 1]), der_int(&unhex(TEST_D))].concat();
     let k1 = RsaPrivate::from_der(&der_el(0x30, &body));
     let sig = k1.and_then(|k| k.sign_sha256(b"hello")).map(|s| hex(&s)).unwrap_or_default();
+    let t0 = crate::sys::now_ms();
+    let k2 = RsaPrivate::from_der(&unhex(CHAT_KEY_PKCS8));
+    let ok = k2.as_ref().and_then(|k| k.sign_sha256(b"secure chat").map(|s| k.public.verify_sha256(b"secure chat", &s) && s.len() == 256)).unwrap_or(false);
+    crate::say!("RSA-2048 sign and verify took {} ms", crate::sys::now_ms() - t0);
+    out.push(("RSA-2048 sign and verify", alloc::format!("{}", ok), "true"));
     out.push(("RSA sign (PKCS#1, no CRT)", alloc::format!("{}", sig == TEST_SIG_HELLO), "true"));
     // A signed message's bytes (Horizon's payload_layout test).
     let p = signed_payload(&[0; 16], &[1; 16], 3, -2, 1_700_000_123_456, "h\u{e9}", &[[7u8; 256]]);

@@ -143,6 +143,8 @@ pub struct Gui {
     pub fixed_scale: i32,
     pub width: f32,
     pub height: f32,
+    /// Text drawn bigger (vanilla's pose scale: titles 4x, subtitles 2x); normally 1.
+    pub text_scale: f32,
     segs: Vec<(Tex, Vec<V>)>,
 }
 
@@ -300,6 +302,7 @@ impl Gui {
             fixed_scale: 0,
             width: 0.0,
             height: 0.0,
+            text_scale: 1.0,
             segs: Vec::new(),
         })
     }
@@ -452,12 +455,12 @@ impl Gui {
 
     /// A glyph's quad, slanted for italics (vanilla moves the top right and the bottom left).
     fn glyph_quad_at(&mut self, g: Glyph, x: f32, y: f32, italic: bool, c: [u8; 4]) {
-        let (aw, ah) = (self.aw, self.ah);
+        let (aw, ah, k) = (self.aw, self.ah, self.text_scale);
         let scale = g.height as f32 / g.ch as f32;
-        let (w, h) = (g.cw as f32 * scale, g.height as f32);
-        let gy = y + g.yoff as f32;
+        let (w, h) = (g.cw as f32 * scale * k, g.height as f32 * k);
+        let gy = y + g.yoff as f32 * k;
         let (u0, v0, u1, v1) = (g.x as f32 / aw, g.y as f32 / ah, (g.x as f32 + g.cw as f32) / aw, (g.y as f32 + g.ch as f32) / ah);
-        let (st, sb) = if italic { (1.0 - 0.25 * g.yoff as f32, 1.0 - 0.25 * (g.yoff as f32 + h)) } else { (0.0, 0.0) };
+        let (st, sb) = if italic { ((1.0 - 0.25 * g.yoff as f32) * k, (1.0 - 0.25 * (g.yoff as f32 + g.height as f32)) * k) } else { (0.0, 0.0) };
         let s = self.seg(Tex::Gui);
         s.push(V { p: [x + st, gy, 0.0], uv: [u0, v0], c });
         s.push(V { p: [x + sb, gy + h, 0.0], uv: [u0, v1], c });
@@ -480,6 +483,7 @@ impl Gui {
         };
         let mut c = base;
         let mut cx = x;
+        let k = self.text_scale;
         // bold, italic, underlined, strikethrough, obfuscated
         let (mut bold, mut italic, mut under, mut strike, mut obf) = (false, false, false, false, false);
         let mut it = s.chars().peekable();
@@ -529,18 +533,18 @@ impl Gui {
                     }
                 }
             }
-            let adv = g.adv as f32 + bold as i32 as f32;
+            let adv = (g.adv as f32 + bold as i32 as f32) * k;
             if g.cw > 0 {
                 self.glyph_quad_at(g, cx, y, italic, c);
                 if bold {
-                    self.glyph_quad_at(g, cx + 1.0, y, italic, c);
+                    self.glyph_quad_at(g, cx + k, y, italic, c);
                 }
             }
             if under {
-                self.quad(Tex::None, cx - 1.0, y + 8.0, cx + adv, y + 9.0, 0.0, 0.0, 0.0, 0.0, c);
+                self.quad(Tex::None, cx - k, y + 8.0 * k, cx + adv, y + 9.0 * k, 0.0, 0.0, 0.0, 0.0, c);
             }
             if strike {
-                self.quad(Tex::None, cx - 1.0, y + 3.5, cx + adv, y + 4.5, 0.0, 0.0, 0.0, 0.0, c);
+                self.quad(Tex::None, cx - k, y + 3.5 * k, cx + adv, y + 4.5 * k, 0.0, 0.0, 0.0, 0.0, c);
             }
             cx += adv;
         }
@@ -576,7 +580,8 @@ impl Gui {
     pub fn text(&mut self, s: &str, x: f32, y: f32, color: u32) -> f32 {
         let c = argb(color);
         let sh = [c[0] / 4, c[1] / 4, c[2] / 4, c[3]];
-        self.glyphs_at(s, x + 1.0, y + 1.0, sh, true);
+        let k = self.text_scale;
+        self.glyphs_at(s, x + k, y + k, sh, true);
         self.glyphs_at(s, x, y, c, false)
     }
 

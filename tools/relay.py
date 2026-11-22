@@ -12,6 +12,8 @@ Penryn asks this relay, over plain HTTP on the local network, to do them:
     Edition, and hand Penryn the Minecraft token and profile;
   * refresh that sign-in later without asking again;
   * make the session-server "join" call an online-mode server checks;
+  * fetch the account's chat key pair (the services' player certificates), which Penryn signs
+    its chat with on servers that enforce secure chat;
   * serve the game files Penryn draws with (blocks.bin, atlas.bin, gui.bin, entities.bin, signs.bin, weather.bin, effects.bin and sounds.bin), made from your own copy
     of Minecraft 26.3: an existing install (Horizon's launcher, the official launcher, Prism),
     or the 26.3 client downloaded from Mojang for your signed-in account (as Horizon does).
@@ -206,6 +208,36 @@ class Relay:
         st, r = call("https://sessionserver.mojang.com/session/minecraft/join",
                      data={"accessToken": token, "selectedProfile": uuid, "serverId": server_hash})
         return st, r
+
+    def certificates(self, token):
+        """UserApiService.getKeyPair: the profile key pair for secure chat, as lines: the
+        private key and the public key (DER, base64, without their PEM armour), the services'
+        signature (publicKeySignatureV2), expiresAt and refreshedAfter (epoch milliseconds)."""
+        req = urllib.request.Request(
+            "https://api.minecraftservices.com/player/certificates", data=b"", method="POST",
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json",
+                     "Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer " + token})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                body = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode(errors="replace")[:300]
+
+        def der(pem):
+            return "".join(l.strip() for l in pem.splitlines() if l.strip() and not l.startswith("-----"))
+
+        def millis(text):
+            # Instant.parse: 2022-07-30T23:05:24.548227Z
+            from datetime import datetime, timezone
+            t = text.rstrip("Z")
+            whole, _, frac = t.partition(".")
+            d = datetime.strptime(whole, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            return int(d.timestamp()) * 1000 + int((frac + "000")[:3])
+
+        k = body["keyPair"]
+        lines = [der(k["privateKey"]), der(k["publicKey"]), body["publicKeySignatureV2"],
+                 str(millis(body["expiresAt"])), str(millis(body["refreshedAfter"]))]
+        return 200, "\n".join(lines) + "\n"
 
     # ---------------------------------------------------------- the game's files
 
@@ -423,6 +455,9 @@ def make_handler(relay):
                 if self.path == "/join":
                     st, r = relay.join(a[0].strip(), a[1].strip(), a[2].strip())
                     return self.reply(204 if st == 204 else 502, "" if st == 204 else json.dumps(r))
+                if self.path == "/certificates":
+                    st, text = relay.certificates(a[0].strip())
+                    return self.reply(200 if st == 200 else 502, text)
                 if self.path == "/assets/download":
                     relay.build_assets(token=a[0].strip())
                     return self.reply(200, "ready\n")

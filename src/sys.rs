@@ -96,6 +96,7 @@ extern "C" {
     /// The skin download thread (skins.rs). pthread_t is 8 bytes on both systems.
     pub fn pthread_create(t: *mut usize, attr: *const c_void, f: extern "C" fn(*mut c_void) -> *mut c_void, arg: *mut c_void) -> c_int;
     pub fn pthread_detach(t: usize) -> c_int;
+    fn system(cmd: *const c_char) -> c_int;
 }
 
 // The prebuilt `alloc` was compiled with unwinding; with panic = "abort" nothing ever unwinds,
@@ -329,6 +330,21 @@ pub fn read_head(path: &str, n: usize) -> Option<Vec<u8>> {
     unsafe { close(fd) };
     out.truncate(r.max(0) as usize);
     Some(out)
+}
+
+/// Util.getPlatform().openUri: an http(s) URL in the system's browser (`open` on macOS,
+/// `xdg-open` elsewhere), quoted for the shell.
+pub fn open_url(url: &str) -> bool {
+    if !(url.starts_with("http://") || url.starts_with("https://")) || url.bytes().any(|b| b < 0x20) {
+        return false;
+    }
+    let quoted = url.replace('\'', "'\\''");
+    #[cfg(target_os = "macos")]
+    let cmd = alloc::format!("/usr/bin/open '{}' >/dev/null 2>&1 &", quoted);
+    #[cfg(not(target_os = "macos"))]
+    let cmd = alloc::format!("xdg-open '{}' >/dev/null 2>&1 &", quoted);
+    let c = cstr(&cmd);
+    unsafe { system(c.as_ptr() as *const c_char) == 0 }
 }
 
 /// `n` random bytes from /dev/urandom.
