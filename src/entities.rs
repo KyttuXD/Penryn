@@ -29,6 +29,21 @@ pub struct Entity {
     pub limb_pos: f32,
     pub limb_speed: f32,
     pub prev_limb_speed: f32,
+    /// yHeadRotO, yBodyRotO and xRotO: the head, body and pitch at the start of the last tick
+    /// (LivingEntityRenderer lerps them by the partial tick).
+    pub prev_head_yaw: f32,
+    pub prev_body_yaw: f32,
+    pub prev_pitch: f32,
+    /// LivingEntity.lerpHeadTo (ClientboundRotateHeadPacket): the head turns to this yaw over
+    /// `lerp_head_steps` ticks.
+    pub lerp_head_yaw: f32,
+    pub lerp_head_steps: u32,
+    /// LivingEntity.SwingState: the ticks into the current swing (None when idle), its animation
+    /// at the last tick and the tick before, and whether the off hand swings.
+    pub swing: Option<u32>,
+    pub swing_anim: f32,
+    pub swing_old: f32,
+    pub swing_off: bool,
     pub hurt: i32,
     /// A dropped item's stack.
     pub item: Option<(i32, i32)>,
@@ -79,6 +94,15 @@ impl Entity {
             limb_pos: 0.0,
             limb_speed: 0.0,
             prev_limb_speed: 0.0,
+            prev_head_yaw: head_yaw,
+            prev_body_yaw: yaw,
+            prev_pitch: pitch,
+            lerp_head_yaw: head_yaw,
+            lerp_head_steps: 0,
+            swing: None,
+            swing_anim: 0.0,
+            swing_old: 0.0,
+            swing_off: false,
             hurt: 0,
             item: None,
             data: BTreeMap::new(),
@@ -132,27 +156,55 @@ impl Entity {
         }
     }
 
-    /// The client tick: walk animation from the distance moved (LivingEntity.calculateEntityAnimation),
-    /// the body turning towards where the head looks, the death time.
+    /// The client tick (LivingEntity.tick): the start of the tick is kept for the frames drawn
+    /// until the next one; then the glide, the swing, the head and body turns (aiStep,
+    /// tickHeadTurn), the walk animation (calculateEntityAnimation), the hurt and death times.
     pub fn tick(&mut self) {
+        self.prev_head_yaw = self.head_yaw;
+        self.prev_body_yaw = self.body_yaw;
+        self.prev_pitch = self.pitch;
+        // A rider keeps the place its vehicle gave it as its previous one (riding.rs).
+        if !self.data.contains_key(&crate::riding::D_RIDING) {
+            self.prev = self.pos;
+        }
         self.interpolate();
+        self.tick_swing();
         let (dx, dz) = (self.pos[0] - self.prev[0], self.pos[2] - self.prev[2]);
-        let dist = math::sqrt(dx * dx + dz * dz) as f32;
-        let target = (dist * 4.0).min(1.0);
-        self.prev_limb_speed = self.limb_speed;
-        self.limb_speed += (target - self.limb_speed) * 0.4;
-        self.limb_pos += self.limb_speed;
-        // Body rotation lags the head (BodyRotationControl), at most 75 degrees behind.
-        let mut d = wrap_deg(self.head_yaw - self.body_yaw);
-        if dist > 0.0025 {
-            d = wrap_deg(self.yaw - self.body_yaw) * 0.3;
-        } else if d.abs() > 75.0 {
-            d -= 75.0 * d.signum();
+        let sq = (dx * dx + dz * dz) as f32;
+        let dist = math::sqrt(sq as f64) as f32;
+        // WalkAnimationState: stopped for the dead and the riders, else follows the distance.
+        if self.dying() || self.data.contains_key(&crate::riding::D_RIDING) {
+            self.prev_limb_speed = 0.0;
+            self.limb_speed = 0.0;
+            self.limb_pos = 0.0;
         } else {
-            d = 0.0;
+            let target = (dist * 4.0).min(1.0);
+            self.prev_limb_speed = self.limb_speed;
+            self.limb_speed += (target - self.limb_speed) * 0.4;
+            self.limb_pos += self.limb_speed;
+        }
+        // Mob.tickHeadTurn: the body turns to the way it walks (or to the head while swinging),
+        // 30% of the way a tick, and the head may turn 50 degrees from it at most.
+        let mut turn_to = self.body_yaw;
+        if sq > 0.0025 {
+            let walk = (math::atan2(dz, dx) * (180.0 / math::PI)) as f32 - 90.0;
+            let diff = (wrap_deg(self.yaw) - walk).abs();
+            turn_to = if diff > 95.0 && diff < 265.0 { walk - 180.0 } else { walk };
+        }
+        if self.swing_anim > 0.0 {
+            turn_to = self.yaw;
+        }
+        // LivingEntity.aiStep: the head turns to where the server's packet said, over 3 ticks.
+        if self.lerp_head_steps > 0 {
+            self.head_yaw += wrap_deg(self.lerp_head_yaw - self.head_yaw) / self.lerp_head_steps as f32;
+            self.lerp_head_steps -= 1;
         }
         if self.death_time == 0 {
-            self.body_yaw += d;
+            self.body_yaw += wrap_deg(turn_to - self.body_yaw) * 0.3;
+            let head_diff = wrap_deg(self.yaw - self.body_yaw);
+            if head_diff.abs() > 50.0 {
+                self.body_yaw += head_diff - head_diff.signum() * 50.0;
+            }
         }
         if self.hurt > 0 {
             self.hurt -= 1;
@@ -164,7 +216,109 @@ impl Entity {
             self.death_time = 0;
         }
         self.age += 1;
-        self.prev = self.pos;
+    }
+
+    /// LivingEntity.lerpHeadTo (ClientboundRotateHeadPacket): the head turns over 3 ticks.
+    pub fn lerp_head_to(&mut self, yaw: f32) {
+        self.lerp_head_yaw = yaw;
+        self.lerp_head_steps = 3;
+    }
+
+    /// LivingEntity.SwingState.startIfAble: a swing starts unless one is past its first half.
+    pub fn swing_arm(&mut self, off: bool) {
+        if let Some(t) = self.swing {
+            if t > 0 && t <= SWING_TICKS / 2 {
+                return;
+            }
+        }
+        self.swing = Some(0);
+        self.swing_off = off;
+    }
+
+    /// SwingState.tick: the animation goes from 0 to 1 over the swing's ticks.
+    fn tick_swing(&mut self) {
+        self.swing_old = self.swing_anim;
+        match self.swing {
+            Some(t) => {
+                self.swing_anim = (t as f32 / SWING_TICKS as f32).min(1.0);
+                if t > SWING_TICKS {
+                    self.swing = None;
+                    self.swing_anim = 0.0;
+                } else {
+                    self.swing = Some(t + 1);
+                }
+            }
+            None => self.swing_anim = 0.0,
+        }
+    }
+
+    /// SwingState.getAnimation(partial): the swing's progress in this frame, None when idle.
+    pub fn swing_progress(&self, partial: f32) -> Option<f32> {
+        self.swing?;
+        let (a, b) = (self.swing_old, self.swing_anim);
+        Some(if b >= a { a + (b - a) * partial } else { a + (b + 1.0 - a) * partial })
+    }
+
+    /// WalkAnimationState.position(partial) (scaled by its position scale: 3 for babies, which
+    /// LivingEntity.updateWalkAnimation passes): the swing's position in this frame.
+    pub fn walk_pos(&self, partial: f32, scale: f32) -> f32 {
+        (self.limb_pos - self.limb_speed * (1.0 - partial)) * scale
+    }
+
+    /// The body's yaw in this frame (Mth.rotLerp of yBodyRotO and yBodyRot).
+    pub fn body_rot(&self, partial: f32) -> f32 {
+        self.prev_body_yaw + wrap_deg(self.body_yaw - self.prev_body_yaw) * partial
+    }
+
+    /// The head's yaw in this frame (Mth.rotLerp of yHeadRotO and yHeadRot).
+    pub fn head_rot(&self, partial: f32) -> f32 {
+        self.prev_head_yaw + wrap_deg(self.head_yaw - self.prev_head_yaw) * partial
+    }
+
+    /// The pitch in this frame.
+    pub fn pitch_lerp(&self, partial: f32) -> f32 {
+        self.prev_pitch + (self.pitch - self.prev_pitch) * partial
+    }
+}
+
+/// LivingEntity.SwingState's default swing: 6 ticks (the attack, the arm's chop).
+pub const SWING_TICKS: u32 = 6;
+
+/// HumanoidModel.setupAttackAnimation for a WHACK swing: `a` is the swing's progress (0 to 1).
+/// The body turns with the swing, the arms move out from it, and the swinging arm chops.
+fn attack_part(name: &str, a: f32, off: bool, head_x: f64, at: &mut [f64; 3], turn: &mut [f64; 3]) {
+    let a = a as f64;
+    // The main hand is the right one; the off hand swings the left arm.
+    let mut by = math::sin(math::sqrt(a) * 2.0 * math::PI) * 0.2;
+    if off {
+        by = -by;
+    }
+    match name {
+        "body" => {
+            turn[1] = by;
+            return;
+        }
+        "right_arm" => {
+            at[0] = -math::cos(by) * 5.0;
+            at[2] = math::sin(by) * 5.0;
+            turn[1] += by;
+        }
+        "left_arm" => {
+            at[0] = math::cos(by) * 5.0;
+            at[2] = -math::sin(by) * 5.0;
+            turn[1] += by;
+            turn[0] += by;
+        }
+        _ => return,
+    }
+    if (name == "left_arm") == off {
+        // Ease.outQuart(a).
+        let q = 1.0 - a;
+        let aa = math::sin((1.0 - q * q * q * q) * math::PI);
+        let bb = math::sin(a * math::PI) * -(head_x - 0.7) * 0.75;
+        turn[0] -= aa * 1.2 + bb;
+        turn[1] += by * 2.0;
+        turn[2] += math::sin(a * math::PI) * -0.4;
     }
 }
 
@@ -509,7 +663,7 @@ impl EntityTable {
     fn pose(&self, m: &Model, e: &Entity, partial: f32, at: [f64; 3], held: [bool; 2], mats: &mut Vec<M>) {
         let ty = self.types.get(e.kind as usize);
         let name = ty.map_or("", |t| t.name.as_str());
-        let mut base = mul(&tr(at[0], at[1], at[2]), &rot(1, math::to_rad((180.0 - e.body_yaw) as f64)));
+        let mut base = mul(&tr(at[0], at[1], at[2]), &rot(1, math::to_rad((180.0 - e.body_rot(partial)) as f64)));
         if e.death_time > 0 {
             // setupRotations: fall over to the side (spiders onto their backs) over a second.
             let f = math::sqrt(((e.death_time as f64 + partial as f64 - 1.0) / 20.0 * 1.6).max(0.0)).min(1.0);
@@ -544,10 +698,13 @@ impl EntityTable {
             base = b;
         }
         let speed = e.prev_limb_speed + (e.limb_speed - e.prev_limb_speed) * partial;
-        let swing = e.limb_pos as f64 * 0.6662;
+        // The limb swing's position in this frame (babies swing 3 times as fast: positionScale).
+        let scale = if self.is_baby(e) { 3.0 } else { 1.0 };
+        let swing = e.walk_pos(partial, scale) as f64 * 0.6662;
         let amount = speed.min(1.0) as f64;
-        let head_y = math::to_rad(wrap_deg(e.head_yaw - e.body_yaw) as f64);
-        let head_x = math::to_rad(e.pitch as f64);
+        let head_y = math::to_rad(wrap_deg(e.head_rot(partial) - e.body_rot(partial)) as f64);
+        let head_x = math::to_rad(e.pitch_lerp(partial) as f64);
+        let attack = e.swing_progress(partial).filter(|a| *a > 0.0);
         let zombie = zombie_arms(name);
         let age = e.age as f64 + partial as f64;
         mats.clear();
@@ -593,6 +750,9 @@ impl EntityTable {
             // Riding, crouching, rowing (poses.rs).
             let mut at_part = [q[0] as f64, q[1] as f64, q[2] as f64];
             let mut turn = [xr, yr, zr];
+            if let Some(a) = attack {
+                attack_part(&p.name, a, e.swing_off, head_x, &mut at_part, &mut turn);
+            }
             crate::poses::part(name, e, partial, &p.name, &mut at_part, &mut turn);
             let [xr, yr, zr] = turn;
             let mut t = mul(&parent, &tr(at_part[0], at_part[1], at_part[2]));
@@ -1089,8 +1249,46 @@ pub fn selftest() -> alloc::vec::Vec<(&'static str, alloc::string::String, &'sta
     for _ in 0..10 {
         f.interpolate();
     }
+    // A frame draws from the start of the tick to its end (xo, yRotO): one tick of a glide
+    // from 0 to 1 in 2 steps leaves prev at 0 and pos at 0.5, so the half frame sits at 0.25.
+    let mut g = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    g.set_target([1.0, 0.0, 0.0], 0.0, 0.0, 2);
+    g.tick();
+    let half = g.prev[0] + (g.pos[0] - g.prev[0]) * 0.5;
+    let glided = g.prev[0] == 0.0 && g.pos[0] == 0.5;
+    // Walking: the limb position lags the partial tick by the speed (WalkAnimationState.position).
+    let mut w = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    w.limb_pos = 10.0;
+    w.limb_speed = 0.5;
+    // Head and body: the head turns to 90 over 3 ticks; the body drags behind a head past 50.
+    let mut h = Entity::new(0, [0; 16], [0.0; 3], 100.0, 0.0, 0.0);
+    h.body_yaw = 0.0;
+    h.prev_body_yaw = 0.0;
+    h.tick();
+    let body_drag = h.body_yaw;
+    let mut hd = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    hd.lerp_head_to(90.0);
+    for _ in 0..3 {
+        hd.tick();
+    }
+    // Swing: 6 ticks of a swing, its progress lerped by the partial tick (SwingState).
+    let mut s = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    s.swing_arm(false);
+    s.tick();
+    s.tick();
+    let sw = s.swing_progress(0.5).unwrap_or(-1.0);
+    for _ in 0..6 {
+        s.tick();
+    }
     alloc::vec![
         ("entity glides in equal steps", alloc::format!("{}", even), "true"),
         ("entity stops on its target", alloc::format!("{}", f.pos[0] == 1.0 && f.steps == 0), "true"),
+        ("frame draws from the tick's start to its end", alloc::format!("{}", glided && (half - 0.25).abs() < 1e-6), "true"),
+        ("walk position lags the partial tick", alloc::format!("{}", (w.walk_pos(0.5, 1.0) - 9.75).abs() < 1e-6), "true"),
+        ("baby walk position is 3 times as far", alloc::format!("{}", (w.walk_pos(0.5, 3.0) - 29.25).abs() < 1e-5), "true"),
+        ("head turns to its packet's yaw over 3 ticks", alloc::format!("{}", (hd.head_yaw - 90.0).abs() < 1e-3), "true"),
+        ("body drags behind a head turned past 50 degrees", alloc::format!("{}", (body_drag - 50.0).abs() < 1e-4), "true"),
+        ("swing progress lerps by the partial tick", alloc::format!("{}", (sw - 1.0 / 12.0).abs() < 1e-5), "true"),
+        ("swing ends after its ticks", alloc::format!("{}", s.swing.is_none() && s.swing_progress(0.0).is_none()), "true"),
     ]
 }

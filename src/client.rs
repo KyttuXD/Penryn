@@ -859,8 +859,10 @@ impl Game {
                 if p.id == play::C_MOVE_ENTITY_ROT {
                     e.on_ground = r.bool().unwrap_or(false);
                     let (yaw, pitch) = (r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0, r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0);
-                    let (pos, steps) = (e.target, e.steps.max(3));
-                    e.set_target(pos, yaw, pitch, steps);
+                    // moveOrInterpolateTo(yaw, pitch): the glide restarts from where the entity is
+                    // now, towards the same target position, over 3 steps (not cancelled).
+                    let pos = e.target;
+                    e.set_target(pos, yaw, pitch, 3);
                 } else {
                     // 26.3: on-ground in bit 0, the number of timed steps above it. Each delta is
                     // relative to the server's position (the last target), and each one counts
@@ -942,7 +944,19 @@ impl Game {
                 let id = r.varint().unwrap_or(0);
                 let h = r.u8().unwrap_or(0) as i8 as f32 * 360.0 / 256.0;
                 if let Some(e) = self.entities.get_mut(&id) {
-                    e.head_yaw = h;
+                    e.lerp_head_to(h);
+                }
+            }
+            // ClientboundAnimatePacket: 0 the main arm swings, 3 the off arm (LivingEntity.swing).
+            play::C_ANIMATE => {
+                let id = r.varint().unwrap_or(0);
+                let action = r.u8().unwrap_or(255);
+                if let Some(e) = self.entities.get_mut(&id) {
+                    match action {
+                        0 => e.swing_arm(false),
+                        3 => e.swing_arm(true),
+                        _ => {}
+                    }
                 }
             }
             play::C_DAMAGE_EVENT | play::C_HURT_ANIMATION => {
