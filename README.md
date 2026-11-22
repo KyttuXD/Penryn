@@ -41,6 +41,10 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
   textures that profile, for testing on offline servers.
 - **Sky as vanilla**: sun, moon phases, stars, fancy clouds, the sky and fog colours of each
   biome, and grass, leaves and water in their biome colours (blended).
+- **Weather as vanilla**: rain and snow falling around you where each biome rains or snows
+  (colder high up), the sky, fog and clouds greying under rain and thunder, rain sounds on the
+  ground or a roof, lightning bolts with their thunder and the sky's flash. The textures and
+  biome climates are in `weather.bin` (optional).
 - **Sound and music from your game**: every sound the server plays, plus the ones vanilla plays
   itself (footsteps, digging, breaking and placing blocks, buttons) with vanilla's volumes, pitch,
   distance fade and stereo, and the game's music every 10 to 20 minutes. sounds.bin (about
@@ -52,7 +56,7 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 ## Not done yet
 
 - No creative inventory screen (creative players get the survival one), no recipe book.
-- No weather or particles; no ambient cave sounds or biome music (music.game everywhere).
+- No particles (no rain splashes); no ambient cave sounds or biome music (music.game everywhere).
 - No settings screen: volume is fixed.
 - Block entities other than chests (signs' text, banners, heads, shulker boxes, bells) are drawn
   without their entity model.
@@ -148,6 +152,7 @@ E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
 | `src/render.rs` | meshing and drawing the world (OpenGL 1.5 fixed function) |
 | `src/entities.rs` | entities and their models |
 | `src/skins.rs` | players' skins and capes: profile textures, PNG decoding, the download thread |
+| `src/weather.rs` | rain, snow, thunder and lightning |
 | `src/gui.rs`, `screens.rs`, `lang.rs` | vanilla's GUI |
 | `src/play.rs`, `physics.rs` | the game window, input, movement, digging |
 | `src/sys.rs`, `sdl.rs`, `math.rs` | the C library, SDL2 and OpenGL, float maths (no libm) |

@@ -186,6 +186,7 @@ pub struct App {
     /// R on the death screen: one respawn request until the server answers.
     respawn_sent: bool,
     sky: crate::sky::Sky,
+    weather: crate::weather::Weather,
     /// The arm's swing: ticks into it (-1: none), as vanilla's 6-tick swing.
     swing_ticks: i32,
     /// The hand's lowering while a new item comes up: 1 lowered .. 0 raised, and last tick's.
@@ -298,6 +299,7 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
         music_delay: 100,
         respawn_sent: false,
         sky: crate::sky::Sky::new(),
+        weather: crate::weather::Weather::new(),
         swing_ticks: -1,
         equip: 0.0,
         prev_equip: 0.0,
@@ -317,6 +319,12 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
     let gui = sys::read_file(&format!("{}/gui.bin", crate::data_dir())).ok_or("cannot read gui.bin (see README.md)")?;
     app.gui = Some(Gui::load(&app.v.gl, &gui, app.r.atlas, app.r.atlas_size)?);
     drop(gui);
+    // Weather is optional: without weather.bin no rain or snow falls (the sky still greys).
+    if let Some(d) = sys::read_file(&format!("{}/weather.bin", crate::data_dir())) {
+        if app.weather.parse(&d, Some(&app.v.gl)).is_none() {
+            say!("weather.bin is of another version: no rain or snow");
+        }
+    }
     // Sound is optional: without sounds.bin (or an audio device) the game plays silent.
     app.audio = crate::audio::Audio::open(&app.v.sdl, &format!("{}/sounds.bin", crate::data_dir()));
     if app.audio.is_none() {
@@ -714,6 +722,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
     }
 
     fn tick(&mut self, g: &mut Game) -> Result<(), String> {
+        let eye = [self.mover.pos[0], self.mover.pos[1] + self.eye_height(), self.mover.pos[2]];
+        self.weather.tick(g, eye);
         // Screens follow what the server does: containers it opens or closes, death, respawn.
         if g.container.is_some() && !self.container_screen {
             self.container_screen = true;
@@ -1173,6 +1183,16 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let day = ((sun * 2.0 + 0.5).clamp(0.0, 1.0)) as f32;
         let dim = g.world.min_y >= 0 && g.world.height == 256;
         let sky = if dim { [0.2, 0.05, 0.05] } else { [0.47 * day + 0.02, 0.65 * day + 0.02, 1.0 * day + 0.06] };
+        // The weather greys the sky and fog, dims the daylight and pulls the fog in.
+        let (rain, thunder) = if dim { (0.0, 0.0) } else { self.weather.levels(g) };
+        let sky = if dim { sky } else { self.weather.sky_colour(sky, rain, thunder) };
+        // The weather dims the sky light (the rain columns' light); the clouds and stars have
+        // their own weather blends (sky.rs) on the clear day's values.
+        let rain_light = self.weather.daylight(day, rain, thunder);
+        (self.sky.rain, self.sky.thunder) = (rain, thunder);
+        self.r.rain_fog = if dim { 0.0 } else { self.weather.fog };
+        let mut world_view = [0f32; 16];
+        let world_view_ref = &mut world_view;
         let ents = self.entities.as_ref();
         let gl = &self.v.gl;
         let own = g.entity_id;
@@ -1198,6 +1218,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.view,
             sky,
             &mut |view| {
+                *world_view_ref = *view;
                 if let Some(t) = ents {
                     t.draw(gl, view, eye, entities, pf, own);
                     crate::skins::draw(gl, view, eye, entities, pf, own, t);
@@ -1213,6 +1234,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
             },
         );
+        // Rain, snow and lightning, over the water (vanilla: after the translucent terrain).
+        self.weather.draw(&self.v.gl, &world_view, &g.world, &g.blocks, eye, pf, rain, 0.2 + 0.8 * rain_light);
         let hit = if self.screen == Screen::Play { self.pick(g) } else { None };
         if let Some(hh) = hit {
             let s = g.world.get(hh.pos[0], hh.pos[1], hh.pos[2]);

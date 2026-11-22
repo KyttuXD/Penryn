@@ -30,6 +30,7 @@ mod skins;
 mod sky;
 mod net;
 mod sys;
+mod weather;
 mod wire;
 mod world;
 mod zlib;
@@ -235,6 +236,12 @@ fn selftest() -> Result<(), String> {
             }
         }
         Err(e) => say!("skip physics checks: {}", e),
+    }
+    // Weather: vanilla's randomness, and with weather.bin which biome rains or snows.
+    let wdata = sys::read_file(&alloc::format!("{}/weather.bin", data_dir()));
+    let wblocks = load_blocks().ok();
+    for (what, got, want) in weather::checks(wdata.as_deref(), wblocks.as_ref()) {
+        check(what, got, want);
     }
     if ok {
         Ok(())

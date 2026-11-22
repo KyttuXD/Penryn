@@ -32,6 +32,10 @@ impl JRand {
 
 pub struct Sky {
     stars: Vec<[f32; 3]>,
+    /// The rain and thunder levels (src/weather.rs): the sun, moon and stars fade behind the
+    /// rain, clouds grey.
+    pub rain: f32,
+    pub thunder: f32,
 }
 
 /// DimensionType.timeOfDay: the sun's angle as a fraction of a turn (0: noon... as vanilla).
@@ -73,7 +77,7 @@ impl Sky {
                 stars.push([(x + pz * ys - rb * yc) as f32, (y + py) as f32, (z + rb * ys + pz * yc) as f32]);
             }
         }
-        Sky { stars }
+        Sky { stars, rain: 0.0, thunder: 0.0 }
     }
 
     /// Stars, sun and moon around the eye (`view`: rotation only), behind everything.
@@ -97,13 +101,17 @@ impl Sky {
         let phase_names = ["full_moon", "waning_gibbous", "third_quarter", "waning_crescent", "new_moon", "waxing_crescent", "first_quarter", "waxing_gibbous"];
         let phase = phase_names[(day_time.div_euclid(24000).rem_euclid(8)) as usize];
         let moon = gui.sprite_uv(&alloc::format!("sky/moon/{}", phase));
+        // SkyRenderState.rainBrightness fades the sun and moon; the weather blends the stars'
+        // brightness to 0 (STAR_BRIGHTNESS, not times rainBrightness).
+        let rain_b = (1.0 - self.rain).clamp(0.0, 1.0);
+        let sm = [255, 255, 255, (rain_b * 255.0) as u8];
         if let Some(uv) = sun {
-            quad(&mut v, 30.0, 100.0, uv, [255; 4]);
+            quad(&mut v, 30.0, 100.0, uv, sm);
         }
         if let Some(uv) = moon {
-            quad(&mut v, 20.0, -100.0, [uv[2], uv[3], uv[0], uv[1]], [255; 4]);
+            quad(&mut v, 20.0, -100.0, [uv[2], uv[3], uv[0], uv[1]], sm);
         }
-        let star_b = ((1.0 - daylight) * 0.5).clamp(0.0, 1.0);
+        let star_b = ((1.0 - daylight) * 0.5).clamp(0.0, 1.0) * (1.0 - (self.rain - self.thunder)) * (1.0 - self.thunder);
         unsafe {
             (gl.MatrixMode)(MODELVIEW);
             (gl.LoadMatrixf)(view.as_ptr());
@@ -172,6 +180,23 @@ impl Sky {
         let y0 = 192.33 - eye[1];
         let y1 = y0 + 4.0;
         let base = [(255.0 * (0.1 + 0.9 * daylight)) as u8; 3];
+        // WeatherAttributes: the clouds blend to grey under rain, more under thunder.
+        let base = {
+            let mut c = [base[0] as f32, base[1] as f32, base[2] as f32];
+            let grey = |c: [f32; 3], b: f32, f: f32| {
+                let g = (c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11) * b;
+                [c[0] + (g - c[0]) * f, c[1] + (g - c[1]) * f, c[2] + (g - c[2]) * f]
+            };
+            let mix = |t: f32, a: [f32; 3], b: [f32; 3]| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+            let only_rain = self.rain - self.thunder;
+            if only_rain > 0.0 {
+                c = mix(only_rain, c, grey(c, 0.24, 0.5));
+            }
+            if self.thunder > 0.0 {
+                c = mix(self.thunder, c, grey(c, 0.095, 0.94));
+            }
+            [c[0] as u8, c[1] as u8, c[2] as u8]
+        };
         // Clouds fade out towards the edge of their range (not with the terrain's fog).
         let shade = |k: f32, d: f32| -> [u8; 4] {
             let fade = (1.0 - (d / radius as f32 - 0.6) / 0.4).clamp(0.0, 1.0);

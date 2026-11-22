@@ -68,6 +68,8 @@ pub struct Renderer {
     pub atlas_size: (f32, f32),
     /// The atlas' alpha, kept to extrude flat items held in the hand.
     pub atlas_alpha: Vec<u8>,
+    /// The rain's fog (AtmosphericFogEnvironment.rainFogMultiplier, 0 to 1): pulls the fog in.
+    pub rain_fog: f32,
 }
 
 /// Faces: normal, the four corners (0 min, 1 max per axis, counter-clockwise from outside),
@@ -106,6 +108,7 @@ impl Renderer {
             atlas: 0,
             atlas_size: (1.0, 1.0),
             atlas_alpha: Vec::new(),
+            rain_fog: 0.0,
         }
     }
 
@@ -454,8 +457,12 @@ impl Renderer {
             (gl.CullFace)(BACK);
             (gl.Enable)(FOG);
             (gl.Fogi)(FOG_MODE, LINEAR_FOG);
-            (gl.Fogf)(FOG_START, far * 0.55);
-            (gl.Fogf)(FOG_END, far * 0.95);
+            // Rain adds vanilla's environmental fog (0 to 1024 blocks, pulled in by 160 and
+            // 256 under full rain): already 17 % at the eye. One linear fog for both: from
+            // there to the render distance's end.
+            let (s0, e) = (far * 0.55, far * 0.95);
+            (gl.Fogf)(FOG_START, s0 + (-0.208 * e - s0) * self.rain_fog);
+            (gl.Fogf)(FOG_END, e);
             let fc = [sky[0], sky[1], sky[2], 1.0];
             (gl.Fogfv)(FOG_COLOR, fc.as_ptr());
             (gl.MatrixMode)(PROJECTION);

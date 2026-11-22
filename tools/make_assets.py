@@ -1411,9 +1411,41 @@ def main():
           % (len(sprites) - len(font_pages), len(glyphs), len(lang), gw, gh, len(item_icons),
              sum(1 for i in item_icons if i[0] == 1), sum(1 for i in item_icons if i[0] == 2)))
     make_sounds(res, out_dir, sound_names)
+    make_weather(res, assets, out_dir, reg)
     print("blocks.bin: %d states, %d blocks, %d quads; atlas %dx%d with %d textures%s"
           % (len(state_rows), len(blocks_out), len(quads), width, height, len(tiles),
              (", missing: " + ", ".join(sorted(missing))) if missing else ""))
+
+
+def make_weather(res, assets, out_dir, reg):
+    """weather.bin, "PNW1" (little-endian): u16 the lightning_bolt entity type id; rain.png and
+    snow.png (environment/) each as u16 width, u16 height, RGBA; then u32 biome count and per
+    biome: u8 name length, name, f32 temperature, u8 flags (1 has_precipitation, 2 the frozen
+    temperature modifier). Optional for Penryn: without it there is no rain or snow."""
+    bolt = reg["minecraft:entity_type"]["entries"]["minecraft:lightning_bolt"]["protocol_id"]
+    out = bytearray(b"PNW1" + struct.pack("<H", bolt))
+    for name in ("rain", "snow"):
+        img = png_decode(assets.read("textures/environment/%s.png" % name))
+        if img is None:
+            print("weather.bin: environment/%s.png missing: no weather" % name)
+            return
+        w, h, px = img
+        out += struct.pack("<HH", w, h) + bytes(px)
+    rows = []
+    bdir = os.path.join(res, "data", "minecraft", "worldgen", "biome")
+    for fn in sorted(os.listdir(bdir)):
+        if not fn.endswith(".json"):
+            continue
+        b = json.load(open(os.path.join(bdir, fn)))
+        flags = (1 if b.get("has_precipitation", True) else 0) | (2 if b.get("temperature_modifier") == "frozen" else 0)
+        rows.append(("minecraft:" + fn[:-5], float(b.get("temperature", 0.8)), flags))
+    out += struct.pack("<I", len(rows))
+    for name, t, flags in rows:
+        nb = name.encode()
+        out += struct.pack("<B", len(nb)) + nb + struct.pack("<fB", t, flags)
+    with open(os.path.join(out_dir, "weather.bin"), "wb") as f:
+        f.write(out)
+    print("weather.bin: rain and snow textures, %d biomes" % len(rows))
 
 
 def find_objects():

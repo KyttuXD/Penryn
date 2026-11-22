@@ -139,14 +139,18 @@ pub const ATLAS_MAGIC: &[u8; 4] = b"PNA1";
 pub const GUI_MAGIC: &[u8; 4] = b"PNG2";
 pub const ENTITIES_MAGIC: &[u8; 4] = b"PNE2";
 pub const SOUNDS_MAGIC: &[u8; 4] = b"PNS1";
+pub const WEATHER_MAGIC: &[u8; 4] = b"PNW1";
 
 /// Fetches the game files from the relay when they are missing or from another version.
 pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
     let dir = crate::data_dir();
     const FILES: [(&str, &[u8; 4]); 4] =
         [("blocks.bin", BLOCKS_MAGIC), ("atlas.bin", ATLAS_MAGIC), ("gui.bin", GUI_MAGIC), ("entities.bin", ENTITIES_MAGIC)];
+    // Small optional files: the game runs without them (no weather...).
+    const OPTIONAL: [(&str, &[u8; 4]); 1] = [("weather.bin", WEATHER_MAGIC)];
     let have = |n: &str, magic: &[u8; 4]| sys::read_head(&format!("{}/{}", dir, n), 4).map_or(false, |d| d == magic);
-    if FILES.iter().all(|(n, m)| have(n, m)) && (have("sounds.bin", SOUNDS_MAGIC) || relay.is_none()) {
+    let optional = OPTIONAL.iter().all(|(n, m)| have(n, m));
+    if FILES.iter().all(|(n, m)| have(n, m)) && ((have("sounds.bin", SOUNDS_MAGIC) && optional) || relay.is_none()) {
         return Ok(());
     }
     let Some(relay) = relay else {
@@ -169,6 +173,21 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
         }
         if !sys::write_file_private(&format!("{}/{}", dir, n), &r.body) {
             return Err(format!("cannot write {}/{}", dir, n));
+        }
+    }
+    for (n, magic) in OPTIONAL {
+        if have(n, magic) {
+            continue;
+        }
+        crate::say!("fetching {} from the relay ...", n);
+        match http::get(&relay.0, relay.1, &format!("/assets/{}", n), 60000) {
+            Ok(r) if r.status == 200 && r.body.get(..4) == Some(&magic[..]) => {
+                if !sys::write_file_private(&format!("{}/{}", dir, n), &r.body) {
+                    crate::warn!("cannot write {}/{}", dir, n);
+                }
+            }
+            Ok(_) => crate::warn!("the relay has no {} (update the relay): going without it", n),
+            Err(e) => crate::warn!("could not fetch {} ({}): going without it", n, e),
         }
     }
     // The sounds are optional: without them the game plays silent.
