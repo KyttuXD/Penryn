@@ -20,6 +20,7 @@ mod ids;
 mod lang;
 mod math;
 mod md5;
+mod mobs;
 mod nbt;
 mod physics;
 mod play;
@@ -230,6 +231,15 @@ fn selftest() -> Result<(), String> {
             }
         }
         Err(e) => say!("skip physics checks: {}", e),
+    }
+    // Mob looks (baby models, variants, layers, armour), from entities.bin.
+    match sys::read_file(&alloc::format!("{}/entities.bin", data_dir())).ok_or(String::from("no entities.bin")).and_then(|d| entities::EntityTable::parse(&d)) {
+        Ok(t) => {
+            for (what, got, want) in mobs::selftest_checks(&t) {
+                check(what, got, want);
+            }
+        }
+        Err(e) => say!("skip mob checks: {}", e),
     }
     if ok {
         Ok(())

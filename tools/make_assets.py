@@ -1152,186 +1152,8 @@ def main():
 
     SKINS = ["alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri"]
 
-    # ---- entities: each type's model (exported ModelPart tree) and texture
-    TEX_OF = {
-        "elder_guardian": "guardian_elder", "skeleton_horse": "horse/horse_skeleton",
-        "zombie_horse": "horse/horse_zombie", "ender_dragon": "enderdragon/dragon",
-        "mooshroom": "cow/red_mooshroom", "ocelot": "cat/ocelot", "trader_llama": "llama/creamy",
-        "llama": "llama/creamy", "giant": "zombie/zombie", "armor_stand": "armorstand/wood",
-        "arrow": "projectiles/arrow", "spectral_arrow": "projectiles/spectral_arrow",
-        "polar_bear": "bear/polarbear", "magma_cube": "slime/magmacube", "zombified_piglin": "piglin/zombified_piglin",
-        "piglin_brute": "piglin/piglin_brute", "wither_skeleton": "skeleton/wither_skeleton",
-        "glow_squid": "squid/glow_squid", "cave_spider": "spider/cave_spider", "iron_golem": "iron_golem/iron_golem",
-        "snow_golem": "snow_golem", "wolf": "wolf/wolf", "cat": "cat/tabby", "horse": "horse/horse_brown",
-        "fox": "fox/fox", "rabbit": "rabbit/brown", "parrot": "parrot/parrot_red_blue", "bee": "bee/bee",
-        "panda": "panda/panda", "frog": "frog/temperate_frog", "axolotl": "axolotl/axolotl_lucy",
-        "tropical_fish": "fish/tropical_a", "cod": "fish/cod", "salmon": "fish/salmon", "pufferfish": "fish/pufferfish",
-        "boat": "boat/oak", "chest_boat": "chest_boat/oak", "minecart": "minecart",
-    }
-    ent_files = [x[len("assets/minecraft/textures/"):-4] for x in listing if x.startswith("assets/minecraft/textures/entity/") and x.endswith(".png")] \
-        if assets.zip else []
-    if not assets.zip:
-        base = os.path.join(res, "assets", "minecraft", "textures")
-        for root, _, files in os.walk(os.path.join(base, "entity")):
-            for fn in files:
-                if fn.endswith(".png"):
-                    ent_files.append(os.path.relpath(os.path.join(root, fn), base)[:-4].replace(os.sep, "/"))
-    ent_set = set(ent_files)
-
-    def entity_texture(short):
-        if short in TEX_OF and "entity/" + TEX_OF[short] in ent_set:
-            return "entity/" + TEX_OF[short]
-        if short.endswith("_minecart") and "entity/minecart" in ent_set:
-            return "entity/minecart"
-        for c in ("entity/%s" % short, "entity/%s/%s" % (short, short), "entity/%s/%s_temperate" % (short, short),
-                  "entity/%s/temperate_%s" % (short, short)):
-            if c in ent_set:
-                return c
-        flat = short.replace("_", "")
-        cands = [f for f in ent_files if f.rsplit("/", 1)[-1] in (short, flat)]
-        if cands:
-            return sorted(cands, key=len)[0]
-        cands = sorted(f for f in ent_files if f.startswith("entity/%s/" % short))
-        warm = [f for f in cands if "temperate" in f]
-        return (warm or cands or [None])[0]
-
-    etypes = [k for k, _ in sorted(reg["minecraft:entity_type"]["entries"].items(), key=lambda kv: kv[1]["protocol_id"])]
-    edims = json.load(open(os.path.join(res, "entity-types.json")))
-    ent_models, ent_model_index, ent_rows = [], {}, []
-    ent_sprites = {}
-    for et in etypes:
-        short = et.split(":", 1)[1]
-        key = et + "#main"
-        if short == "player":
-            key = None  # players: the skins in gui.bin
-        mi = -1
-        if key and key in emodels:
-            if key not in ent_model_index:
-                parts = []
-
-                def walk2(name, part, parent):
-                    idx = len(parts)
-                    parts.append((name, parent, part.get("pose", [0] * 6 + [1] * 3), part.get("polygons", []), part.get("normals", [])))
-                    for cn, child in sorted(part.get("children", {}).items()):
-                        walk2(cn, child, idx)
-
-                walk2("root", emodels[key], -1)
-                ent_model_index[key] = len(ent_models)
-                ent_models.append((key, parts))
-            mi = ent_model_index[key]
-        tex = entity_texture(short) if mi >= 0 else None
-        if tex and tex not in ent_sprites:
-            img = png_decode(assets.read("textures/" + tex + ".png"))
-            if img:
-                ent_sprites[tex] = img
-        dims = edims.get(et, {})
-        ent_rows.append((mi, tex if tex in ent_sprites else None, float(dims.get("width", 0.6)), float(dims.get("height", 1.8))))
-    # Render layers drawn over a type's model: (type, model, texture, kind 1 wool / 2 undercoat).
-    LAYERS = [("sheep", "minecraft:sheep#wool", "entity/sheep/sheep_wool", 1),
-              ("sheep", "minecraft:sheep#wool_undercoat", "entity/sheep/sheep_wool_undercoat", 2)]
-    ent_layers = []
-    for short, key, tex, lk in LAYERS:
-        if key not in emodels or "minecraft:" + short not in etypes:
-            continue
-        if key not in ent_model_index:
-            parts = []
-
-            def walk3(name, part, parent):
-                idx = len(parts)
-                parts.append((name, parent, part.get("pose", [0] * 6 + [1] * 3), part.get("polygons", []), part.get("normals", [])))
-                for cn, child in sorted(part.get("children", {}).items()):
-                    walk3(cn, child, idx)
-
-            walk3("root", emodels[key], -1)
-            ent_model_index[key] = len(ent_models)
-            ent_models.append((key, parts))
-        if tex not in ent_sprites:
-            img = png_decode(assets.read("textures/" + tex + ".png"))
-            if not img:
-                continue
-            ent_sprites[tex] = img
-        ent_layers.append((etypes.index("minecraft:" + short), ent_model_index[key], tex, lk))
-    # Players: both player models and the 18 default skins (DefaultPlayerSkin order).
-    player_models = []
-    for key in ("minecraft:player_slim#main", "minecraft:player#main"):
-        if key not in ent_model_index and key in emodels:
-            parts = []
-
-            def walk4(name, part, parent):
-                idx = len(parts)
-                parts.append((name, parent, part.get("pose", [0] * 6 + [1] * 3), part.get("polygons", []), part.get("normals", [])))
-                for cn, child in sorted(part.get("children", {}).items()):
-                    walk4(cn, child, idx)
-
-            walk4("root", emodels[key], -1)
-            ent_model_index[key] = len(ent_models)
-            ent_models.append((key, parts))
-        player_models.append(ent_model_index.get(key, -1))
-    skin_paths = []
-    for kind in ("slim", "wide"):
-        for n in SKINS:
-            tex = "entity/player/%s/%s" % (kind, n)
-            img = png_decode(assets.read("textures/" + tex + ".png"))
-            if img:
-                ent_sprites[tex] = img
-                skin_paths.append(tex)
-    # pack
-    eorder = sorted(ent_sprites, key=lambda k: -ent_sprites[k][1])
-    ew, eplaced = 2048, {}
-    x = y = shelf = 0
-    for k in eorder:
-        w, h, _ = ent_sprites[k]
-        if x + w > ew:
-            x, y, shelf = 0, y + shelf, 0
-        eplaced[k] = (x, y)
-        x += w
-        shelf = max(shelf, h)
-    eh = 1
-    while eh < y + shelf:
-        eh *= 2
-    eatlas = bytearray(ew * eh * 4)
-    for k, (px0, py0) in eplaced.items():
-        w, h, px = ent_sprites[k]
-        for yy in range(h):
-            o = ((py0 + yy) * ew + px0) * 4
-            eatlas[o:o + w * 4] = px[yy * w * 4:(yy + 1) * w * 4]
-    with open(os.path.join(out_dir, "entities.bin"), "wb") as f:
-        f.write(b"PNE2" + struct.pack("<HH", ew, eh) + bytes(eatlas))
-        f.write(struct.pack("<I", len(ent_models)))
-        for key, parts in ent_models:
-            kb = key.encode()
-            f.write(bytes([len(kb)]) + kb + struct.pack("<I", len(parts)))
-            for name, parent, pose, polys, normals in parts:
-                nb = name.encode()
-                f.write(bytes([len(nb)]) + nb + struct.pack("<h9f", parent, *[float(v) for v in (list(pose) + [1, 1, 1])[:9]]))
-                f.write(struct.pack("<H", len(polys)))
-                for i, poly in enumerate(polys):
-                    for vtx in poly[:4]:
-                        f.write(struct.pack("<5f", *[float(v) for v in vtx[:5]]))
-                    nrm = normals[i] if i < len(normals) else [0, 0, 1]
-                    f.write(struct.pack("<3f", *[float(v) for v in nrm]))
-        f.write(struct.pack("<I", len(ent_rows)))
-        for mi, tex, ewid, ehei in ent_rows:
-            if tex:
-                px0, py0 = eplaced[tex]
-                w, h, _ = ent_sprites[tex]
-                f.write(struct.pack("<hHHHHff", mi, px0, py0, w, h, ewid, ehei))
-            else:
-                f.write(struct.pack("<hHHHHff", -1, 0, 0, 0, 0, ewid, ehei))
-    with open(os.path.join(out_dir, "entities.bin"), "ab") as f:
-        f.write(struct.pack("<I", len(ent_layers)))
-        for ti, mi, tex, lk in ent_layers:
-            px0, py0 = eplaced[tex]
-            w, h, _ = ent_sprites[tex]
-            f.write(struct.pack("<HhHHHHB", ti, mi, px0, py0, w, h, lk))
-        f.write(struct.pack("<hhI", player_models[0], player_models[1], len(skin_paths)))
-        for tex in skin_paths:
-            px0, py0 = eplaced[tex]
-            w, h, _ = ent_sprites[tex]
-            f.write(struct.pack("<HHHH", px0, py0, w, h))
-        f.write(struct.pack("<i", etypes.index("minecraft:player") if "minecraft:player" in etypes else -1))
-    print("entities.bin: %d types, %d with a model and texture, atlas %dx%d"
-          % (len(ent_rows), sum(1 for r in ent_rows if r[1]), ew, eh))
+    # ---- entities: each type's models, textures and equipment (make_entities)
+    make_entities(res, assets, reg, out_dir)
 
     # Shelf-pack the sprites into a power-of-two atlas.
     order = sorted(sprites, key=lambda k: -sprites[k][1])
@@ -1414,6 +1236,279 @@ def main():
     print("blocks.bin: %d states, %d blocks, %d quads; atlas %dx%d with %d textures%s"
           % (len(state_rows), len(blocks_out), len(quads), width, height, len(tiles),
              (", missing: " + ", ".join(sorted(missing))) if missing else ""))
+
+
+# The default textures of entity types whose texture is not at entity/<type>.
+ENTITY_TEX_OF = {
+    "elder_guardian": "guardian_elder", "skeleton_horse": "horse/horse_skeleton",
+    "zombie_horse": "horse/horse_zombie", "ender_dragon": "enderdragon/dragon",
+    "mooshroom": "cow/mooshroom_red", "ocelot": "cat/ocelot", "trader_llama": "llama/llama_creamy",
+    "llama": "llama/llama_creamy", "giant": "zombie/zombie", "armor_stand": "armorstand/wood",
+    "arrow": "projectiles/arrow", "spectral_arrow": "projectiles/spectral_arrow",
+    "polar_bear": "bear/polarbear", "magma_cube": "slime/magmacube", "zombified_piglin": "piglin/zombified_piglin",
+    "piglin_brute": "piglin/piglin_brute", "wither_skeleton": "skeleton/wither_skeleton",
+    "glow_squid": "squid/glow_squid", "cave_spider": "spider/cave_spider", "iron_golem": "iron_golem/iron_golem",
+    "snow_golem": "snow_golem", "wolf": "wolf/wolf", "cat": "cat/cat_tabby", "horse": "horse/horse_brown",
+    "fox": "fox/fox", "rabbit": "rabbit/rabbit_brown", "parrot": "parrot/parrot_red_blue", "bee": "bee/bee",
+    "panda": "panda/panda", "frog": "frog/frog_temperate", "axolotl": "axolotl/axolotl_lucy",
+    "tropical_fish": "fish/tropical_a", "cod": "fish/cod", "salmon": "fish/salmon", "pufferfish": "fish/pufferfish",
+    "boat": "boat/oak", "chest_boat": "chest_boat/oak", "minecart": "minecart",
+    "pig": "pig/pig_temperate", "cow": "cow/cow_temperate", "chicken": "chicken/chicken_temperate",
+}
+# Entity texture folders Penryn draws no entity with (block entities, items, effects).
+ENTITY_TEX_SKIP = ("banner/", "shield/", "end_portal", "conduit/", "decorated_pot/", "cushion/", "bell/", "beacon",
+                   "enchantment/", "chest/", "experience/", "fishing/", "signs/", "shulker/shulker_")
+# AgeableMob baby dimensions (the classes' BABY_DIMENSIONS, or the adult's scaled): (w, h) or scale.
+BABY_DIMS = {
+    "pig": (0.45, 0.45), "cow": (0.45, 0.7), "mooshroom": (0.45, 0.7), "sheep": (0.45, 0.65), "chicken": (0.3, 0.4),
+    "rabbit": (0.24, 0.4), "zombie_horse": 0.7, "skeleton_horse": 0.7, "horse": 0.7, "donkey": 0.5, "mule": 0.5,
+    "llama": 0.5, "trader_llama": 0.5, "goat": (0.45, 0.65), "panda": 0.5, "polar_bear": (0.7, 0.7), "fox": 0.6,
+    "wolf": (0.3, 0.425), "cat": (0.3, 0.35), "ocelot": (0.3, 0.35), "bee": 0.5, "turtle": 0.3, "armadillo": 0.6,
+    "axolotl": (0.375, 0.21), "squid": (0.5, 0.5), "glow_squid": (0.5, 0.5), "dolphin": 0.65,
+    "villager": (0.49, 0.98), "wandering_trader": 0.5, "zombie": (0.49, 0.98), "husk": (0.49, 0.98),
+    "drowned": (0.49, 0.98), "zombie_villager": (0.49, 0.98), "camel": (0.95, 1.4), "happy_ghast": 0.2375,
+    "sniffer": 0.5, "piglin": (0.49, 0.98), "zombified_piglin": (0.49, 0.98), "hoglin": (0.75, 0.85),
+    "zoglin": (0.75, 0.85), "strider": (0.45, 0.85), "nautilus": 0.5,
+}
+# ClientboundSetEquipmentPacket's slots (EquipmentSlot order).
+EQUIP_SLOTS = {"mainhand": 0, "offhand": 1, "feet": 2, "legs": 3, "chest": 4, "head": 5, "body": 6, "saddle": 7}
+PLAYER_SKINS = ["alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri"]
+
+
+def make_entities(res, assets, reg, out_dir):
+    """entities.bin, "PNE3": every entity texture in one atlas (by name), every entity model
+    layer (vanilla's ModelPart trees, exported by horizon-prepare, by layer name), each entity
+    type's default model, texture, size and baby size, the player models and default skins,
+    the villager types and professions, the equipment assets' layers, and each item's
+    equipment slot, asset and third-person transform."""
+    emodels = json.load(open(os.path.join(res, "entity-models.json")))
+    edims = json.load(open(os.path.join(res, "entity-types.json")))
+    items_json = json.load(open(os.path.join(res, "items.json")))
+    etypes = [k for k, _ in sorted(reg["minecraft:entity_type"]["entries"].items(), key=lambda kv: kv[1]["protocol_id"])]
+    items = [k for k, _ in sorted(reg["minecraft:item"]["entries"].items(), key=lambda kv: kv[1]["protocol_id"])]
+
+    def ordered(name):
+        return [k.split(":", 1)[1] for k, _ in sorted(reg.get(name, {}).get("entries", {}).items(),
+                                                      key=lambda kv: kv[1]["protocol_id"])]
+
+    # Every entity texture.
+    if assets.zip:
+        ent_files = [x[len("assets/minecraft/textures/"):-4] for x in assets.zip.namelist()
+                     if x.startswith("assets/minecraft/textures/entity/") and x.endswith(".png")]
+    else:
+        ent_files = []
+        base = os.path.join(res, "assets", "minecraft", "textures")
+        for root, _, files in os.walk(os.path.join(base, "entity")):
+            for fn in files:
+                if fn.endswith(".png"):
+                    ent_files.append(os.path.relpath(os.path.join(root, fn), base)[:-4].replace(os.sep, "/"))
+    ent_set = set(ent_files)
+    sprites = {}
+    for tex in sorted(ent_files):
+        if any(tex[len("entity/"):].startswith(s) for s in ENTITY_TEX_SKIP):
+            continue
+        img = png_decode(assets.read("textures/" + tex + ".png"))
+        if img:
+            sprites[tex] = img
+
+    def entity_texture(short):
+        if short in ENTITY_TEX_OF and "entity/" + ENTITY_TEX_OF[short] in sprites:
+            return "entity/" + ENTITY_TEX_OF[short]
+        if short.endswith("_minecart") and "entity/minecart" in sprites:
+            return "entity/minecart"
+        for c in ("entity/%s" % short, "entity/%s/%s" % (short, short), "entity/%s/%s_temperate" % (short, short),
+                  "entity/%s/temperate_%s" % (short, short)):
+            if c in sprites:
+                return c
+        flat = short.replace("_", "")
+        cands = [f for f in sprites if f.rsplit("/", 1)[-1] in (short, flat)]
+        if cands:
+            return sorted(cands, key=len)[0]
+        cands = sorted(f for f in sprites if f.startswith("entity/%s/" % short))
+        warm = [f for f in cands if "temperate" in f]
+        return (warm or cands or [None])[0]
+
+    # Every model layer, by name.
+    ent_models, model_index = [], {}
+    for key in sorted(emodels):
+        parts = []
+
+        def walk(name, part, parent):
+            idx = len(parts)
+            parts.append((name, parent, part.get("pose", [0] * 6 + [1] * 3), part.get("polygons", []), part.get("normals", [])))
+            for cn, child in sorted(part.get("children", {}).items()):
+                walk(cn, child, idx)
+
+        walk("root", emodels[key], -1)
+        model_index[key] = len(ent_models)
+        ent_models.append((key, parts))
+
+    rows = []
+    for et in etypes:
+        short = et.split(":", 1)[1]
+        key = et + "#main"
+        mi = model_index.get(key, -1) if short != "player" else -1
+        tex = entity_texture(short) if mi >= 0 else None
+        dims = edims.get(et, {})
+        w, h = float(dims.get("width", 0.6)), float(dims.get("height", 1.8))
+        b = BABY_DIMS.get(short)
+        bw, bh = (w * b, h * b) if isinstance(b, float) else (b if b else (w, h))
+        baby_index = 17 if short == "piglin" else (16 if b else 0)
+        rows.append((mi, tex, w, h, bw, bh, baby_index, short))
+    player_models = [model_index.get(k, -1) for k in ("minecraft:player_slim#main", "minecraft:player#main")]
+    skin_paths = [t for t in ("entity/player/%s/%s" % (kind, n) for kind in ("slim", "wide") for n in PLAYER_SKINS) if t in sprites]
+
+    # Equipment assets: their layers by layer type, (texture, colour when undyed).
+    assets_list, asset_index = [], {}
+    for it in items:
+        eq = (items_json.get(it) or {}).get("minecraft:equippable") or {}
+        aid = eq.get("asset_id")
+        if not aid or aid in asset_index:
+            continue
+        d = assets.json("equipment/" + aid.split(":", 1)[1] + ".json") or {}
+        layers = []
+        for ltype, lst in sorted((d.get("layers") or {}).items()):
+            out = []
+            for l in lst:
+                tex = "entity/equipment/%s/%s" % (ltype, l.get("texture", "").split(":", 1)[-1])
+                dye = l.get("dyeable")
+                undyed = 0
+                if isinstance(dye, dict):
+                    undyed = 0xFF000000 | ((dye.get("color_when_undyed", -1) & 0xFFFFFF) if "color_when_undyed" in dye else 0xFFFFFF)
+                if tex in sprites:
+                    out.append((tex, undyed))
+            if out:
+                layers.append((ltype, out))
+        asset_index[aid] = len(assets_list)
+        assets_list.append((aid.split(":", 1)[1], layers))
+
+    # Each item's model display.thirdperson_righthand (ItemInHandLayer), as gui.bin's hands.
+    def find_model(m, depth=0):
+        if not isinstance(m, dict) or depth > 12:
+            return None
+        t = m.get("type", "minecraft:model")
+        if t == "minecraft:model":
+            return m.get("model")
+        if t == "minecraft:special":
+            return m.get("base")
+        for key in ("fallback", "on_false", "on_true", "model"):
+            if isinstance(m.get(key), dict):
+                r = find_model(m[key], depth + 1)
+                if r:
+                    return r
+        for key in ("cases", "entries", "models"):
+            for c in m.get(key, []) or []:
+                r = find_model(c.get("model", c) if isinstance(c, dict) else c, depth + 1)
+                if r:
+                    return r
+        return None
+
+    shown = {}
+
+    def third(ref):
+        ref = ref.split(":", 1)[-1]
+        start = ref
+        if start in shown:
+            return shown[start]
+        out = ([0, 0, 0], [0, 0, 0], [1, 1, 1])
+        for _ in range(16):
+            m = assets.json("models/" + ref + ".json") or {}
+            g = m.get("display", {}).get("thirdperson_righthand")
+            if g:
+                out = (g.get("rotation", [0, 0, 0]), g.get("translation", [0, 0, 0]), g.get("scale", [1, 1, 1]))
+                break
+            if "parent" not in m:
+                break
+            ref = m["parent"].split(":", 1)[-1]
+        shown[start] = out
+        return out
+
+    item_rows = []
+    for it in items:
+        eq = (items_json.get(it) or {}).get("minecraft:equippable") or {}
+        slot = EQUIP_SLOTS.get(eq.get("slot"), 0xFF)
+        asset = asset_index.get(eq.get("asset_id"), 0xFFFF)
+        d = assets.json("items/" + it.split(":", 1)[1] + ".json")
+        ref = find_model(d.get("model")) if d else None
+        rot, tr, sc = third(ref) if ref else ([0, 0, 0], [0, 3, 1], [0.55, 0.55, 0.55])
+        item_rows.append((slot, asset, list(rot) + list(tr) + list(sc)))
+
+    # Shelf-pack the textures, tallest first.
+    eorder = sorted(sprites, key=lambda k: (-sprites[k][1], k))
+    ew, eplaced = 2048, {}
+    x = y = shelf = 0
+    for k in eorder:
+        w, h, _ = sprites[k]
+        if x + w > ew:
+            x, y, shelf = 0, y + shelf, 0
+        eplaced[k] = (x, y)
+        x += w
+        shelf = max(shelf, h)
+    eh = 1
+    while eh < y + shelf:
+        eh *= 2
+    eatlas = bytearray(ew * eh * 4)
+    for k, (px0, py0) in eplaced.items():
+        w, h, px = sprites[k]
+        for yy in range(h):
+            o = ((py0 + yy) * ew + px0) * 4
+            eatlas[o:o + w * 4] = px[yy * w * 4:(yy + 1) * w * 4]
+
+    def rect(tex):
+        px0, py0 = eplaced[tex]
+        w, h, _ = sprites[tex]
+        return struct.pack("<HHHH", px0, py0, w, h)
+
+    def sb(s):
+        b = s.encode()[:255]
+        return bytes([len(b)]) + b
+
+    with open(os.path.join(out_dir, "entities.bin"), "wb") as f:
+        f.write(b"PNE3" + struct.pack("<HH", ew, eh) + bytes(eatlas))
+        f.write(struct.pack("<I", len(ent_models)))
+        for key, parts in ent_models:
+            kb = key.encode()
+            f.write(bytes([len(kb)]) + kb + struct.pack("<I", len(parts)))
+            for name, parent, pose, polys, normals in parts:
+                nb = name.encode()
+                f.write(bytes([len(nb)]) + nb + struct.pack("<h9f", parent, *[float(v) for v in (list(pose) + [1, 1, 1])[:9]]))
+                f.write(struct.pack("<H", len(polys)))
+                for i, poly in enumerate(polys):
+                    for vtx in poly[:4]:
+                        f.write(struct.pack("<5f", *[float(v) for v in vtx[:5]]))
+                    nrm = normals[i] if i < len(normals) else [0, 0, 1]
+                    f.write(struct.pack("<3f", *[float(v) for v in nrm]))
+        f.write(struct.pack("<I", len(rows)))
+        for mi, tex, w, h, bw, bh, bi, short in rows:
+            f.write(struct.pack("<h", mi if tex else -1) + (rect(tex) if tex else bytes(8)))
+            f.write(struct.pack("<ffffB", w, h, bw, bh, bi) + sb(short) + sb(tex or ""))
+        f.write(struct.pack("<hhI", player_models[0], player_models[1], len(skin_paths)))
+        for tex in skin_paths:
+            f.write(rect(tex))
+        f.write(struct.pack("<i", etypes.index("minecraft:player") if "minecraft:player" in etypes else -1))
+        f.write(struct.pack("<I", len(eorder)))
+        for tex in sorted(eorder):
+            f.write(sb(tex) + rect(tex))
+        # The villager types and professions, each with its texture's hat (VillagerMetadataSection:
+        # 0 none, 1 partial, 2 full).
+        for lst, folder in ((ordered("minecraft:villager_type"), "type"), (ordered("minecraft:villager_profession"), "profession")):
+            f.write(struct.pack("<H", len(lst)))
+            for n in lst:
+                meta = assets.json("textures/entity/villager/%s/%s.png.mcmeta" % (folder, n)) or {}
+                hat = {"partial": 1, "full": 2}.get((meta.get("villager") or {}).get("hat"), 0)
+                f.write(sb(n) + bytes([hat]))
+        f.write(struct.pack("<H", len(assets_list)))
+        for name, layers in assets_list:
+            f.write(sb(name) + bytes([len(layers)]))
+            for ltype, lst in layers:
+                f.write(sb(ltype) + bytes([len(lst)]))
+                for tex, undyed in lst:
+                    f.write(sb(tex) + struct.pack("<I", undyed))
+        f.write(struct.pack("<I", len(item_rows)))
+        for slot, asset, d in item_rows:
+            f.write(struct.pack("<BH9f", slot, asset, *[float(v) for v in d]))
+    print("entities.bin: %d types, %d with a model and texture, %d models, %d textures, %d equipment assets, atlas %dx%d"
+          % (len(rows), sum(1 for r in rows if r[1] and r[0] >= 0), len(ent_models), len(sprites), len(assets_list), ew, eh))
 
 
 def find_objects():

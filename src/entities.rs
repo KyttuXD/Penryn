@@ -1,14 +1,18 @@
 //! Entities the server tracks for us, and drawing them as vanilla does: each type's own model
 //! (vanilla's ModelPart tree, exported by horizon-prepare) with its texture, turned by its
 //! body yaw, the head by its head yaw and pitch, legs and arms swinging as it walks
-//! (HumanoidModel / QuadrupedModel.setupAnim). Dropped items float and spin as icons.
+//! (HumanoidModel / QuadrupedModel.setupAnim), falling over when it dies
+//! (LivingEntityRenderer.setupRotations) and red while hurt or dying. Which model and textures
+//! a mob wears (baby models, variants, render layers, armour) is `mobs::look`; held items and
+//! name tags are drawn here too. Dropped items float and spin as icons.
 
-use crate::gui::{parse_models, rd16, Model};
+use crate::gui::{parse_models, rd16, rd32, Model};
 use crate::math;
 use crate::sdl::*;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::ffi::c_void;
 
 pub struct Entity {
@@ -28,9 +32,25 @@ pub struct Entity {
     pub hurt: i32,
     /// A dropped item's stack.
     pub item: Option<(i32, i32)>,
-    /// Its byte and VarInt entity data values, by index (a sheep's wool is 18 in 26.3).
+    /// Its byte, VarInt and VarLong entity data values, by index (a sheep's wool is 18 in 26.3).
     pub data: BTreeMap<u8, i64>,
     pub age: u32,
+    /// ClientboundSetEquipmentPacket: per EquipmentSlot (main hand, off hand, feet, legs, chest,
+    /// head, body, saddle) the item and count.
+    pub equipment: [Option<(i32, i32)>; 8],
+    /// DATA_CUSTOM_NAME, as plain text.
+    pub custom_name: Option<String>,
+    /// DATA_HEALTH_ID once the server sends it (a full-health mob's is never sent).
+    pub health: Option<f32>,
+    /// LivingEntity.deathTime: ticks since its health reached 0.
+    pub death_time: i32,
+    /// VillagerData: type, profession (registry ids) and level.
+    pub villager: [i32; 3],
+    /// The entry of its variant registry (cat, cow, wolf, frog, pig, chicken, zombie nautilus),
+    /// -1 for none sent.
+    pub variant: i32,
+    /// Bumped whenever something its looks depend on changes.
+    pub version: u32,
 }
 
 impl Entity {
@@ -52,11 +72,28 @@ impl Entity {
             item: None,
             data: BTreeMap::new(),
             age: 0,
+            equipment: [None; 8],
+            custom_name: None,
+            health: None,
+            death_time: 0,
+            villager: [0, 0, 1],
+            variant: -1,
+            version: 0,
         }
     }
 
+    /// Its data value at `index` (0 when not sent).
+    pub fn d(&self, index: u8) -> i64 {
+        self.data.get(&index).copied().unwrap_or(0)
+    }
+
+    /// LivingEntity.isDeadOrDying.
+    pub fn dying(&self) -> bool {
+        self.health.map_or(false, |h| h <= 0.0)
+    }
+
     /// The client tick: walk animation from the distance moved (LivingEntity.calculateEntityAnimation),
-    /// the body turning towards where the head looks.
+    /// the body turning towards where the head looks, the death time.
     pub fn tick(&mut self) {
         let (dx, dz) = (self.pos[0] - self.prev[0], self.pos[2] - self.prev[2]);
         let dist = math::sqrt(dx * dx + dz * dz) as f32;
@@ -73,9 +110,17 @@ impl Entity {
         } else {
             d = 0.0;
         }
-        self.body_yaw += d;
+        if self.death_time == 0 {
+            self.body_yaw += d;
+        }
         if self.hurt > 0 {
             self.hurt -= 1;
+        }
+        // LivingEntity.tickDeath: the client counts too (the server removes it at 20).
+        if self.dying() {
+            self.death_time = (self.death_time + 1).min(20);
+        } else {
+            self.death_time = 0;
         }
         self.age += 1;
         self.prev = self.pos;
@@ -87,26 +132,68 @@ fn wrap_deg(a: f32) -> f32 {
     (math::wrap(a as f64 + 180.0, 360.0) - 180.0) as f32
 }
 
+/// One entity type as entities.bin describes it.
+pub struct TypeInfo {
+    pub name: String,
+    /// Its `#main` model (-1: none) and default texture.
+    pub model: i16,
+    pub rect: [u16; 4],
+    pub tex: String,
+    /// The hitbox (EntityType.dimensions) and a baby's.
+    pub size: (f32, f32),
+    pub baby_size: (f32, f32),
+    /// The entity data index of its baby flag (AgeableMob.DATA_BABY_ID, the zombies' and the
+    /// piglins'), 0 if it is never a baby.
+    pub baby_index: u8,
+}
+
+/// An equipment asset: its layers by layer type (humanoid, humanoid_leggings, horse_body...),
+/// each texture with the colour it has when undyed (0: not dyeable).
+pub struct EquipAsset {
+    pub name: String,
+    pub layers: Vec<(String, Vec<([u16; 4], u32)>)>,
+}
+
+/// One model drawn with one texture: what `mobs::look` gives for an entity.
+#[derive(Clone, Copy)]
+pub struct Draw {
+    pub model: u16,
+    pub rect: [u16; 4],
+    /// RGB multiplied in.
+    pub tint: u32,
+    /// Drawn on an invisible entity too (armour).
+    pub worn: bool,
+}
+
 pub struct EntityTable {
     tex: u32,
     aw: f32,
     ah: f32,
     pub models: Vec<Model>,
-    /// Per entity type: model index (-1: none) and texture rectangle.
-    pub types: Vec<(i16, [u16; 4])>,
-    /// Per entity type: its hitbox width and height (EntityType.dimensions).
-    pub sizes: Vec<(f32, f32)>,
-    /// Render layers: (type, model, texture rectangle, kind: 1 wool, 2 undercoat).
-    pub layers: Vec<(usize, usize, [u16; 4], u8)>,
+    pub model_names: BTreeMap<String, u16>,
+    pub types: Vec<TypeInfo>,
     /// The slim and wide player models, and the 18 default skins (9 slim, then 9 wide).
     pub player_models: [i16; 2],
     pub skins: Vec<[u16; 4]>,
     /// The `minecraft:player` entity type id.
     pub player_type: i32,
+    /// Every entity texture by name ("entity/cow/cow_warm").
+    pub textures: BTreeMap<String, [u16; 4]>,
+    pub villager_types: Vec<String>,
+    pub villager_professions: Vec<String>,
+    /// Their textures' hats (VillagerMetadataSection.Hat: 0 none, 1 partial, 2 full).
+    pub villager_hats: [Vec<u8>; 2],
+    pub equip_assets: Vec<EquipAsset>,
+    /// Per item: its equippable slot (0xFF none) and asset (0xFFFF none), and its model's
+    /// display.thirdperson_righthand (rotation, translation, scale).
+    pub item_equip: Vec<(u8, u16)>,
+    pub item_third: Vec<[f32; 9]>,
+    /// The looks of the entities drawn lately, by entity id: (version key, draws).
+    cache: RefCell<BTreeMap<i32, (u32, Vec<Draw>)>>,
 }
 
 /// DyeColor.textureDiffuseColor, by dye id.
-const DYE: [u32; 16] = [
+pub const DYE: [u32; 16] = [
     0xF9FFFE, 0xF9801D, 0xC74EBD, 0x3AB3DA, 0xFED83D, 0x80C71F, 0xF38BAA, 0x474F52, 0x9D9D97, 0x169C9C, 0x8932B8, 0x3C44AA,
     0x835432, 0x5E7C16, 0xB02E26, 0x1D1D21,
 ];
@@ -117,6 +204,69 @@ struct V {
     p: [f32; 3],
     uv: [f32; 2],
     c: [u8; 4],
+}
+
+/// What drawing entities needs from the rest of the game.
+pub struct DrawCx<'a> {
+    pub variants: &'a crate::mobs::Variants,
+    /// Player names by UUID (the tab list).
+    pub names: &'a BTreeMap<[u8; 16], String>,
+    pub game_time: i64,
+    pub icons: &'a [crate::gui::Icon],
+    pub blocks: &'a crate::blocks::Blocks,
+    pub atlas: u32,
+    pub atlas_size: (f32, f32),
+    pub gui: Option<&'a crate::gui::Gui>,
+    /// The camera's look (degrees), and the reach for the entity under the crosshair.
+    pub yaw: f32,
+    pub pitch: f32,
+    pub reach: f64,
+}
+
+type M = [[f64; 4]; 3];
+
+fn mul(a: &M, b: &M) -> M {
+    let mut r = [[0.0; 4]; 3];
+    for i in 0..3 {
+        for j in 0..4 {
+            r[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + if j == 3 { a[i][3] } else { 0.0 };
+        }
+    }
+    r
+}
+
+fn rot(axis: usize, a: f64) -> M {
+    let (s, c) = (math::sin(a), math::cos(a));
+    match axis {
+        0 => [[1.0, 0.0, 0.0, 0.0], [0.0, c, -s, 0.0], [0.0, s, c, 0.0]],
+        1 => [[c, 0.0, s, 0.0], [0.0, 1.0, 0.0, 0.0], [-s, 0.0, c, 0.0]],
+        _ => [[c, -s, 0.0, 0.0], [s, c, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+    }
+}
+
+fn tr(x: f64, y: f64, z: f64) -> M {
+    [[1.0, 0.0, 0.0, x], [0.0, 1.0, 0.0, y], [0.0, 0.0, 1.0, z]]
+}
+
+fn sc(x: f64, y: f64, z: f64) -> M {
+    [[x, 0.0, 0.0, 0.0], [0.0, y, 0.0, 0.0], [0.0, 0.0, z, 0.0]]
+}
+
+fn apply(t: &M, v: [f64; 3]) -> [f32; 3] {
+    [
+        (t[0][0] * v[0] + t[0][1] * v[1] + t[0][2] * v[2] + t[0][3]) as f32,
+        (t[1][0] * v[0] + t[1][1] * v[1] + t[1][2] * v[2] + t[1][3]) as f32,
+        (t[2][0] * v[0] + t[2][1] * v[1] + t[2][2] * v[2] + t[2][3]) as f32,
+    ]
+}
+
+fn rgb(c: u32) -> [u8; 3] {
+    [(c >> 16) as u8, (c >> 8) as u8, c as u8]
+}
+
+/// The zombies' arms (AbstractZombieModel / ZombifiedPiglinModel: animateZombieArms).
+fn zombie_arms(name: &str) -> bool {
+    matches!(name, "zombie" | "husk" | "drowned" | "zombie_villager" | "giant" | "zombified_piglin")
 }
 
 impl EntityTable {
@@ -135,162 +285,219 @@ impl EntityTable {
         (((hilo >> 32) as i32) ^ (hilo as i32)).rem_euclid(18) as usize
     }
 
-    pub fn load(gl: &Gl, d: &[u8]) -> Result<EntityTable, String> {
+    /// A model layer by its name ("minecraft:cow_baby#main").
+    pub fn model(&self, name: &str) -> Option<u16> {
+        self.model_names.get(name).copied()
+    }
+
+    /// A texture by its name ("entity/cow/cow_warm").
+    pub fn tex_rect(&self, name: &str) -> Option<[u16; 4]> {
+        self.textures.get(name).copied()
+    }
+
+    /// entities.bin without the GL texture (`load` uploads it).
+    pub fn parse(d: &[u8]) -> Result<EntityTable, String> {
         if d.len() < 8 || &d[..4] != crate::account::ENTITIES_MAGIC {
             return Err(String::from("entities.bin is damaged"));
         }
         let (aw, ah) = (rd16(d, 4) as usize, rd16(d, 6) as usize);
-        let mut tex = 0u32;
+        let mut p = 8 + aw * ah * 4;
+        if d.len() < p + 4 {
+            return Err(String::from("entities.bin is short"));
+        }
+        let f = |o: usize| f32::from_bits(rd32(d, o));
+        let s = |p: &mut usize| -> String {
+            let l = d[*p] as usize;
+            let v = String::from_utf8_lossy(&d[*p + 1..*p + 1 + l]).into_owned();
+            *p += 1 + l;
+            v
+        };
+        let rect = |o: usize| [rd16(d, o), rd16(d, o + 2), rd16(d, o + 4), rd16(d, o + 6)];
+        let models = parse_models(d, &mut p);
+        let model_names = models.iter().enumerate().map(|(i, m)| (m.name.clone(), i as u16)).collect();
+        let n = rd32(d, p) as usize;
+        p += 4;
+        let mut types = Vec::with_capacity(n);
+        for _ in 0..n {
+            let model = rd16(d, p) as i16;
+            let r = rect(p + 2);
+            let size = (f(p + 10), f(p + 14));
+            let baby_size = (f(p + 18), f(p + 22));
+            let baby_index = d[p + 26];
+            p += 27;
+            let name = s(&mut p);
+            let tex = s(&mut p);
+            types.push(TypeInfo { name, model, rect: r, tex, size, baby_size, baby_index });
+        }
+        let player_models = [rd16(d, p) as i16, rd16(d, p + 2) as i16];
+        let n = rd32(d, p + 4) as usize;
+        p += 8;
+        let mut skins = Vec::with_capacity(n);
+        for _ in 0..n {
+            skins.push(rect(p));
+            p += 8;
+        }
+        let player_type = rd32(d, p) as i32;
+        p += 4;
+        let n = rd32(d, p) as usize;
+        p += 4;
+        let mut textures = BTreeMap::new();
+        for _ in 0..n {
+            let name = s(&mut p);
+            textures.insert(name, rect(p));
+            p += 8;
+        }
+        let mut lists = [Vec::new(), Vec::new()];
+        let mut hats = [Vec::new(), Vec::new()];
+        for (l, h) in lists.iter_mut().zip(hats.iter_mut()) {
+            let n = rd16(d, p) as usize;
+            p += 2;
+            for _ in 0..n {
+                l.push(s(&mut p));
+                h.push(d[p]);
+                p += 1;
+            }
+        }
+        let [villager_types, villager_professions] = lists;
+        let villager_hats = hats;
+        let n = rd16(d, p) as usize;
+        p += 2;
+        let mut equip_assets = Vec::with_capacity(n);
+        for _ in 0..n {
+            let name = s(&mut p);
+            let nl = d[p] as usize;
+            p += 1;
+            let mut layers = Vec::with_capacity(nl);
+            for _ in 0..nl {
+                let ltype = s(&mut p);
+                let nt = d[p] as usize;
+                p += 1;
+                let mut texs = Vec::with_capacity(nt);
+                for _ in 0..nt {
+                    let t = s(&mut p);
+                    let undyed = rd32(d, p);
+                    p += 4;
+                    if let Some(r) = textures.get(&t) {
+                        texs.push((*r, undyed));
+                    }
+                }
+                layers.push((ltype, texs));
+            }
+            equip_assets.push(EquipAsset { name, layers });
+        }
+        let n = rd32(d, p) as usize;
+        p += 4;
+        let mut item_equip = Vec::with_capacity(n);
+        let mut item_third = Vec::with_capacity(n);
+        for _ in 0..n {
+            item_equip.push((d[p], rd16(d, p + 1)));
+            let mut t = [0f32; 9];
+            for (i, v) in t.iter_mut().enumerate() {
+                *v = f(p + 3 + 4 * i);
+            }
+            item_third.push(t);
+            p += 39;
+        }
+        Ok(EntityTable {
+            tex: 0,
+            aw: aw as f32,
+            ah: ah as f32,
+            models,
+            model_names,
+            types,
+            player_models,
+            skins,
+            player_type,
+            textures,
+            villager_types,
+            villager_professions,
+            villager_hats,
+            equip_assets,
+            item_equip,
+            item_third,
+            cache: RefCell::new(BTreeMap::new()),
+        })
+    }
+
+    pub fn load(gl: &Gl, d: &[u8]) -> Result<EntityTable, String> {
+        let mut t = Self::parse(d)?;
+        let (aw, ah) = (t.aw as i32, t.ah as i32);
         unsafe {
-            (gl.GenTextures)(1, &mut tex);
-            (gl.BindTexture)(TEXTURE_2D, tex);
+            (gl.GenTextures)(1, &mut t.tex);
+            (gl.BindTexture)(TEXTURE_2D, t.tex);
             (gl.PixelStorei)(UNPACK_ALIGNMENT, 1);
             (gl.TexParameteri)(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST);
             (gl.TexParameteri)(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST);
             (gl.TexParameteri)(TEXTURE_2D, TEXTURE_MAX_LEVEL, 0);
-            (gl.TexImage2D)(TEXTURE_2D, 0, RGBA as i32, aw as i32, ah as i32, 0, RGBA, UNSIGNED_BYTE, d[8..].as_ptr() as *const c_void);
+            (gl.TexImage2D)(TEXTURE_2D, 0, RGBA as i32, aw, ah, 0, RGBA, UNSIGNED_BYTE, d[8..].as_ptr() as *const c_void);
         }
-        let mut p = 8 + aw * ah * 4;
-        let models = parse_models(d, &mut p);
-        let n = crate::gui::rd32(d, p) as usize;
-        p += 4;
-        let mut types = Vec::with_capacity(n);
-        let mut sizes = Vec::with_capacity(n);
-        for _ in 0..n {
-            let mi = rd16(d, p) as i16;
-            types.push((mi, [rd16(d, p + 2), rd16(d, p + 4), rd16(d, p + 6), rd16(d, p + 8)]));
-            let f = |o: usize| f32::from_bits(crate::gui::rd32(d, o));
-            sizes.push((f(p + 10), f(p + 14)));
-            p += 18;
-        }
-        let mut layers = Vec::new();
-        if p + 4 <= d.len() {
-            let n = crate::gui::rd32(d, p) as usize;
-            p += 4;
-            for _ in 0..n {
-                let ti = rd16(d, p) as usize;
-                let mi = rd16(d, p + 2) as i16;
-                let rect = [rd16(d, p + 4), rd16(d, p + 6), rd16(d, p + 8), rd16(d, p + 10)];
-                if mi >= 0 {
-                    layers.push((ti, mi as usize, rect, d[p + 12]));
-                }
-                p += 13;
-            }
-        }
-        let mut player_models = [-1i16; 2];
-        let mut skins = Vec::new();
-        if p + 8 <= d.len() {
-            player_models = [rd16(d, p) as i16, rd16(d, p + 2) as i16];
-            let n = crate::gui::rd32(d, p + 4) as usize;
-            p += 8;
-            for _ in 0..n {
-                skins.push([rd16(d, p), rd16(d, p + 2), rd16(d, p + 4), rd16(d, p + 6)]);
-                p += 8;
-            }
-        }
-        let player_type = if p + 4 <= d.len() { crate::gui::rd32(d, p) as i32 } else { -1 };
-        Ok(EntityTable { tex, aw: aw as f32, ah: ah as f32, models, types, sizes, layers, player_models, skins, player_type })
+        Ok(t)
     }
 
-    /// Draws every entity near the eye (vertices relative to the eye, under `view`).
-    pub fn draw(&self, gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entity>, partial: f32, skip: i32) {
-        let mut v: Vec<V> = Vec::new();
-        for (&id, e) in ents.iter() {
-            if id == skip {
-                continue;
-            }
-            let Some(&(mut mi, mut rect)) = self.types.get(e.kind as usize) else { continue };
-            if e.kind == self.player_type && self.skins.len() == 18 {
-                // DefaultPlayerSkin by the UUID's hash: slim skins first, then wide.
-                let msb = u64::from_be_bytes(e.uuid[..8].try_into().unwrap());
-                let lsb = u64::from_be_bytes(e.uuid[8..].try_into().unwrap());
-                let hilo = msb ^ lsb;
-                let i = (((hilo >> 32) as i32) ^ (hilo as i32)).rem_euclid(18) as usize;
-                mi = self.player_models[if i < 9 { 0 } else { 1 }];
-                rect = self.skins[i];
-            }
-            if mi < 0 || rect[2] == 0 {
-                continue;
-            }
-            let lerp = |a: f64, b: f64| a + (b - a) * partial as f64;
-            let p = [lerp(e.prev[0], e.pos[0]) - eye[0], lerp(e.prev[1], e.pos[1]) - eye[1], lerp(e.prev[2], e.pos[2]) - eye[2]];
-            if p[0] * p[0] + p[2] * p[2] > 96.0 * 96.0 {
-                continue;
-            }
-            self.model(&mut v, &self.models[mi as usize], rect, p, e, partial, [255; 3]);
-            // SheepWoolLayer: the wool in the sheep's colour, or the undercoat once sheared.
-            for &(ti, lm, lrect, kind) in self.layers.iter() {
-                if ti != e.kind as usize {
-                    continue;
-                }
-                let wool = e.data.get(&18).copied().unwrap_or(0);
-                let sheared = wool & 0x10 != 0;
-                if (kind == 1 && sheared) || (kind == 2 && !sheared) {
-                    continue;
-                }
-                let c = if kind == 1 { DYE[(wool & 15) as usize] } else { 0xFFFFFF };
-                self.model(&mut v, &self.models[lm], lrect, p, e, partial, [(c >> 16) as u8, (c >> 8) as u8, c as u8]);
-            }
+    /// Whether the entity is a baby (AgeableMob.isBaby: its synced flag, for a type that can be one).
+    pub fn is_baby(&self, e: &Entity) -> bool {
+        self.types.get(e.kind as usize).map_or(false, |t| t.baby_index > 0 && e.d(t.baby_index) != 0)
+    }
+
+    /// The entity's hitbox: its type's, a baby's, a slime's size.
+    pub fn dims(&self, e: &Entity) -> (f32, f32) {
+        let Some(t) = self.types.get(e.kind as usize) else { return (0.6, 1.8) };
+        if t.baby_index > 0 && e.d(t.baby_index) != 0 {
+            return t.baby_size;
         }
-        if v.is_empty() {
-            return;
-        }
-        unsafe {
-            (gl.MatrixMode)(MODELVIEW);
-            (gl.LoadMatrixf)(view.as_ptr());
-            (gl.Enable)(TEXTURE_2D);
-            (gl.BindTexture)(TEXTURE_2D, self.tex);
-            (gl.Enable)(ALPHA_TEST);
-            (gl.AlphaFunc)(GREATER, 0.1);
-            (gl.Disable)(CULL_FACE);
-            (gl.EnableClientState)(TEXTURE_COORD_ARRAY);
-            (gl.BindBuffer)(ARRAY_BUFFER, 0);
-            (gl.VertexPointer)(3, FLOAT, 24, v.as_ptr() as *const c_void);
-            (gl.TexCoordPointer)(2, FLOAT, 24, (v.as_ptr() as *const u8).add(12) as *const c_void);
-            (gl.ColorPointer)(4, UNSIGNED_BYTE, 24, (v.as_ptr() as *const u8).add(20) as *const c_void);
-            (gl.DrawArrays)(QUADS, 0, v.len() as i32);
-            (gl.Enable)(CULL_FACE);
-            (gl.Disable)(ALPHA_TEST);
-            (gl.Disable)(TEXTURE_2D);
-            (gl.DisableClientState)(TEXTURE_COORD_ARRAY);
+        match t.name.as_str() {
+            // Slime.getDefaultDimensions: scaled by the size.
+            "slime" | "magma_cube" => {
+                let s = e.data.get(&18).copied().unwrap_or(1).max(1) as f32;
+                (t.size.0 * s, t.size.1 * s)
+            }
+            // A crouching player (Pose.CROUCHING).
+            "player" if e.d(6) == 5 => (0.6, 1.5),
+            _ => t.size,
         }
     }
 
-    fn model(&self, out: &mut Vec<V>, m: &Model, rect: [u16; 4], at: [f64; 3], e: &Entity, partial: f32, tint: [u8; 3]) {
-        type M = [[f64; 4]; 3];
-        fn mul(a: &M, b: &M) -> M {
-            let mut r = [[0.0; 4]; 3];
-            for i in 0..3 {
-                for j in 0..4 {
-                    r[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + if j == 3 { a[i][3] } else { 0.0 };
-                }
-            }
-            r
+    /// The model pose of every part (LivingEntityRenderer: position, body turn, the death
+    /// fall, the species' scale; the parts' setupAnim), in pixels from the model's origin.
+    fn pose(&self, m: &Model, e: &Entity, partial: f32, at: [f64; 3], held: [bool; 2]) -> Vec<M> {
+        let ty = self.types.get(e.kind as usize);
+        let name = ty.map_or("", |t| t.name.as_str());
+        let mut base = mul(&tr(at[0], at[1], at[2]), &rot(1, math::to_rad((180.0 - e.body_yaw) as f64)));
+        if e.death_time > 0 {
+            // setupRotations: fall over to the side (spiders onto their backs) over a second.
+            let f = math::sqrt(((e.death_time as f64 + partial as f64 - 1.0) / 20.0 * 1.6).max(0.0)).min(1.0);
+            let flip = if matches!(name, "spider" | "cave_spider" | "silverfish" | "endermite") { 180.0 } else { 90.0 };
+            base = mul(&base, &rot(2, math::to_rad(f * flip)));
         }
-        fn rot(axis: usize, a: f64) -> M {
-            let (s, c) = (math::sin(a), math::cos(a));
-            match axis {
-                0 => [[1.0, 0.0, 0.0, 0.0], [0.0, c, -s, 0.0], [0.0, s, c, 0.0]],
-                1 => [[c, 0.0, s, 0.0], [0.0, 1.0, 0.0, 0.0], [-s, 0.0, c, 0.0]],
-                _ => [[c, -s, 0.0, 0.0], [s, c, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+        base = mul(&base, &sc(-1.0, -1.0, 1.0));
+        match name {
+            // AvatarRenderer.scale.
+            "player" | "mannequin" => base = mul(&base, &sc(0.9375, 0.9375, 0.9375)),
+            // SlimeRenderer.scale: the size.
+            "slime" | "magma_cube" => {
+                let s = e.data.get(&18).copied().unwrap_or(1).max(1) as f64 * 0.999;
+                base = mul(&base, &sc(s, s, s));
             }
+            // PhantomRenderer.scale: 15% bigger per size, the model moved down to the box.
+            "phantom" => {
+                let s = 1.0 + 0.15 * e.d(16) as f64;
+                base = mul(&mul(&base, &sc(s, s, s)), &tr(0.0, 1.3125, 0.1875));
+            }
+            _ => {}
         }
-        // translate(pos) * Ry(180 - bodyYaw) * scale(-1, -1, 1) * translate(0, -1.501, 0), in pixels/16.
-        let yaw = math::to_rad((180.0 - e.body_yaw) as f64);
-        let base = mul(
-            &mul(&[[1.0, 0.0, 0.0, at[0]], [0.0, 1.0, 0.0, at[1]], [0.0, 0.0, 1.0, at[2]]], &rot(1, yaw)),
-            &[[-1.0 / 16.0, 0.0, 0.0, 0.0], [0.0, -1.0 / 16.0, 0.0, 1.501], [0.0, 0.0, 1.0 / 16.0, 0.0]],
-        );
+        base = mul(&mul(&base, &tr(0.0, -1.501, 0.0)), &sc(1.0 / 16.0, 1.0 / 16.0, 1.0 / 16.0));
         let speed = e.prev_limb_speed + (e.limb_speed - e.prev_limb_speed) * partial;
         let swing = e.limb_pos as f64 * 0.6662;
         let amount = speed.min(1.0) as f64;
         let head_y = math::to_rad(wrap_deg(e.head_yaw - e.body_yaw) as f64);
         let head_x = math::to_rad(e.pitch as f64);
+        let zombie = zombie_arms(name);
+        let age = e.age as f64 + partial as f64;
         let mut mats: Vec<M> = Vec::with_capacity(m.parts.len());
         for p in m.parts.iter() {
             let parent = if p.parent >= 0 { mats[p.parent as usize] } else { base };
             let q = p.pose;
-            let (mut xr, mut yr) = (q[3] as f64, q[4] as f64);
+            let (mut xr, mut yr, mut zr) = (q[3] as f64, q[4] as f64, q[5] as f64);
             match p.name.as_str() {
                 "head" => {
                     yr += head_y;
@@ -299,21 +506,44 @@ impl EntityTable {
                 // HumanoidModel: legs 1.4, arms 1.0 (x 0.5 of 2.0), opposite phases.
                 "right_leg" => xr += math::cos(swing) * 1.4 * amount,
                 "left_leg" => xr += math::cos(swing + math::PI) * 1.4 * amount,
-                "right_arm" => xr += math::cos(swing + math::PI) * amount,
-                "left_arm" => xr += math::cos(swing) * amount,
+                "right_arm" | "left_arm" if zombie => {
+                    // animateZombieArms (not attacking), then bobArms.
+                    let right = p.name == "right_arm";
+                    xr = -math::PI / 2.25;
+                    yr = if right { -0.1 } else { 0.1 };
+                    let bob = math::cos(age * 0.09) * 0.05 + 0.05;
+                    zr += if right { bob } else { -bob };
+                    xr += if right { 1.0 } else { -1.0 } * math::sin(age * 0.067) * 0.05;
+                }
+                "right_arm" => {
+                    xr += math::cos(swing + math::PI) * amount;
+                    // HumanoidModel.ArmPose.ITEM.
+                    if held[0] {
+                        xr = xr * 0.5 - math::PI / 10.0;
+                    }
+                }
+                "left_arm" => {
+                    xr += math::cos(swing) * amount;
+                    if held[1] {
+                        xr = xr * 0.5 - math::PI / 10.0;
+                    }
+                }
                 // QuadrupedModel
                 "right_hind_leg" | "left_front_leg" => xr += math::cos(swing) * 1.4 * amount,
                 "left_hind_leg" | "right_front_leg" => xr += math::cos(swing + math::PI) * 1.4 * amount,
                 _ => {}
             }
-            let mut t = mul(&parent, &[[1.0, 0.0, 0.0, q[0] as f64], [0.0, 1.0, 0.0, q[1] as f64], [0.0, 0.0, 1.0, q[2] as f64]]);
-            t = mul(&t, &rot(2, q[5] as f64));
+            let mut t = mul(&parent, &tr(q[0] as f64, q[1] as f64, q[2] as f64));
+            t = mul(&t, &rot(2, zr));
             t = mul(&t, &rot(1, yr));
             t = mul(&t, &rot(0, xr));
-            t = mul(&t, &[[q[6] as f64, 0.0, 0.0, 0.0], [0.0, q[7] as f64, 0.0, 0.0], [0.0, 0.0, q[8] as f64, 0.0]]);
+            t = mul(&t, &sc(q[6] as f64, q[7] as f64, q[8] as f64));
             mats.push(t);
         }
-        let hurt = e.hurt > 0;
+        mats
+    }
+
+    fn emit(&self, out: &mut Vec<V>, m: &Model, mats: &[M], rect: [u16; 4], tint: [u8; 3], red: bool) {
         let (aw, ah) = (self.aw, self.ah);
         for (pi, part) in m.parts.iter().enumerate() {
             let t = &mats[pi];
@@ -323,20 +553,301 @@ impl EntityTable {
                 // Model space is y-down: a normal pointing up in the world has ny > 0 here.
                 let l = (0.7 + 0.3 * ny.clamp(-1.0, 1.0)) as f32;
                 let tl = |k: usize| (tint[k] as f32 * l) as u8;
-                let col = if hurt { [255, (110.0 * l) as u8, (110.0 * l) as u8, 255] } else { [tl(0), tl(1), tl(2), 255] };
+                // The hurt overlay (OverlayTexture red over 70% of the colour).
+                let col = if red {
+                    [(77.0 * l + 0.7 * tl(0) as f32).min(255.0) as u8, (0.7 * tl(1) as f32) as u8, (0.7 * tl(2) as f32) as u8, 255]
+                } else {
+                    [tl(0), tl(1), tl(2), 255]
+                };
                 for k in 0..4 {
                     let v = c[k];
-                    let x = t[0][0] * v[0] as f64 + t[0][1] * v[1] as f64 + t[0][2] * v[2] as f64 + t[0][3];
-                    let y = t[1][0] * v[0] as f64 + t[1][1] * v[1] as f64 + t[1][2] * v[2] as f64 + t[1][3];
-                    let z = t[2][0] * v[0] as f64 + t[2][1] * v[1] as f64 + t[2][2] * v[2] as f64 + t[2][3];
                     out.push(V {
-                        p: [x as f32, y as f32, z as f32],
+                        p: apply(t, [v[0] as f64, v[1] as f64, v[2] as f64]),
                         uv: [(rect[0] as f32 + v[3] * rect[2] as f32) / aw, (rect[1] as f32 + v[4] * rect[3] as f32) / ah],
                         c: col,
                     });
                 }
             }
         }
+    }
+
+    /// The draws of an entity, from the cache while nothing they depend on changed.
+    fn looks(&self, id: i32, e: &Entity, cx: &DrawCx) -> Vec<Draw> {
+        let angry = e.data.get(&22).map_or(0, |&t| (t > cx.game_time) as u32);
+        let key = e.version.wrapping_mul(2) | angry;
+        let mut cache = self.cache.borrow_mut();
+        if let Some((k, v)) = cache.get(&id) {
+            if *k == key {
+                return v.clone();
+            }
+        }
+        let v = crate::mobs::look(self, e, cx.variants, cx.game_time);
+        cache.insert(id, (key, v.clone()));
+        v
+    }
+
+    /// Draws every entity near the eye (vertices relative to the eye, under `view`): bodies,
+    /// layers and armour, held items, then name tags.
+    pub fn draw(&self, gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entity>, partial: f32, skip: i32, cx: &DrawCx) {
+        let mut v: Vec<V> = Vec::new();
+        let mut items: Vec<V> = Vec::new();
+        let mut tags: Vec<([f64; 3], &str, bool)> = Vec::new();
+        {
+            let mut cache = self.cache.borrow_mut();
+            if cache.len() > ents.len() * 2 + 64 {
+                cache.retain(|id, _| ents.contains_key(id));
+            }
+        }
+        // The entity under the crosshair (Minecraft.crosshairPickEntity), for its name.
+        let (yr, pr) = (math::to_rad(cx.yaw as f64), math::to_rad(cx.pitch as f64));
+        let dir = [-math::sin(yr) * math::cos(pr), -math::sin(pr), math::cos(yr) * math::cos(pr)];
+        let picked = self.pick(ents, eye, dir, cx.reach, skip).map(|h| h.0);
+        for (&id, e) in ents.iter() {
+            if id == skip || e.item.is_some() {
+                continue;
+            }
+            let lerp = |a: f64, b: f64| a + (b - a) * partial as f64;
+            let p = [lerp(e.prev[0], e.pos[0]) - eye[0], lerp(e.prev[1], e.pos[1]) - eye[1], lerp(e.prev[2], e.pos[2]) - eye[2]];
+            let dist2 = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+            if p[0] * p[0] + p[2] * p[2] > 96.0 * 96.0 {
+                continue;
+            }
+            let invisible = e.d(0) & 0x20 != 0;
+            let red = e.hurt > 0 || e.death_time > 0;
+            let held = [e.equipment[0].is_some(), e.equipment[1].is_some()];
+            let looks = self.looks(id, e, cx);
+            let mut first: Option<(usize, Vec<M>)> = None;
+            for dr in looks.iter() {
+                if invisible && !dr.worn {
+                    continue;
+                }
+                let Some(m) = self.models.get(dr.model as usize) else { continue };
+                let mats = self.pose(m, e, partial, p, held);
+                self.emit(&mut v, m, &mats, dr.rect, rgb(dr.tint), red);
+                if first.is_none() {
+                    first = Some((dr.model as usize, mats));
+                }
+            }
+            // ItemInHandLayer: the items in the arms of a humanoid model.
+            if held[0] || held[1] {
+                let (mi, mats) = match first {
+                    Some(f) => f,
+                    None => match looks.first() {
+                        Some(dr) => {
+                            let m = &self.models[dr.model as usize];
+                            (dr.model as usize, self.pose(m, e, partial, p, held))
+                        }
+                        None => (usize::MAX, Vec::new()),
+                    },
+                };
+                if let Some(m) = self.models.get(mi) {
+                    let left_handed = e.kind != self.player_type && e.d(15) & 2 != 0;
+                    for (slot, arm) in [(0usize, "right_arm"), (1, "left_arm")] {
+                        let Some((item, _)) = e.equipment[slot] else { continue };
+                        let arm = if left_handed { if arm == "right_arm" { "left_arm" } else { "right_arm" } } else { arm };
+                        let Some(ai) = m.parts.iter().position(|q| q.name == arm) else { continue };
+                        self.held_item(&mut items, &mats[ai], item, arm == "left_arm", cx);
+                    }
+                }
+            }
+            // The name tag: players' names, named mobs' when shown or looked at.
+            if !invisible && e.death_time == 0 {
+                let discrete = e.d(0) & 2 != 0;
+                let range = if discrete { 32.0 } else { 64.0 };
+                let name = if e.kind == self.player_type {
+                    e.custom_name.as_deref().or_else(|| cx.names.get(&e.uuid).map(|s| s.as_str()))
+                } else if e.d(3) != 0 || picked == Some(id) {
+                    e.custom_name.as_deref()
+                } else {
+                    None
+                };
+                if let (Some(n), true) = (name, dist2 < range * range) {
+                    let h = self.dims(e).1 as f64 + 0.5;
+                    tags.push(([p[0], p[1] + h, p[2]], n, discrete));
+                }
+            }
+        }
+        unsafe {
+            (gl.MatrixMode)(MODELVIEW);
+            (gl.LoadMatrixf)(view.as_ptr());
+            (gl.Enable)(TEXTURE_2D);
+            (gl.Enable)(ALPHA_TEST);
+            (gl.AlphaFunc)(GREATER, 0.1);
+            (gl.Disable)(CULL_FACE);
+            (gl.EnableClientState)(TEXTURE_COORD_ARRAY);
+            (gl.BindBuffer)(ARRAY_BUFFER, 0);
+            // Vanilla's LEQUAL: a layer on the same faces as the body (a baby sheep's wool,
+            // villager clothes) draws over it.
+            (gl.DepthFunc)(LEQUAL);
+            for (tex, list) in [(self.tex, &v), (cx.atlas, &items)] {
+                if list.is_empty() {
+                    continue;
+                }
+                (gl.BindTexture)(TEXTURE_2D, tex);
+                (gl.VertexPointer)(3, FLOAT, 24, list.as_ptr() as *const c_void);
+                (gl.TexCoordPointer)(2, FLOAT, 24, (list.as_ptr() as *const u8).add(12) as *const c_void);
+                (gl.ColorPointer)(4, UNSIGNED_BYTE, 24, (list.as_ptr() as *const u8).add(20) as *const c_void);
+                (gl.DrawArrays)(QUADS, 0, list.len() as i32);
+            }
+            (gl.DepthFunc)(LESS);
+            (gl.Enable)(CULL_FACE);
+            (gl.Disable)(ALPHA_TEST);
+            (gl.Disable)(TEXTURE_2D);
+            (gl.DisableClientState)(TEXTURE_COORD_ARRAY);
+        }
+        if let (Some(gui), false) = (cx.gui, tags.is_empty()) {
+            name_tags(gl, view, gui, &mut tags);
+        }
+    }
+
+    /// ItemInHandLayer.submitArmWithItem: the item at the end of the arm, with its model's
+    /// third-person transform (mirrored in the left hand).
+    fn held_item(&self, out: &mut Vec<V>, arm: &M, item: i32, left: bool, cx: &DrawCx) {
+        let d = self.item_third.get(item as usize).copied().unwrap_or([0.0, 0.0, 0.0, 0.0, 3.0, 1.0, 0.55, 0.55, 0.55]);
+        let k = if left { -1.0 } else { 1.0 };
+        // The arm's pose is in pixels: back to blocks first.
+        let mut m = mul(arm, &sc(16.0, 16.0, 16.0));
+        m = mul(&m, &rot(0, -math::PI / 2.0));
+        m = mul(&m, &rot(1, math::PI));
+        m = mul(&m, &tr(k / 16.0, 0.125, -0.625));
+        m = mul(&m, &tr(k * d[3] as f64 / 16.0, d[4] as f64 / 16.0, d[5] as f64 / 16.0));
+        m = mul(&m, &rot(0, math::to_rad(d[0] as f64)));
+        m = mul(&m, &rot(1, math::to_rad(k * d[1] as f64)));
+        m = mul(&m, &rot(2, math::to_rad(k * d[2] as f64)));
+        m = mul(&m, &sc(d[6] as f64, d[7] as f64, d[8] as f64));
+        m = mul(&m, &tr(-0.5, -0.5, -0.5));
+        let (aw, ah) = cx.atlas_size;
+        match cx.icons.get(item as usize) {
+            Some(crate::gui::Icon::Flat(layers)) => {
+                let tiles_row = (aw / 16.0) as u32;
+                for &(tile, tint) in layers.iter() {
+                    let (tx, ty) = ((tile as u32 % tiles_row) as f32 * 16.0, (tile as u32 / tiles_row) as f32 * 16.0);
+                    let (u0, v0, u1, v1) = (tx / aw, ty / ah, (tx + 16.0) / aw, (ty + 16.0) / ah);
+                    let c = if tint != 0 { rgb(tint) } else { [255; 3] };
+                    // ItemModelGenerator's front and back, 1/16 apart.
+                    for (z, l, order) in [(8.5 / 16.0, 1.0, [0usize, 1, 2, 3]), (7.5 / 16.0, 0.8, [3, 2, 1, 0])] {
+                        let corners = [(0.0, 1.0, u0, v0), (0.0, 0.0, u0, v1), (1.0, 0.0, u1, v1), (1.0, 1.0, u1, v0)];
+                        let col = [(c[0] as f32 * l) as u8, (c[1] as f32 * l) as u8, (c[2] as f32 * l) as u8, 255];
+                        for i in order {
+                            let (x, y, u, vv) = corners[i];
+                            out.push(V { p: apply(&m, [x, y, z]), uv: [u, vv], c: col });
+                        }
+                    }
+                }
+            }
+            Some(crate::gui::Icon::Model { first, count, tint, .. }) => {
+                let qs = &cx.blocks.quads[*first as usize..(*first as usize + *count as usize).min(cx.blocks.quads.len())];
+                let tc = if *tint != 0 { rgb(*tint) } else { [255; 3] };
+                for q in qs {
+                    let l = q.light as f32 / 255.0;
+                    let base = if q.flags & crate::blocks::Q_TINTED != 0 { tc } else { [255; 3] };
+                    let col = [(base[0] as f32 * l) as u8, (base[1] as f32 * l) as u8, (base[2] as f32 * l) as u8, 255];
+                    for i in 0..4 {
+                        let pp = [q.pos[i][0] as f64 / 1024.0, q.pos[i][1] as f64 / 1024.0, q.pos[i][2] as f64 / 1024.0];
+                        out.push(V { p: apply(&m, pp), uv: [q.uv[i][0] as f32 / 65535.0, q.uv[i][1] as f32 / 65535.0], c: col });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Name tags (EntityRenderer.submitNameTag): the text facing the camera half a block above the
+/// box, 0.025 blocks a font pixel, over vanilla's 25% black background; seen through walls
+/// at half alpha, then drawn again in full where nothing hides it (only once, dimmed, while
+/// the entity sneaks).
+fn name_tags(gl: &Gl, view: &[f32; 16], gui: &crate::gui::Gui, tags: &mut Vec<([f64; 3], &str, bool)>) {
+    // The camera's right and up in the world: the rows of the view rotation.
+    let right = [view[0] as f64, view[4] as f64, view[8] as f64];
+    let up = [view[1] as f64, view[5] as f64, view[9] as f64];
+    // Farthest first, so nearer tags blend over them.
+    tags.sort_by(|a, b| {
+        let d = |p: &[f64; 3]| p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+        d(&b.0).partial_cmp(&d(&a.0)).unwrap_or(core::cmp::Ordering::Equal)
+    });
+    let mut bg: Vec<V> = Vec::new();
+    let mut faint: Vec<V> = Vec::new();
+    let mut full: Vec<V> = Vec::new();
+    let (mut bg_d, mut faint_d) = (Vec::new(), Vec::new());
+    for (at, text, discrete) in tags.iter() {
+        let w = gui.text_width(text);
+        let x0 = -(w / 2.0).floor_f();
+        let place = |x: f32, y: f32| -> [f32; 3] {
+            let (x, y) = (x as f64 * 0.025, -(y as f64) * 0.025);
+            [(at[0] + right[0] * x + up[0] * y) as f32, (at[1] + right[1] * x + up[1] * y) as f32, (at[2] + right[2] * x + up[2] * y) as f32]
+        };
+        let quad = |out: &mut Vec<V>, x0: f32, y0: f32, x1: f32, y1: f32, uv: [f32; 4], c: [u8; 4]| {
+            out.push(V { p: place(x0, y0), uv: [uv[0], uv[1]], c });
+            out.push(V { p: place(x0, y1), uv: [uv[0], uv[3]], c });
+            out.push(V { p: place(x1, y1), uv: [uv[2], uv[3]], c });
+            out.push(V { p: place(x1, y0), uv: [uv[2], uv[1]], c });
+        };
+        let b = if *discrete { &mut bg_d } else { &mut bg };
+        quad(b, x0 - 1.0, -1.0, x0 + w, 8.0, [0.0; 4], [0, 0, 0, 0x40]);
+        let f = if *discrete { &mut faint_d } else { &mut faint };
+        gui.glyph_quads(text, |gx0, gy0, gx1, gy1, uv| {
+            quad(f, x0 + gx0, gy0, x0 + gx1, gy1, uv, [255, 255, 255, 0x80]);
+            if !*discrete {
+                quad(&mut full, x0 + gx0, gy0, x0 + gx1, gy1, uv, [255; 4]);
+            }
+        });
+    }
+    let draw = |list: &Vec<V>, textured: bool| unsafe {
+        if list.is_empty() {
+            return;
+        }
+        if textured {
+            (gl.Enable)(TEXTURE_2D);
+            (gl.EnableClientState)(TEXTURE_COORD_ARRAY);
+            (gl.BindTexture)(TEXTURE_2D, gui.texture());
+        } else {
+            (gl.Disable)(TEXTURE_2D);
+            (gl.DisableClientState)(TEXTURE_COORD_ARRAY);
+        }
+        (gl.VertexPointer)(3, FLOAT, 24, list.as_ptr() as *const c_void);
+        (gl.TexCoordPointer)(2, FLOAT, 24, (list.as_ptr() as *const u8).add(12) as *const c_void);
+        (gl.ColorPointer)(4, UNSIGNED_BYTE, 24, (list.as_ptr() as *const u8).add(20) as *const c_void);
+        (gl.DrawArrays)(QUADS, 0, list.len() as i32);
+    };
+    unsafe {
+        (gl.MatrixMode)(MODELVIEW);
+        (gl.LoadMatrixf)(view.as_ptr());
+        (gl.BindBuffer)(ARRAY_BUFFER, 0);
+        (gl.Disable)(CULL_FACE);
+        (gl.Disable)(FOG);
+        (gl.Enable)(BLEND);
+        (gl.BlendFunc)(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
+        (gl.Enable)(ALPHA_TEST);
+        (gl.AlphaFunc)(GREATER, 0.004);
+        (gl.DepthMask)(0);
+        // Seen through: the background and the faint text over everything.
+        (gl.Disable)(DEPTH_TEST);
+        draw(&bg, false);
+        draw(&faint, true);
+        (gl.Enable)(DEPTH_TEST);
+        // Sneaking: only where nothing hides it.
+        draw(&bg_d, false);
+        draw(&faint_d, true);
+        // The full text where nothing hides it.
+        draw(&full, true);
+        (gl.DepthMask)(1);
+        (gl.Disable)(BLEND);
+        (gl.Disable)(ALPHA_TEST);
+        (gl.Disable)(TEXTURE_2D);
+        (gl.DisableClientState)(TEXTURE_COORD_ARRAY);
+        (gl.Enable)(CULL_FACE);
+        (gl.Enable)(FOG);
+    }
+}
+
+trait FloorF {
+    fn floor_f(self) -> f32;
+}
+
+impl FloorF for f32 {
+    fn floor_f(self) -> f32 {
+        math::floor(self as f64) as f32
     }
 }
 
@@ -346,10 +857,10 @@ impl EntityTable {
     pub fn pick(&self, ents: &BTreeMap<i32, Entity>, eye: [f64; 3], dir: [f64; 3], reach: f64, skip: i32) -> Option<(i32, f64, [f64; 3])> {
         let mut best: Option<(i32, f64, [f64; 3])> = None;
         for (&id, e) in ents.iter() {
-            if id == skip || e.item.is_some() {
+            if id == skip || e.item.is_some() || e.dying() {
                 continue;
             }
-            let (w, h) = self.sizes.get(e.kind as usize).copied().unwrap_or((0.6, 1.8));
+            let (w, h) = self.dims(e);
             let r = w as f64 / 2.0;
             let lo = [e.pos[0] - r, e.pos[1], e.pos[2] - r];
             let hi = [e.pos[0] + r, e.pos[1] + h as f64, e.pos[2] + r];

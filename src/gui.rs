@@ -487,6 +487,31 @@ impl Gui {
         cx - x
     }
 
+    /// The glyphs of `s` (formatting codes left out) as font-pixel rectangles from (0, 0)
+    /// rightwards and down, each with its uv in the GUI atlas: text drawn in the world (name tags).
+    pub fn glyph_quads(&self, s: &str, mut f: impl FnMut(f32, f32, f32, f32, [f32; 4])) {
+        let mut cx = 0.0;
+        let mut it = s.chars();
+        while let Some(ch) = it.next() {
+            if ch == '\u{a7}' {
+                if it.next() == Some('#') {
+                    for _ in 0..6 {
+                        it.next();
+                    }
+                }
+                continue;
+            }
+            let Some(g) = self.glyphs.get(&(ch as u32)).or_else(|| self.glyphs.get(&('?' as u32))).copied() else { continue };
+            if g.cw > 0 {
+                let w = g.cw as f32 * g.height as f32 / g.ch as f32;
+                let (u0, v0) = (g.x as f32 / self.aw, g.y as f32 / self.ah);
+                let (u1, v1) = ((g.x as f32 + g.cw as f32) / self.aw, (g.y as f32 + g.ch as f32) / self.ah);
+                f(cx, g.yoff as f32, cx + w, g.yoff as f32 + g.height as f32, [u0, v0, u1, v1]);
+            }
+            cx += g.adv as f32;
+        }
+    }
+
     /// Text with vanilla's drop shadow (one unit down-right, a quarter of the colour).
     pub fn text(&mut self, s: &str, x: f32, y: f32, color: u32) -> f32 {
         let c = argb(color);

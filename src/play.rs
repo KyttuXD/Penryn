@@ -1183,6 +1183,19 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let blocks_ref = &g.blocks;
         let gui_ref = self.gui.as_ref();
         let sky_ref = &self.sky;
+        let ent_cx = crate::entities::DrawCx {
+            variants: &g.variants,
+            names: &g.player_names,
+            game_time: g.game_time,
+            icons,
+            blocks: &g.blocks,
+            atlas,
+            atlas_size,
+            gui: gui_ref,
+            yaw: g.player.yaw,
+            pitch: g.player.pitch,
+            reach: if g.game_mode == 1 { 5.0 } else { 3.0 },
+        };
         let (day_time, game_time) = (g.day_time, g.game_time as f64 + partial);
         // Clouds reach further than the terrain (vanilla: the cloud range option, 128 by default).
         let radius = ((self.view as f64 + 1.0) * 16.0).max(128.0) * 1.5;
@@ -1198,7 +1211,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             sky,
             &mut |view| {
                 if let Some(t) = ents {
-                    t.draw(gl, view, eye, entities, pf, own);
+                    t.draw(gl, view, eye, entities, pf, own, &ent_cx);
                 }
                 crate::entities::draw_items(gl, view, eye, entities, pf, icons, blocks_ref, atlas, atlas_size);
                 if let (Some(gui), false) = (gui_ref, dim) {
