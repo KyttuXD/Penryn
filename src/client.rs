@@ -940,7 +940,7 @@ impl Game {
 
     pub fn add_chat(&mut self, line: String) {
         crate::say!("[chat] {}", line);
-        self.talk.push(crate::text::Rich::from_legacy(&line), crate::talk::Tag::None, None);
+        self.talk.push(crate::text::Rich::from_legacy(&line), crate::talk::Tag::SystemSinglePlayer, None);
         self.chat.push((line, crate::sys::now_ms()));
         if self.chat.len() > 100 {
             self.chat.remove(0);

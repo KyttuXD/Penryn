@@ -67,6 +67,8 @@ pub struct Node {
     pub flags: i32,
     /// A custom suggestion provider (minecraft:ask_server, available_sounds...).
     pub suggests: Option<String>,
+    /// FLAG_RESTRICTED: needs elevated permissions (a clicked command asks first).
+    pub restricted: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -138,6 +140,7 @@ impl Tree {
                 max: None,
                 flags: 0,
                 suggests: None,
+                restricted: flags & 32 != 0,
             };
             if kind >= 1 {
                 node.name = r.string()?;
@@ -382,6 +385,12 @@ impl Tree {
             }
         }
         out
+    }
+
+    /// Whether the parse goes through a restricted node: ClientPacketListener.verifyCommand's
+    /// PERMISSIONS_REQUIRED (the restricted suggestion provider cannot use such a node).
+    pub fn restricted(&self, p: &Parse) -> bool {
+        p.contexts.iter().any(|c| c.nodes.iter().any(|&(n, _, _)| self.nodes[n].restricted))
     }
 
     /// The suggestions of `node`'s children for `text` (input up to the cursor) from

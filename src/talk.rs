@@ -344,8 +344,11 @@ impl Bound {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tag {
     None,
-    /// System messages (chat.tag.system), 0xD0D0D0.
+    /// Disguised chat and the deleted marker (chat.tag.system), 0xD0D0D0.
     System,
+    /// System chat from the server or the client (addServerSystemMessage and
+    /// addClientSystemMessage: chat.tag.system_single_player), 0xD0D0D0.
+    SystemSinglePlayer,
     /// chat.tag.not_secure, 0xD0D0D0.
     NotSecure,
     /// chat.tag.modified with the original text, 0x606060 and the chat_modified icon.
@@ -358,7 +361,7 @@ impl Tag {
     pub fn color(&self) -> Option<u32> {
         match self {
             Tag::None => None,
-            Tag::System | Tag::NotSecure => Some(0xD0D0D0),
+            Tag::System | Tag::SystemSinglePlayer | Tag::NotSecure => Some(0xD0D0D0),
             Tag::Modified(_) => Some(0x606060),
             Tag::Error => Some(0xFF5555),
         }
@@ -368,6 +371,7 @@ impl Tag {
         Some(match self {
             Tag::None => return None,
             Tag::System => Rich::plain(&crate::lang::get("chat.tag.system")),
+            Tag::SystemSinglePlayer => Rich::plain(&crate::lang::get("chat.tag.system_single_player")),
             Tag::NotSecure => Rich::plain(&crate::lang::get("chat.tag.not_secure")),
             Tag::Error => Rich::plain(&crate::lang::get("chat.tag.error")),
             Tag::Modified(orig) => {
@@ -776,9 +780,7 @@ impl Game {
             None => Vec::new(),
         };
         if args.is_empty() {
-            let mut o = Out::new();
-            o.string(command);
-            return self.conn.send(S_CHAT_COMMAND, &o);
+            return self.send_command_unsigned(command);
         }
         let ts = now_ms();
         let salt = random_i64();
@@ -796,6 +798,14 @@ impl Game {
         }
         write_update(&mut o, offset, bits, c);
         self.conn.send(S_CHAT_COMMAND_SIGNED, &o)
+    }
+
+    /// ServerboundChatCommandPacket: a command sent unsigned whatever it holds (a clicked
+    /// command the player confirmed).
+    pub fn send_command_unsigned(&mut self, command: &str) -> Result<(), String> {
+        let mut o = Out::new();
+        o.string(command);
+        self.conn.send(S_CHAT_COMMAND, &o)
     }
 
     /// ChatScreen.handleChatInput: a command without its slash, or chat; kept in the history.
@@ -854,7 +864,7 @@ impl Game {
                     // Gui.setOverlayMessage: 3 s.
                     self.talk.overlay = Some((t, 60));
                 } else {
-                    self.add_rich(t, Tag::System, None);
+                    self.add_rich(t, Tag::SystemSinglePlayer, None);
                 }
                 Ok(true)
             }
@@ -1118,7 +1128,7 @@ impl Game {
             }
             let err = Rich::styled(&crate::lang::get("chat.validation_error"), 0xFF5555, text::ITALIC);
             let d = m.bound.decorate(&err);
-            self.add_rich(d, Tag::Error, None);
+            self.add_rich(d, Tag::Error, m.sig.as_ref());
             return Ok(());
         };
         // FilterMask: 1 fully filtered (not shown), 2 some characters hidden.

@@ -473,7 +473,35 @@ pub fn component(t: &Tag) -> Rich {
     component_at(t, 0)
 }
 
+/// What one top-level component may build: a node costs 1, text its length. Translation
+/// arguments can be repeated (%1$s%1$s...) and nested, so a hostile component could
+/// otherwise expand exponentially and stall the game.
+const BUDGET: usize = 1 << 17;
+static LEFT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(BUDGET);
+
+/// Takes `n` from the budget; false when it has run out.
+fn spend(n: usize) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    let left = LEFT.load(Relaxed);
+    if left < n {
+        LEFT.store(0, Relaxed);
+        return false;
+    }
+    LEFT.store(left - n, Relaxed);
+    true
+}
+
+/// Pushes text if the budget allows it.
+fn emit(out: &mut Rich, st: Style, s: &str) {
+    if spend(s.len()) {
+        out.push(st, s);
+    }
+}
+
 fn component_at(t: &Tag, depth: u32) -> Rich {
+    if depth == 0 {
+        LEFT.store(BUDGET, core::sync::atomic::Ordering::Relaxed);
+    }
     let mut out = Rich::default();
     build(t, &Style::default(), &mut out, depth);
     out
@@ -537,7 +565,7 @@ pub fn keybind(name: &str) -> String {
 }
 
 fn build(t: &Tag, parent: &Style, out: &mut Rich, depth: u32) {
-    if depth > 24 {
+    if depth > 24 || !spend(1) {
         return;
     }
     match t {
@@ -550,7 +578,7 @@ fn build(t: &Tag, parent: &Style, out: &mut Rich, depth: u32) {
             let own = style_of(t, &mut out.events, depth);
             let st = own.under(parent);
             if let Some(s) = t.get("text").and_then(|v| v.plain()) {
-                out.push(st, &s);
+                emit(out, st, &s);
             } else if let Some(key) = t.get("translate").and_then(|v| v.str()) {
                 let pat = if crate::lang::has(key) {
                     crate::lang::get(key)
@@ -562,12 +590,12 @@ fn build(t: &Tag, parent: &Style, out: &mut Rich, depth: u32) {
                 let args: &[Tag] = t.get("with").map(|w| w.list()).unwrap_or(&[]);
                 translate(&pat, args, &st, out, depth);
             } else if let Some(k) = t.get("keybind").and_then(|v| v.str()) {
-                out.push(st, &keybind(k));
+                emit(out, st, &keybind(k));
             } else if let Some(s) = t.get("score") {
                 // Resolved by the server (ComponentUtils.updateForEntity); an unresolved
                 // score shows nothing, an old one its "value".
                 if let Some(v) = s.get("value").and_then(|v| v.plain()) {
-                    out.push(st, &v);
+                    emit(out, st, &v);
                 }
             } else if t.get("selector").is_some() || t.get("nbt").is_some() {
                 // Unresolved entity selectors and NBT paths show nothing on the client.
@@ -596,7 +624,7 @@ fn build(t: &Tag, parent: &Style, out: &mut Rich, depth: u32) {
         }
         other => {
             if let Some(s) = other.plain() {
-                out.push(*parent, &s);
+                emit(out, *parent, &s);
             }
         }
     }
@@ -610,7 +638,7 @@ fn translate(pat: &str, args: &[Tag], st: &Style, out: &mut Rich, depth: u32) {
     let mut next = 0usize;
     let mut i = 0;
     let arg = |out: &mut Rich, lit: &mut String, n: usize| {
-        out.push(*st, &core::mem::take(lit));
+        emit(out, *st, &core::mem::take(lit));
         if let Some(a) = args.get(n) {
             build(a, st, out, depth + 1);
         }
@@ -643,7 +671,7 @@ fn translate(pat: &str, args: &[Tag], st: &Style, out: &mut Rich, depth: u32) {
         lit.push(b[i]);
         i += 1;
     }
-    out.push(*st, &lit);
+    emit(out, *st, &lit);
 }
 
 /// A minimal JSON reader for components given as JSON text (login disconnects, old servers):
@@ -913,6 +941,18 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     let ev = r.events_of(&r.runs[0].0).cloned().unwrap_or_default();
     out.push(("click and hover events", alloc::format!("{:?} {}", ev.click, matches!(ev.hover, Some(Hover::Text(_)))), "Some(OpenUrl(\"https://example.com\")) true"));
     let back = Rich::from_legacy("\u{a7}cred \u{a7}lbold\u{a7}r plain");
+    // A translation bomb: each level repeats its argument 8 times, 20 levels deep.
+    let mut bomb = Tag::Str(String::from("xxxxxxxx"));
+    for _ in 0..20 {
+        bomb = Tag::Compound(alloc::vec![
+            (String::from("translate"), Tag::Str(String::from("penryn.no.such.key"))),
+            (String::from("fallback"), Tag::Str(String::from("%1$s%1$s%1$s%1$s%1$s%1$s%1$s%1$s"))),
+            (String::from("with"), Tag::List(alloc::vec![bomb])),
+        ]);
+    }
+    let t0 = crate::sys::now_ms();
+    let n = component(&bomb).string().len();
+    out.push(("translation bomb bounded", alloc::format!("{}", n <= BUDGET && crate::sys::now_ms() - t0 < 1000), "true"));
     out.push(("formatting codes read back", back.legacy(), "\u{a7}r\u{a7}cred \u{a7}r\u{a7}c\u{a7}lbold\u{a7}r plain"));
     out
 }

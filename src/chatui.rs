@@ -63,6 +63,8 @@ struct List {
     original: String,
 }
 
+const SIGNATURE_REQUIRED: &str = "multiplayer.confirm_command.signature_required";
+
 /// What a confirmation screen asks.
 enum Confirm {
     /// ConfirmLinkScreen (chat.link.confirm): open, copy or not.
@@ -492,35 +494,29 @@ impl ChatUi {
         Ok(Act::None)
     }
 
-    /// ClientPacketListener.sendUnattendedCommand: a clicked command runs at once when it parses
-    /// and signs nothing; one with message arguments is put in the chat box for the player to
-    /// send; others ask first.
+    /// ClientPacketListener.sendUnattendedCommand (from the chat screen): a clicked command runs
+    /// at once when it parses, signs nothing and needs no elevated permissions; otherwise
+    /// a confirmation asks (run it unsigned anyway, or, for one that would sign chat, copy
+    /// it to the clipboard: it can only be sent from the chat box).
     fn unattended(&mut self, g: &mut Game, command: &str) -> Result<(), String> {
-        let command = command.trim();
+        // Commands.trimOptionalPrefix.
         let command = String::from(command.strip_prefix('/').unwrap_or(command));
-        if command.is_empty() {
-            return Ok(());
-        }
-        let check = match g.talk.tree.as_ref() {
+        let key = match g.talk.tree.as_ref() {
             Some(t) => {
                 let p = t.parse(&command, 0);
                 if !p.valid(&command) {
-                    Some("multiplayer.confirm_command.parse_errors")
+                    "multiplayer.confirm_command.parse_errors"
                 } else if !t.signable(&command, &p).is_empty() {
-                    None
+                    "multiplayer.confirm_command.signature_required"
+                } else if t.restricted(&p) {
+                    "multiplayer.confirm_command.permissions_required"
                 } else {
-                    return g.send_command(&command);
+                    return g.send_command_unsigned(&command);
                 }
             }
-            None => Some("multiplayer.confirm_command.parse_errors"),
+            None => "multiplayer.confirm_command.parse_errors",
         };
-        match check {
-            Some(key) => self.confirm = Some(Confirm::Command(command, key)),
-            None => {
-                let line = alloc::format!("/{}", command);
-                self.set_input(g, &line);
-            }
-        }
+        self.confirm = Some(Confirm::Command(command, key));
         Ok(())
     }
 
@@ -535,9 +531,13 @@ impl ChatUi {
                 1 => v.set_clipboard(&u),
                 _ => {}
             },
-            Confirm::Command(cmd, _) => {
+            Confirm::Command(cmd, key) => {
                 if button == 0 {
-                    g.send_command(&cmd)?;
+                    if key == SIGNATURE_REQUIRED {
+                        v.set_clipboard(&alloc::format!("/{}", cmd));
+                    } else {
+                        g.send_command_unsigned(&cmd)?;
+                    }
                 }
             }
         }
@@ -975,9 +975,16 @@ fn confirm_buttons(gui: &Gui, c: &Confirm) -> Vec<crate::screens::Button> {
             crate::screens::Button::new(cx - 50.0, y, 100.0, crate::lang::get("chat.copy")),
             crate::screens::Button::new(cx + 54.0, y, 100.0, crate::lang::get("gui.no")),
         ],
-        Confirm::Command(..) => alloc::vec![
-            crate::screens::Button::new(cx - 152.0, y, 150.0, crate::lang::get("gui.yes")),
-            crate::screens::Button::new(cx + 2.0, y, 150.0, crate::lang::get("gui.no")),
+        // openSendConfirmationWindow: "Copy to Clipboard" for a command that would sign chat,
+        // "Run Command" otherwise; "Back" to the chat screen.
+        Confirm::Command(_, key) => alloc::vec![
+            crate::screens::Button::new(
+                cx - 152.0,
+                y,
+                150.0,
+                crate::lang::get(if *key == SIGNATURE_REQUIRED { "chat.copy" } else { "multiplayer.confirm_command.run_command" })
+            ),
+            crate::screens::Button::new(cx + 2.0, y, 150.0, crate::lang::get("gui.back")),
         ],
     }
 }
@@ -1042,7 +1049,7 @@ fn titles(gui: &mut Gui, g: &Game, partial: f32) {
         let f = t.title_ticks as f32 - partial;
         let mut a = 255i32;
         if t.title_ticks > fo + st {
-            a = ((fi + st + fo) as f32 - f) as i32 * 255 / fi.max(1);
+            a = (((fi + st + fo) as f32 - f) * 255.0 / fi.max(1) as f32) as i32;
         }
         if t.title_ticks <= fo {
             a = (f * 255.0 / fo.max(1) as f32) as i32;
