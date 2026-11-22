@@ -1786,7 +1786,26 @@ def make_containers(assets, out_dir, reg):
         add("bg/" + name, "gui/container/" + name, crop)
     add("bg/book", "gui/book", (192, 192))
     add("container/slot", "gui/sprites/container/slot")
-    listing = jar.namelist() if jar else []
+    def raw(path):
+        if jar:
+            try:
+                return jar.read(path)
+            except KeyError:
+                return None
+        try:
+            with open(os.path.join(assets.folder, path), "rb") as f:
+                return f.read()
+        except OSError:
+            return None
+
+    if jar:
+        listing = jar.namelist()
+    else:
+        listing = []
+        for top in ("assets", "data"):
+            for root, _, files in os.walk(os.path.join(assets.folder, top)):
+                for fn in files:
+                    listing.append(os.path.relpath(os.path.join(root, fn), assets.folder).replace(os.sep, "/"))
     for full in listing:
         for folder in ("anvil", "beacon", "brewing_stand", "cartography_table", "crafter", "enchanting_table", "grindstone",
                        "horse", "loom", "smithing", "stonecutter", "villager"):
@@ -1877,7 +1896,8 @@ def make_containers(assets, out_dir, reg):
                 found[ids["minecraft:" + a[1]]["protocol_id"]] = (b[1], c_[1])
         decorations = [found.get(i, ("", 0)) for i in range(max(found) + 1)] if found else []
     loom_free = []
-    t = jar and json.loads(jar.read("data/minecraft/tags/banner_pattern/no_item_required.json"))
+    t = raw("data/minecraft/tags/banner_pattern/no_item_required.json")
+    t = json.loads(t) if t else None
     if t:
         loom_free = [v.split(":", 1)[-1] for v in t.get("values", []) if not v.startswith("#")]
     loom_items = []
@@ -1885,7 +1905,7 @@ def make_containers(assets, out_dir, reg):
         pre = "data/minecraft/tags/banner_pattern/pattern_item/"
         if full.startswith(pre) and full.endswith(".json"):
             key = full[len(pre):-5]
-            vals = [v.split(":", 1)[-1] for v in json.loads(jar.read(full)).get("values", []) if not v.startswith("#")]
+            vals = [v.split(":", 1)[-1] for v in json.loads(raw(full)).get("values", []) if not v.startswith("#")]
             loom_items.append((key + "_banner_pattern", vals))
 
     # Item frame models: template_item_frame(_map) with their textures.
