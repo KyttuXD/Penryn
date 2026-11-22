@@ -1040,6 +1040,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         if !g.dead {
             g.ui.death_message = None;
+            // Alive again: the next death may respawn too (immediate_respawn, tests).
+            self.respawn_sent = false;
         }
         // The immediate_respawn game rule: no death screen (LocalPlayer.respawn straight away).
         if g.dead && g.ui.immediate_respawn {

@@ -312,12 +312,12 @@ impl Default for Border {
     fn default() -> Border {
         Border {
             center: [0.0; 2],
-            from: 5.999997e7,
-            to: 5.999997e7,
+            from: 5.9999968e7,
+            to: 5.9999968e7,
             left: 0,
             duration: 0,
-            size: 5.999997e7,
-            prev_size: 5.999997e7,
+            size: 5.9999968e7,
+            prev_size: 5.9999968e7,
             absolute_max: 29_999_984,
             warning_blocks: 5,
             warning_time: 15,
@@ -578,9 +578,10 @@ impl ServerUi {
         let Some(t) = self.team_of_player(holder) else { return true };
         let mine = self.team_of.get(own);
         let same = mine.is_some() && mine == self.team_of.get(holder);
+        // EntityRenderer.shouldShowName: a viewer in no team sees both "hide for" kinds.
         match t.visibility {
             1 => false,
-            2 => same,
+            2 => mine.is_none() || same,
             3 => !same,
             _ => true,
         }
@@ -805,11 +806,18 @@ pub fn handle(g: &mut Game, p: &Packet) -> Result<bool, String> {
         C_SET_TITLES_ANIMATION => {
             let (a, b, c) = (r.i32().unwrap_or(10), r.i32().unwrap_or(70), r.i32().unwrap_or(20));
             // Hud.setTimes: a title on screen restarts with the new times.
-            ui.fade_in = a;
-            ui.stay = b;
-            ui.fade_out = c;
-            if ui.title.is_some() && ui.title_time > 0 {
-                ui.title_time = a + b + c;
+            // Gui.setTimes: a negative time keeps the old one.
+            if a >= 0 {
+                ui.fade_in = a;
+            }
+            if b >= 0 {
+                ui.stay = b;
+            }
+            if c >= 0 {
+                ui.fade_out = c;
+            }
+            if ui.title_time > 0 {
+                ui.title_time = ui.fade_in + ui.stay + ui.fade_out;
             }
         }
         C_CLEAR_TITLES => {
@@ -1133,6 +1141,14 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     ui.display[3 + 12] = Some(String::from("redonly"));
     out.push(("team sidebar slot", ui.sidebar("Alice").map(|o| o.0.clone()).unwrap_or_default(), "redonly"));
     out.push(("plain sidebar slot", ui.sidebar("Carl").map(|o| o.0.clone()).unwrap_or_default(), "kills"));
+    // Name tag visibility: a viewer in no team sees "hide for other teams" and "hide for own team".
+    let vis = |ui: &mut ServerUi, v: i32| {
+        ui.teams.get_mut("red").map(|t| t.visibility = v);
+        format!("{} {}", ui.tag_visible("Alice", "Carl"), ui.tag_visible("Alice", "Alice"))
+    };
+    out.push(("name tag hide for other teams", vis(&mut ui, 2), "true true"));
+    out.push(("name tag hide for own team", vis(&mut ui, 3), "true false"));
+    vis(&mut ui, 0);
     // Number formats.
     let mut o = Out::new();
     o.varint(1).u8(10).u8(8).u16(5).bytes(b"color").u16(4).bytes(b"gold").u8(0);
