@@ -489,6 +489,89 @@ def applied_models(bs, props):
     return out
 
 
+# ------------------------------------------------------------------ particles
+
+PARTICLES_MAGIC = b"PNP1"
+
+
+def block_particle_tiles(names, states, assets, models, texture):
+    """Per block (registry order): the atlas tile of its model's particle texture (what
+    vanilla's TerrainParticle draws), from the first state's block-state model; 0xFFFF none.
+    texture() may add a tile to the atlas, so this runs before the atlas is laid out."""
+    out = []
+    for name in names:
+        short = name.split(":", 1)[1]
+        props = (states.get(name, {"states": [{}]})["states"] or [{}])[0]
+        tile = 0xFFFF
+        for ap in applied_models(assets.json("blockstates/" + short + ".json"), props):
+            tex, _ = models.load(ap["model"])
+            path = resolve_tex(tex, "#particle")
+            if path:
+                tile = texture(path)[0]
+                break
+        out.append(tile)
+    return out
+
+
+def make_particles(assets, res, out_dir, block_tiles, atlas_w, atlas_h):
+    """particles.bin: vanilla's particle sprites (textures/particle) packed in one sheet, each
+    particle type's sprite set (particles/*.json) in registry order, and each block's particle
+    tile in atlas.bin (written in the same run, so they agree).
+
+    "PNP1", u16 sheet width, u16 sheet height, RGBA; u16 sprites, per sprite u16 x y w h;
+    u16 types, per type u8 name length, name, u8 sprite count, u16 sprites;
+    u16 atlas width, u16 atlas height, u32 blocks, per block u16 tile (0xFFFF none)."""
+    reg = json.load(open(os.path.join(res, "registries.json")))["minecraft:particle_type"]["entries"]
+    types = [k for k, _ in sorted(reg.items(), key=lambda kv: kv[1]["protocol_id"])]
+    sprite_index, sprites, sets = {}, [], []
+    for t in types:
+        d = assets.json("particles/" + t.split(":", 1)[1] + ".json") or {}
+        ids = []
+        for ref in d.get("textures", []):
+            ref = ref.split(":", 1)[-1]
+            if ref not in sprite_index:
+                img = png_decode(assets.read("textures/particle/" + ref + ".png") or b"")
+                if img is None:
+                    continue
+                sprite_index[ref] = len(sprites)
+                sprites.append(img)
+            ids.append(sprite_index[ref])
+        sets.append((t.split(":", 1)[1], ids[:255]))
+    # Shelves, tallest first, 256 wide; the height a power of two.
+    W = 256
+    order = sorted(range(len(sprites)), key=lambda i: (-sprites[i][1], -sprites[i][0]))
+    place = [None] * len(sprites)
+    x = y = shelf = 0
+    for i in order:
+        w, h, _ = sprites[i]
+        if x + w > W:
+            x, y, shelf = 0, y + shelf, 0
+        place[i] = (x, y)
+        x += w
+        shelf = max(shelf, h)
+    H = 1
+    while H < y + shelf:
+        H *= 2
+    sheet = bytearray(W * H * 4)
+    for i, (w, h, px) in enumerate(sprites):
+        sx, sy = place[i]
+        for r in range(h):
+            o = ((sy + r) * W + sx) * 4
+            sheet[o:o + w * 4] = px[r * w * 4:(r + 1) * w * 4]
+    with open(os.path.join(out_dir, "particles.bin"), "wb") as f:
+        f.write(PARTICLES_MAGIC + struct.pack("<HH", W, H) + bytes(sheet))
+        f.write(struct.pack("<H", len(sprites)))
+        for i, (w, h, _) in enumerate(sprites):
+            f.write(struct.pack("<4H", place[i][0], place[i][1], w, h))
+        f.write(struct.pack("<H", len(sets)))
+        for n, ids in sets:
+            nb = n.encode()
+            f.write(bytes([len(nb)]) + nb + bytes([len(ids)]) + struct.pack("<%dH" % len(ids), *ids))
+        f.write(struct.pack("<HHI", atlas_w, atlas_h, len(block_tiles)))
+        f.write(struct.pack("<%dH" % len(block_tiles), *block_tiles))
+    print("particles.bin: %d sprites in %dx%d, %d types" % (len(sprites), W, H, len(sets)))
+
+
 # ------------------------------------------------------------------ main
 
 def main():
@@ -963,6 +1046,7 @@ def main():
         sky = hexcol(b.get("attributes", {}).get("minecraft:visual/sky_color"), 0x78A7FF)
         biome_rows.append(("minecraft:" + fn[:-5], (grass, foliage, water, sky)))
 
+    particle_tiles = block_particle_tiles(names, states, assets, models, texture)
     # ---- atlas: 64 tiles a row, height a power of two
     rows = (len(tiles) + RESERVED + 63) // 64
     height = 1
@@ -1026,6 +1110,7 @@ def main():
             f.write(bytes([len(nb)]) + nb + struct.pack("<4I", *cols))
     with open(os.path.join(out_dir, "atlas.bin"), "wb") as f:
         f.write(b"PNA1" + struct.pack("<HH", width, height) + bytes(atlas))
+    make_particles(assets, res, out_dir, particle_tiles, width, height)
 
     # ---- the GUI: vanilla's sprites, the font, the item icons
     sprites = {}  # name -> (w, h, rgba, nine-slice or None)

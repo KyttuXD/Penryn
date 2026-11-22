@@ -204,6 +204,7 @@ pub struct App {
     last_held: (i32, Option<(i32, i32)>),
     /// The open inventory screen is a container the server opened.
     container_screen: bool,
+    particles: Option<crate::particles::Particles>,
 }
 
 impl App {
@@ -310,10 +311,15 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
         held_ticks: 0,
         last_held: (-1, None),
         container_screen: false,
+        particles: None,
     };
     let atlas = sys::read_file(&format!("{}/atlas.bin", crate::data_dir())).ok_or("cannot read atlas.bin (see README.md)")?;
     app.r.load_atlas(&app.v.gl, &atlas)?;
     drop(atlas);
+    // Particle sprites are optional: without particles.bin only block particles are drawn.
+    let pd = sys::read_file(&format!("{}/particles.bin", crate::data_dir()));
+    app.particles = Some(crate::particles::Particles::load(&app.v.gl, pd.as_deref(), app.r.atlas_size));
+    drop(pd);
     let gui = sys::read_file(&format!("{}/gui.bin", crate::data_dir())).ok_or("cannot read gui.bin (see README.md)")?;
     app.gui = Some(Gui::load(&app.v.gl, &gui, app.r.atlas, app.r.atlas_size)?);
     drop(gui);
@@ -361,6 +367,7 @@ impl App {
             }
             // ---- network
             g.pump()?;
+            self.particle_effects(g);
             // ---- sound
             if let Some(a) = self.audio.as_mut() {
                 let eye = [self.mover.pos[0], self.mover.pos[1] + 1.62, self.mover.pos[2]];
@@ -954,7 +961,49 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
             }
         }
+        self.particle_tick(g, play, hit);
         g.tick()
+    }
+
+    /// What the server sent for the particle engine (the explosion's push goes to the player).
+    fn particle_effects(&mut self, g: &mut Game) {
+        let Some(pt) = self.particles.as_mut() else {
+            g.effects.clear();
+            return;
+        };
+        let eye = [self.mover.pos[0], self.mover.pos[1] + physics::EYE, self.mover.pos[2]];
+        let sizes = self.entities.as_ref().map_or(&[][..], |t| &t.sizes[..]);
+        if let Some(k) = pt.handle(g, self.gui.as_ref(), sizes, eye) {
+            for a in 0..3 {
+                self.mover.vel[a] += k[a];
+            }
+        }
+    }
+
+    /// The particles' tick: digging cracks on the face being hit, sprinting and eating.
+    fn particle_tick(&mut self, g: &Game, play: bool, hit: Option<Hit>) {
+        let in_fluid = self.fluid_at(g) != 0;
+        let eye_y = self.eye_height();
+        let Some(pt) = self.particles.as_mut() else { return };
+        if let (true, Some(h)) = (self.left_down && play, hit) {
+            pt.crack(&g.world, &g.blocks, h.pos, h.face);
+        }
+        let eating = match (self.using, g.held()) {
+            (Some((t, d)), Some((item, _))) if d > 0 => Some((item, t, d)),
+            _ => None,
+        };
+        let fx = crate::particles::PlayerFx {
+            pos: self.mover.pos,
+            vel: self.mover.vel,
+            eye: [self.mover.pos[0], self.mover.pos[1] + eye_y, self.mover.pos[2]],
+            yaw: g.player.yaw,
+            pitch: g.player.pitch,
+            sprinting: self.sprinting && !g.flying,
+            on_ground: self.mover.on_ground,
+            in_fluid,
+            eating,
+        };
+        pt.tick(g, self.gui.as_ref(), &fx);
     }
 
     fn dig_tick(&mut self, g: &mut Game, hit: Option<Hit>) -> Result<(), String> {
@@ -1090,6 +1139,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             let s = g.world.get(p[0], p[1], p[2]);
             say!("broke {} at {} {} {} (on ground {})", g.blocks.of_state(s).name, p[0], p[1], p[2], self.mover.on_ground);
         }
+        if let Some(pt) = self.particles.as_mut() {
+            pt.destroy(&g.world, &g.blocks, p, state);
+        }
         let b = &g.blocks;
         g.world.set(p[0], p[1], p[2], 0, &|s| b.kind(s) == blocks::AIR);
     }
@@ -1186,6 +1238,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let (day_time, game_time) = (g.day_time, g.game_time as f64 + partial);
         // Clouds reach further than the terrain (vanilla: the cloud range option, 128 by default).
         let radius = ((self.view as f64 + 1.0) * 16.0).max(128.0) * 1.5;
+        let mut parts = self.particles.as_mut();
         self.r.draw_world(
             gl,
             &g.world,
@@ -1203,6 +1256,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 crate::entities::draw_items(gl, view, eye, entities, pf, icons, blocks_ref, atlas, atlas_size);
                 if let (Some(gui), false) = (gui_ref, dim) {
                     sky_ref.draw_clouds(gl, view, gui, eye, game_time, day, radius);
+                }
+                if let Some(pt) = parts.as_deref_mut() {
+                    pt.draw(gl, view, eye, pf, atlas);
                 }
             },
             &mut |view| {

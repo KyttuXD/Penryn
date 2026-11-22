@@ -254,7 +254,7 @@ class Relay:
 
     def build_assets(self, token=None):
         out = os.path.join(self.data_dir, "assets")
-        names = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin")
+        names = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "particles.bin")
         tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_assets.py")
         # Made again when the tool is newer (another format) than the files.
         if all(os.path.isfile(os.path.join(out, n)) and os.path.getmtime(os.path.join(out, n)) >= os.path.getmtime(tool)
@@ -305,7 +305,8 @@ def make_handler(relay):
         def do_GET(self):
             if not private(self.client_address[0]):
                 return self.reply(403, "local network only")
-            if self.path in ("/assets/blocks.bin", "/assets/atlas.bin", "/assets/gui.bin", "/assets/entities.bin"):
+            if self.path in ("/assets/blocks.bin", "/assets/atlas.bin", "/assets/gui.bin", "/assets/entities.bin",
+                             "/assets/particles.bin"):
                 try:
                     d = relay.build_assets()
                     with open(os.path.join(d, self.path.rsplit("/", 1)[1]), "rb") as f:

@@ -28,6 +28,7 @@ mod screens;
 mod sdl;
 mod sky;
 mod net;
+mod particles;
 mod sys;
 mod wire;
 mod world;
@@ -226,6 +227,10 @@ fn selftest() -> Result<(), String> {
     match load_blocks() {
         Ok(b) => {
             for (what, got, want) in physics_checks(&b) {
+                check(what, got, want);
+            }
+            let w = test_world(&b, &[]);
+            for (what, got, want) in particles::selftest(&b, &w) {
                 check(what, got, want);
             }
         }

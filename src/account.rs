@@ -139,6 +139,7 @@ pub const ATLAS_MAGIC: &[u8; 4] = b"PNA1";
 pub const GUI_MAGIC: &[u8; 4] = b"PNG2";
 pub const ENTITIES_MAGIC: &[u8; 4] = b"PNE2";
 pub const SOUNDS_MAGIC: &[u8; 4] = b"PNS1";
+pub const PARTICLES_MAGIC: &[u8; 4] = b"PNP1";
 
 /// Fetches the game files from the relay when they are missing or from another version.
 pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
@@ -146,7 +147,9 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
     const FILES: [(&str, &[u8; 4]); 4] =
         [("blocks.bin", BLOCKS_MAGIC), ("atlas.bin", ATLAS_MAGIC), ("gui.bin", GUI_MAGIC), ("entities.bin", ENTITIES_MAGIC)];
     let have = |n: &str, magic: &[u8; 4]| sys::read_head(&format!("{}/{}", dir, n), 4).map_or(false, |d| d == magic);
-    if FILES.iter().all(|(n, m)| have(n, m)) && (have("sounds.bin", SOUNDS_MAGIC) || relay.is_none()) {
+    if FILES.iter().all(|(n, m)| have(n, m))
+        && ((have("sounds.bin", SOUNDS_MAGIC) && have("particles.bin", PARTICLES_MAGIC)) || relay.is_none())
+    {
         return Ok(());
     }
     let Some(relay) = relay else {
@@ -169,6 +172,19 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
         }
         if !sys::write_file_private(&format!("{}/{}", dir, n), &r.body) {
             return Err(format!("cannot write {}/{}", dir, n));
+        }
+    }
+    // The particle sprites are optional: without them only block particles are drawn.
+    if !have("particles.bin", PARTICLES_MAGIC) {
+        crate::say!("fetching particles.bin from the relay ...");
+        match http::get(&relay.0, relay.1, "/assets/particles.bin", 600000) {
+            Ok(r) if r.status == 200 && r.body.get(..4) == Some(&PARTICLES_MAGIC[..]) => {
+                if !sys::write_file_private(&format!("{}/particles.bin", dir), &r.body) {
+                    crate::warn!("cannot write {}/particles.bin", dir);
+                }
+            }
+            Ok(_) => crate::warn!("the relay has no particles.bin (update the relay): no particle sprites"),
+            Err(e) => crate::warn!("could not fetch particles.bin ({}): no particle sprites", e),
         }
     }
     // The sounds are optional: without them the game plays silent.

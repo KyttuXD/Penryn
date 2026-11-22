@@ -84,6 +84,8 @@ pub struct Game {
     pub move_speed: f64,
     pub jump_strength: f64,
     pub fly_speed: f32,
+    /// Particles, explosions and events for the particle engine, until the window takes them.
+    pub effects: Vec<crate::particles::Effect>,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -288,6 +290,7 @@ impl Game {
             move_speed: 0.1f32 as f64,
             jump_strength: 0.42f32 as f64,
             fly_speed: 0.05,
+            effects: Vec::new(),
         })
     }
 
@@ -776,6 +779,13 @@ impl Game {
                 let v = r.i64().unwrap_or(0);
                 let data = r.i32().unwrap_or(0);
                 let (x, y, z) = ((v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32);
+                if self.effects.len() < 512 {
+                    self.effects.push(if kind == 2001 {
+                        crate::particles::Effect::Destroy([x, y, z], data as u16)
+                    } else {
+                        crate::particles::Effect::Level(kind, [x, y, z], data)
+                    });
+                }
                 // 2001: a block destroyed (by someone else): its break sound.
                 if kind == 2001 {
                     let blk = self.blocks.of_state(data as u16);
@@ -787,6 +797,19 @@ impl Game {
                             pitch: blk.sound_pitch * 0.8,
                             source: 4,
                         });
+                    }
+                }
+            }
+            play::C_LEVEL_PARTICLES | play::C_EXPLODE => {
+                if self.effects.len() < 512 {
+                    self.effects.push(crate::particles::Effect::Packet(p.id, p.body.clone()));
+                }
+            }
+            play::C_ENTITY_EVENT => {
+                let (id, ev) = (r.i32().unwrap_or(0), r.u8().unwrap_or(0));
+                if let Some(e) = self.entities.get(&id) {
+                    if self.effects.len() < 512 {
+                        self.effects.push(crate::particles::Effect::Entity(ev, e.pos, e.kind));
                     }
                 }
             }
@@ -1211,7 +1234,7 @@ fn sound(r: &mut In) -> Option<()> {
 /// Reads past one data component of `kind` exactly as its 26.3 stream codec writes it
 /// (DataComponents' registry order; horizon-protocol's item/skip.rs). `None` for the ones
 /// not handled here.
-fn skip_component(kind: i32, r: &mut In) -> Option<()> {
+pub(crate) fn skip_component(kind: i32, r: &mut In) -> Option<()> {
     match kind {
         // custom_data, custom_name, item_name: NBT
         0 | 6 | 9 | 61 => nbt::skip_root(r),
