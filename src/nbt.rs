@@ -195,6 +195,20 @@ fn text_in(r: &mut In, t: u8, out: &mut String, depth: u32, parent: &str) -> Opt
     Some(())
 }
 
+/// Skips a tag payload whose type byte (`t`) was already read: compound entries and list
+/// elements read elsewhere (block entities).
+pub fn skip_payload(r: &mut In, t: u8) -> Option<()> {
+    skip(r, t, 0)
+}
+
+/// The text of a chat component whose type byte (`t`) was already read (a list element or a
+/// compound entry), with its colours as formatting codes. `None` on malformed data.
+pub fn text_payload(r: &mut In, t: u8) -> Option<String> {
+    let mut s = String::new();
+    text_of(r, t, &mut s, 0)?;
+    Some(s)
+}
+
 /// The plain text of a chat component sent as network NBT.
 pub fn text(r: &mut In) -> String {
     let mut s = String::new();

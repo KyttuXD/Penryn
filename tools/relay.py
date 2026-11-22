@@ -12,7 +12,7 @@ Penryn asks this relay, over plain HTTP on the local network, to do them:
     Edition, and hand Penryn the Minecraft token and profile;
   * refresh that sign-in later without asking again;
   * make the session-server "join" call an online-mode server checks;
-  * serve the game files Penryn draws with (blocks.bin, atlas.bin, gui.bin, entities.bin, and sounds.bin), made from your own copy
+  * serve the game files Penryn draws with (blocks.bin, atlas.bin, gui.bin, entities.bin, signs.bin, and sounds.bin), made from your own copy
     of Minecraft 26.3: an existing install (Horizon's launcher, the official launcher, Prism),
     or the 26.3 client downloaded from Mojang for your signed-in account (as Horizon does).
 
@@ -254,7 +254,7 @@ class Relay:
 
     def build_assets(self, token=None):
         out = os.path.join(self.data_dir, "assets")
-        names = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin")
+        names = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "signs.bin")
         tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_assets.py")
         # Made again when the tool is newer (another format) than the files.
         if all(os.path.isfile(os.path.join(out, n)) and os.path.getmtime(os.path.join(out, n)) >= os.path.getmtime(tool)
@@ -305,7 +305,8 @@ def make_handler(relay):
         def do_GET(self):
             if not private(self.client_address[0]):
                 return self.reply(403, "local network only")
-            if self.path in ("/assets/blocks.bin", "/assets/atlas.bin", "/assets/gui.bin", "/assets/entities.bin"):
+            if self.path in ("/assets/blocks.bin", "/assets/atlas.bin", "/assets/gui.bin", "/assets/entities.bin",
+                             "/assets/signs.bin"):
                 try:
                     d = relay.build_assets()
                     with open(os.path.join(d, self.path.rsplit("/", 1)[1]), "rb") as f:

@@ -1410,10 +1410,51 @@ def main():
     print("gui.bin: %d sprites, %d glyphs, %d translations, atlas %dx%d; %d items (%d flat, %d 3D)"
           % (len(sprites) - len(font_pages), len(glyphs), len(lang), gw, gh, len(item_icons),
              sum(1 for i in item_icons if i[0] == 1), sum(1 for i in item_icons if i[0] == 2)))
+    make_signs(assets, names, out_dir)
     make_sounds(res, out_dir, sound_names)
     print("blocks.bin: %d states, %d blocks, %d quads; atlas %dx%d with %d textures%s"
           % (len(state_rows), len(blocks_out), len(quads), width, height, len(tiles),
              (", missing: " + ", ".join(sorted(missing))) if missing else ""))
+
+
+
+def make_signs(assets, block_names, out_dir):
+    """signs.bin, "PNT1": the sign editing screen's pictures, gui/signs/<wood>.png (24 x 26)
+    and gui/hanging_signs/<wood>.png (16 x 16), for each wood that has a sign block.
+
+        u16 width, u16 height, width x height RGBA
+        u8 woods; per wood: u8 name length, name, u16 x, y of the sign picture,
+        u16 x, y of the hanging sign picture (65535 when the game has none)
+    """
+    woods = [n[len("minecraft:"):-len("_sign")] for n in block_names
+             if n.endswith("_sign") and not n.endswith("_hanging_sign") and not n.endswith("_wall_sign")]
+    width, height = 512, 128
+    atlas = bytearray(width * height * 4)
+    rows = []
+
+    def put(img, x, y):
+        w, h, px = img
+        for j in range(h):
+            atlas[((y + j) * width + x) * 4:((y + j) * width + x + w) * 4] = px[j * w * 4:(j + 1) * w * 4]
+
+    for i, wood in enumerate(woods):
+        at = []
+        for kind, (w, h), (x, y) in (("signs", (24, 26), ((i % 21) * 24, (i // 21) * 26)),
+                                      ("hanging_signs", (16, 16), ((i % 32) * 16, 52 + (i // 32) * 16))):
+            img = png_decode(assets.read("textures/gui/%s/%s.png" % (kind, wood)))
+            if img is None or img[0] != w or img[1] != h or y + h > height:
+                at.append((0xFFFF, 0xFFFF))
+                continue
+            put(img, x, y)
+            at.append((x, y))
+        rows.append((wood, at))
+    with open(os.path.join(out_dir, "signs.bin"), "wb") as f:
+        f.write(b"PNT1" + struct.pack("<HH", width, height) + bytes(atlas))
+        f.write(bytes([len(rows)]))
+        for wood, ((sx, sy), (hx, hy)) in rows:
+            nb = wood.encode()
+            f.write(bytes([len(nb)]) + nb + struct.pack("<HHHH", sx, sy, hx, hy))
+    print("signs.bin: %d woods" % len(rows))
 
 
 def find_objects():

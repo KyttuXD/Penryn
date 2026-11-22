@@ -146,7 +146,8 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
     const FILES: [(&str, &[u8; 4]); 4] =
         [("blocks.bin", BLOCKS_MAGIC), ("atlas.bin", ATLAS_MAGIC), ("gui.bin", GUI_MAGIC), ("entities.bin", ENTITIES_MAGIC)];
     let have = |n: &str, magic: &[u8; 4]| sys::read_head(&format!("{}/{}", dir, n), 4).map_or(false, |d| d == magic);
-    if FILES.iter().all(|(n, m)| have(n, m)) && (have("sounds.bin", SOUNDS_MAGIC) || relay.is_none()) {
+    let signs_ok = have("signs.bin", crate::signs::SIGNS_MAGIC);
+    if FILES.iter().all(|(n, m)| have(n, m)) && ((have("sounds.bin", SOUNDS_MAGIC) && signs_ok) || relay.is_none()) {
         return Ok(());
     }
     let Some(relay) = relay else {
@@ -169,6 +170,17 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
         }
         if !sys::write_file_private(&format!("{}/{}", dir, n), &r.body) {
             return Err(format!("cannot write {}/{}", dir, n));
+        }
+    }
+    // The sign editor's pictures are optional: without them it draws plain boards.
+    if !signs_ok {
+        match http::get(&relay.0, relay.1, "/assets/signs.bin", 60000) {
+            Ok(r) if r.status == 200 && r.body.get(..4) == Some(&crate::signs::SIGNS_MAGIC[..]) => {
+                if !sys::write_file_private(&format!("{}/signs.bin", dir), &r.body) {
+                    crate::warn!("cannot write {}/signs.bin", dir);
+                }
+            }
+            _ => crate::warn!("the relay has no signs.bin: the sign editor draws plain boards"),
         }
     }
     // The sounds are optional: without them the game plays silent.

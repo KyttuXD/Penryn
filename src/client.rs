@@ -84,6 +84,8 @@ pub struct Game {
     pub move_speed: f64,
     pub jump_strength: f64,
     pub fly_speed: f32,
+    /// Block entities' data (signs' text) and the sign editor the server opened.
+    pub block_entities: crate::signs::BlockEntities,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -288,6 +290,7 @@ impl Game {
             move_speed: 0.1f32 as f64,
             jump_strength: 0.42f32 as f64,
             fly_speed: 0.05,
+            block_entities: crate::signs::BlockEntities::new(),
         })
     }
 
@@ -394,10 +397,15 @@ impl Game {
                     }
                     self.chunks_received += 1;
                 }
+                // Then the heightmaps' block entities: signs' text.
+                if self.block_entities.read_chunk(x, z, &mut r).is_none() {
+                    crate::warn!("chunk {} {}: could not read its block entities", x, z);
+                }
             }
             play::C_FORGET_LEVEL_CHUNK => {
                 let v = r.i64().unwrap_or(0);
                 self.world.forget(v as i32, (v >> 32) as i32);
+                self.block_entities.forget(v as i32, (v >> 32) as i32);
             }
             play::C_CHUNK_BATCH_FINISHED => {
                 let mut o = Out::new();
@@ -410,6 +418,7 @@ impl Game {
                 let (x, y, z) = ((v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32);
                 let blocks = &self.blocks;
                 self.world.set(x, y, z, s, &|s| blocks.kind(s) == crate::blocks::AIR);
+                self.block_entities.block_changed(blocks, x, y, z, s);
                 // The block this client placed: its place sound (BlockItem.place plays it).
                 if let Some((pp, at)) = self.placing {
                     if pp == [x, y, z] && crate::sys::now_ms() < at + 1500 && blocks.kind(s) != crate::blocks::AIR {
@@ -437,6 +446,18 @@ impl Game {
                     let (x, z, y) = ((c >> 8 & 15) as i32, (c >> 4 & 15) as i32, (c & 15) as i32);
                     let blocks = &self.blocks;
                     self.world.set(sx * 16 + x, sy * 16 + y, sz * 16 + z, state, &|s| blocks.kind(s) == crate::blocks::AIR);
+                    self.block_entities.block_changed(blocks, sx * 16 + x, sy * 16 + y, sz * 16 + z, state);
+                }
+            }
+            play::C_BLOCK_ENTITY_DATA | play::C_OPEN_SIGN_EDITOR => {
+                let v = r.i64().unwrap_or(0);
+                let (x, y, z) = ((v >> 38) as i32, (v << 52 >> 52) as i32, (v << 26 >> 38) as i32);
+                if p.id == play::C_OPEN_SIGN_EDITOR {
+                    // SignTextSlot: 0 back, 1 front.
+                    self.block_entities.open_request = Some(([x, y, z], r.varint().unwrap_or(1) == 1));
+                } else {
+                    let _kind = r.varint();
+                    let _ = self.block_entities.read_tag(x, y, z, &mut r);
                 }
             }
             play::C_PLAYER_ABILITIES => {
@@ -829,6 +850,7 @@ impl Game {
         let _seed = r.i64();
         self.game_mode = r.varint().unwrap_or(0);
         self.world.set_dimension(&dim);
+        self.block_entities.clear();
     }
 
     pub fn add_chat(&mut self, line: String) {
