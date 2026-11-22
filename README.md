@@ -20,7 +20,10 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 - **Vanilla's HUD and screens**, from your game's own sprites and font: hotbar, hearts, food,
   experience, crosshair, held item name, chat (with the game's translations), the F3 screen, the
   inventory with your character in it, chests, dispensers, crafting tables, furnaces, hoppers,
-  shulker boxes, tooltips, pause and death screens.
+  shulker boxes, tooltips, pause and death screens. In creative, vanilla's creative inventory: every
+  tab of the game, scrolling, search (names, tooltips, ids, `#tags`), the survival inventory tab
+  with its destroy slot, saved hotbars (C/X + number), and stacks with their components (enchanted
+  books, potions, paintings...) sent to the server as vanilla sends them.
 - **Plays as vanilla**: walking, sprinting, sneaking (no falling off edges), jumping, swimming,
   creative flight (ends on landing), the 0.6-block step, climbing ladders, vines and scaffolding,
   crouching where standing does not fit, and every block's own collision shape from the game
@@ -72,7 +75,8 @@ Rust's standard library needs. A Mac build needs no Xcode and no Apple SDK, and 
 
 ## Not done yet
 
-- No creative inventory screen (creative players get the survival one), no recipe book.
+- No recipe book. The creative inventory draws potions and tipped arrows untinted and without
+  the enchantment glint, and has no drag-splitting of stacks.
 - No ambient cave sounds or biome music (music.game everywhere).
 - Options screens without anything behind them yet: key binds, language, resource packs,
   telemetry, credits; brightness only lifts the night (Penryn has no light levels yet).

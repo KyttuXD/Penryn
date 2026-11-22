@@ -93,6 +93,8 @@ pub struct Game {
     pub effects: crate::effects::Effects,
     /// Particles, explosions and events for the particle engine, until the window takes them.
     pub particle_events: Vec<crate::particles::Effect>,
+    /// Creative mode: the slots' components, the registries they name, the permission level.
+    pub creative: crate::creative::Sync,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -256,7 +258,8 @@ impl Game {
         }
         // ---- configuration
         let mut biomes: Vec<String> = Vec::new();
-        configure(&mut c, view, &mut biomes)?;
+        let mut creative = crate::creative::Sync::new();
+        configure(&mut c, view, &mut biomes, &mut creative.registries)?;
         let block_bits = blocks.global_bits();
         let mut world = World::new(block_bits, crate::blocks::ceil_log2(biomes.len().max(1)));
         world.set_biomes(&biomes, &blocks);
@@ -302,6 +305,7 @@ impl Game {
             block_entities: crate::signs::BlockEntities::new(),
             effects: crate::effects::Effects::new(),
             particle_events: Vec::new(),
+            creative,
         })
     }
 
@@ -571,10 +575,12 @@ impl Game {
                 let n = r.varint().unwrap_or(0).max(0) as usize;
                 let mut ok = true;
                 let mut got: Vec<Option<(i32, i32)>> = Vec::with_capacity(n);
+                let mut patches: Vec<Vec<u8>> = Vec::with_capacity(n);
                 for _ in 0..n {
-                    match slot(&mut r) {
-                        Some((item, rest_ok)) => {
+                    match crate::creative::read_stack(&mut r) {
+                        Some((item, rest_ok, patch)) => {
                             got.push(item);
+                            patches.push(patch);
                             if !rest_ok {
                                 ok = false;
                                 break; // a component patch we cannot skip: the rest stays as it was
@@ -593,8 +599,9 @@ impl Game {
                 }
                 if id == 0 {
                     self.inventory_state = state;
-                    for (i, it) in got.into_iter().enumerate().take(46) {
+                    for (i, (it, p)) in got.into_iter().zip(patches).enumerate().take(46) {
                         self.inventory[i] = it;
+                        self.creative.patches[i] = p;
                     }
                 } else if let Some(c) = self.container.as_mut().filter(|c| c.id == id) {
                     c.state = state;
@@ -610,6 +617,7 @@ impl Game {
                             let menu = if k < 27 { 9 + k } else { 36 + k - 27 };
                             if menu < 46 {
                                 self.inventory[menu] = it;
+                                self.creative.patches[menu] = patches.get(i).cloned().unwrap_or_default();
                             }
                         }
                     }
@@ -619,13 +627,14 @@ impl Game {
                 let id = r.varint().unwrap_or(-2);
                 let state = r.varint().unwrap_or(0);
                 let i = r.u16().unwrap_or(0xFFFF) as i16 as i32;
-                let Some((item, _)) = slot(&mut r) else { return Ok(()) };
+                let Some((item, _, patch)) = crate::creative::read_stack(&mut r) else { return Ok(()) };
                 if id == -1 {
                     self.carried = item;
                 } else if id == 0 {
                     self.inventory_state = state;
                     if (0..46).contains(&i) {
                         self.inventory[i as usize] = item;
+                        self.creative.patches[i as usize] = patch;
                     }
                 } else if let Some(c) = self.container.as_mut().filter(|c| c.id == id) {
                     c.state = state;
@@ -668,8 +677,16 @@ impl Game {
                     40 => 45,
                     _ => -1,
                 };
-                if let (Some((item, _)), true) = (slot(&mut r), menu >= 0) {
+                if let (Some((item, _, patch)), true) = (crate::creative::read_stack(&mut r), menu >= 0) {
                     self.inventory[menu as usize] = item;
+                    self.creative.patches[menu as usize] = patch;
+                }
+            }
+            play::C_ENTITY_EVENT => {
+                // 24-28: the player's permission level (0-4).
+                let (id, ev) = (r.i32().unwrap_or(0), r.u8().unwrap_or(0));
+                if id == self.entity_id && (24..=28).contains(&ev) {
+                    self.creative.op_level = ev as i32 - 24;
                 }
             }
             play::C_SET_HELD_SLOT => {
@@ -878,7 +895,7 @@ impl Game {
             play::C_START_CONFIGURATION => {
                 self.conn.send(play::S_CONFIGURATION_ACKNOWLEDGED, &Out::new())?;
                 let mut b: Vec<String> = Vec::new();
-                configure(&mut self.conn, 8, &mut b)?;
+                configure(&mut self.conn, 8, &mut b, &mut self.creative.registries)?;
                 if !b.is_empty() {
                     self.world.biome_bits = crate::blocks::ceil_log2(b.len());
                     self.world.set_biomes(&b, &self.blocks);
@@ -1061,7 +1078,7 @@ impl Game {
 }
 
 /// The configuration phase, until the server finishes it. Counts the biomes it sends.
-fn configure(c: &mut Conn, view: i8, biomes: &mut Vec<String>) -> Result<(), String> {
+fn configure(c: &mut Conn, view: i8, biomes: &mut Vec<String>, regs: &mut Vec<(String, Vec<String>)>) -> Result<(), String> {
     c.send(config::S_CLIENT_INFORMATION, &crate::options::client_information(view))?;
     loop {
         let p = next(c)?;
@@ -1094,7 +1111,19 @@ fn configure(c: &mut Conn, view: i8, biomes: &mut Vec<String>) -> Result<(), Str
             config::C_REGISTRY_DATA => {
                 let id = r.string().unwrap_or_default();
                 let n = r.varint().unwrap_or(0).max(0) as usize;
-                if id == "minecraft:worldgen/biome" {
+                if crate::creative::REGISTRIES.contains(&id.as_str()) {
+                    // Entry names in the server's order: creative stacks' components name them.
+                    let mut names = Vec::new();
+                    for _ in 0..n {
+                        let Some(name) = r.string() else { break };
+                        names.push(name);
+                        if r.bool() == Some(true) && nbt::skip_root(&mut r).is_none() {
+                            break;
+                        }
+                    }
+                    regs.retain(|(k, _)| *k != id);
+                    regs.push((id, names));
+                } else if id == "minecraft:worldgen/biome" {
                     // The biome ids in the order the server numbers them.
                     biomes.clear();
                     for _ in 0..n {

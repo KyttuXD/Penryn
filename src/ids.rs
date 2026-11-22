@@ -118,6 +118,7 @@ pub mod play {
     pub const S_PUNCH: i32 = 46;
     pub const S_SET_CARRIED_ITEM: i32 = 54;
     pub const S_SIGN_UPDATE: i32 = 62;
+    pub const S_SET_CREATIVE_MODE_SLOT: i32 = 57;
     pub const S_USE_ITEM_ON: i32 = 66;
     pub const S_USE_ITEM: i32 = 67;
 }

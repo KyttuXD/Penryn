@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 
 // SDL scancodes
 const K_A: usize = 4;
+const K_C: usize = 6;
 const K_D: usize = 7;
 const K_E: usize = 8;
 const K_Q: usize = 20;
@@ -25,6 +26,7 @@ const K_R: usize = 21;
 const K_S: usize = 22;
 const K_T: usize = 23;
 const K_W: usize = 26;
+const K_X: usize = 27;
 const K_1: usize = 30;
 const K_RETURN: usize = 40;
 const K_ESC: usize = 41;
@@ -65,6 +67,8 @@ enum Screen {
     Pause,
     /// The player's inventory, or a container the server opened.
     Inventory,
+    /// The creative inventory (creative.rs).
+    Creative,
     Dead,
     /// The sign editor the server opened (signs.rs).
     Sign,
@@ -219,6 +223,7 @@ pub struct App {
     /// Ticks since a test's screen opened (PENRYN_TEST_INPUT click=X:Y, one each half second).
     test_ticks: usize,
     particles: Option<crate::particles::Particles>,
+    creative: crate::creative::Screen,
 }
 
 impl App {
@@ -344,6 +349,7 @@ pub fn run(host: &str, port: u16, name: &str, account: Option<&Account>, blocks:
         frame_shown: 0,
         test_ticks: 0,
         particles: None,
+        creative: crate::creative::Screen::new(),
     };
     let atlas = sys::read_file(&format!("{}/atlas.bin", crate::data_dir())).ok_or("cannot read atlas.bin (see README.md)")?;
     app.r.load_atlas(&app.v.gl, &atlas)?;
@@ -522,6 +528,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
 
     fn event(&mut self, g: &mut Game, e: &sdl::Event) -> Result<bool, String> {
         let t = e.u32_at(0);
+        if self.screen == Screen::Creative && t != sdl::EV_QUIT && t != sdl::EV_WINDOW && t != sdl::EV_MOUSEMOTION {
+            return self.creative_event(g, e);
+        }
         match t {
             sdl::EV_QUIT => return Ok(true),
             sdl::EV_WINDOW => {
@@ -700,6 +709,62 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         Ok(false)
     }
 
+    /// E: the creative inventory in creative mode, else the survival one.
+    fn open_inventory(&mut self, g: &Game, key: char) {
+        if g.game_mode == 1 {
+            if let Some(d) = self.gui.as_ref().and_then(|x| x.creative.as_ref()) {
+                self.creative.open(d, g, key);
+                self.set_screen(Screen::Creative);
+                return;
+            }
+        }
+        self.set_screen(Screen::Inventory);
+    }
+
+    /// Input while the creative inventory is open.
+    fn creative_event(&mut self, g: &mut Game, e: &sdl::Event) -> Result<bool, String> {
+        use crate::creative::Action;
+        let Some(gui) = self.gui.as_ref() else { return Ok(false) };
+        let Some(d) = gui.creative.as_ref() else { return Ok(false) };
+        let t = e.u32_at(0);
+        let shift = self.keys[K_LSHIFT] || self.keys[K_RSHIFT];
+        let act = match t {
+            sdl::EV_KEYDOWN | sdl::EV_KEYUP => {
+                let sc = e.i32_at(16).clamp(0, 511) as usize;
+                self.keys[sc] = t == sdl::EV_KEYDOWN;
+                if t == sdl::EV_KEYUP {
+                    return Ok(false);
+                }
+                self.creative.key(d, gui, g, sc, e.0[13] != 0, &self.keys, self.mouse)?
+            }
+            sdl::EV_TEXTINPUT => {
+                let n = e.0[12..44].iter().position(|c| *c == 0).unwrap_or(32);
+                self.creative.text(d, g, &String::from_utf8_lossy(&e.0[12..12 + n]));
+                Action::None
+            }
+            sdl::EV_MOUSEDOWN | sdl::EV_MOUSEUP => {
+                self.creative.mouse(d, gui, g, e.0[16], t == sdl::EV_MOUSEDOWN, shift, self.mouse.0, self.mouse.1)?;
+                Action::None
+            }
+            sdl::EV_MOUSEWHEEL => {
+                self.creative.wheel(d, e.i32_at(20));
+                Action::None
+            }
+            _ => Action::None,
+        };
+        self.creative_action(g, act)?;
+        Ok(false)
+    }
+
+    fn creative_action(&mut self, g: &mut Game, act: crate::creative::Action) -> Result<(), String> {
+        match act {
+            crate::creative::Action::Close => self.close_inventory(g)?,
+            crate::creative::Action::Survival => self.set_screen(Screen::Inventory),
+            crate::creative::Action::None => {}
+        }
+        Ok(())
+    }
+
     fn close_inventory(&mut self, g: &mut Game) -> Result<(), String> {
         let id = g.container.as_ref().map_or(0, |c| c.id);
         g.close_container(id)?;
@@ -713,7 +778,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.menu.close();
         }
         self.v.grab_mouse(s == Screen::Play);
-        self.v.text_input(s == Screen::Chat || s == Screen::Sign);
+        self.v.text_input(s == Screen::Chat || s == Screen::Sign || s == Screen::Creative);
         if s != Screen::Play {
             self.left_down = false;
             self.right_down = false;
@@ -768,6 +833,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     }
                 }
             }
+            Screen::Creative => {} // creative_event has it
             Screen::Dead => {
                 if sc == K_R && !self.respawn_sent {
                     self.ui_click();
@@ -786,7 +852,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     self.chat_line = String::from("/");
                     self.skip_text = Some(('/', sys::now_ms()));
                 }
-                K_E => self.set_screen(Screen::Inventory),
+                K_E => self.open_inventory(g, 'e'),
                 K_F3 => self.debug = !self.debug,
                 K_F11 => {
                     let f = !self.fullscreen;
@@ -811,7 +877,12 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     self.last_w = now;
                 }
                 x if (K_1..K_1 + 9).contains(&x) => {
-                    g.select_slot((x - K_1) as i16)?;
+                    // Creative: C+number saves the hotbar, X+number loads it.
+                    let d = self.gui.as_ref().and_then(|x| x.creative.as_ref()).filter(|_| g.game_mode == 1);
+                    match d {
+                        Some(d) if self.keys[K_C] || self.keys[K_X] => self.creative.hotbar_load_or_save(d, g, x - K_1, self.keys[K_X])?,
+                        _ => g.select_slot((x - K_1) as i16)?,
+                    }
                 }
                 _ => {}
             },
@@ -959,8 +1030,18 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 g.attack(id)?;
             }
         }
+        if self.screen == Screen::Creative {
+            let act = match self.gui.as_ref().and_then(|x| x.creative.as_ref().map(|d| (x, d))) {
+                Some((gui, d)) => self.creative.tick(d, gui, g, &mut self.mouse)?,
+                None => crate::creative::Action::None,
+            };
+            self.creative_action(g, act)?;
+        } else if self.screen == Screen::Inventory && !self.container_screen && g.game_mode == 1 && self.gui.as_ref().map_or(false, |x| x.creative.is_some()) {
+            // InventoryScreen.containerTick: in creative it becomes the creative screen.
+            self.open_inventory(g, '\0');
+        }
         if self.test_keys.contains('I') && self.screen == Screen::Play && g.loaded_sent {
-            self.set_screen(Screen::Inventory);
+            self.open_inventory(g, 'i');
             if let Some(gui) = self.gui.as_ref() {
                 self.mouse = (gui.width / 2.0 - 52.0, gui.height / 2.0 + 60.0);
             }
@@ -1599,7 +1680,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         screens::hud(&mut gui, g, self.screen == Screen::Play && !self.debug, held_name);
         g.effects.draw_hud(&self.v.gl, &mut gui, self.screen == Screen::Inventory && g.container.is_none());
         let now = sys::now_ms();
-        if self.screen != Screen::Inventory && self.screen != Screen::Dead {
+        if self.screen != Screen::Inventory && self.screen != Screen::Creative && self.screen != Screen::Dead {
             screens::chat(&mut gui, g, self.screen == Screen::Chat, now, &self.chat_line, (now / 300) % 2 == 0);
         }
         if self.debug {
@@ -1642,6 +1723,12 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
             }
             Screen::Sign => crate::signs::draw_editor(&mut gui, &self.v.gl, w, h, g, mx, my),
+            Screen::Creative => {
+                if let Some(d) = gui.creative.take() {
+                    self.creative.draw(&d, &mut gui, g, mx, my);
+                    gui.creative = Some(d);
+                }
+            }
             Screen::Dead => {
                 let msg = g.chat.last().map(|c| c.0.clone()).unwrap_or_default();
                 screens::draw_death(&mut gui, mx, my, &msg);
