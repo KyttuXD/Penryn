@@ -67,9 +67,10 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   26.3 lays them out, Esc and Done going back a screen. They are saved in `options.txt` in the data
   folder, with vanilla's key names; options Penryn has no use for yet are shown and kept.
 - **Riding as vanilla's client**: passengers on their vehicles' seats (each type's passenger
-  attachments), the camera riding along, sneak to get off (where the vehicle lets you off).
+  attachments), the camera riding along, sneak to get off (the server puts you
+  where the vehicle lets you off).
   Boats and rafts are rowed on your own client as AbstractBoat does (paddling, turning, water,
-  ice and land friction, floating up, the paddles' animation and sounds); saddled horses,
+  ice and land friction, floating up, the paddles' animation); saddled horses,
   donkeys, mules and camels are steered with the jump bar (the camel's dash and cooldown),
   pigs and striders with their stick (and its boost), the harnessed happy ghast flies along
   your look; the vehicle's hearts take the food bar's place. Minecarts are the server's to

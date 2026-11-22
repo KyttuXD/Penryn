@@ -59,13 +59,15 @@ impl Special {
     pub fn eye(&self) -> Option<f64> {
         match self.pose {
             SWIMMING | FALL_FLYING | SPIN_ATTACK => Some(SMALL_EYE),
+            // Crouching where standing does not fit, sneak key up or not.
+            CROUCHING => Some(physics::SNEAK_EYE),
             _ => None,
         }
     }
 
     /// The box is the small one (swimming, crawling, gliding, spinning).
     pub fn small(&self) -> bool {
-        self.eye().is_some()
+        matches!(self.pose, SWIMMING | FALL_FLYING | SPIN_ATTACK)
     }
 
     /// Entity.updateInWaterStateAndDoFluidPushing / updateFluidOnEyes for the player box.

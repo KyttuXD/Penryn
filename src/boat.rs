@@ -4,8 +4,8 @@
 //! 0.45 under water, coming up to the surface from the air), controlBoat (turning 1 degree a
 //! tick per key into the rotation that keeps 0.9 of itself, 0.04 forward, 0.005 back or
 //! while only turning), and Entity.move with the boat's box. The paddles' phases turn PI/8 a
-//! tick while rowing (every boat: the others' paddle states are synced data), with vanilla's
-//! paddle sounds at the top of each stroke.
+//! tick while rowing (every boat: the others' paddle states are synced data); the stroke
+//! sounds come from the server.
 
 use crate::blocks::{Blocks, WATER};
 use crate::client::Game;
@@ -319,12 +319,12 @@ fn ground_friction(world: &World, b: &Blocks, bb: &Aabb) -> f32 {
 }
 
 /// Every boat's paddles (AbstractBoat.tick, on every client): a rowing side turns PI/8 a tick,
-/// with the paddle sound at the top of its stroke; an idle one rests at 0. `ours` is the boat
-/// this client rows and its paddles (the others' come from their synced data, 11 and 12).
+/// an idle one rests at 0. `ours` is the boat this client rows and its paddles (the others'
+/// come from their synced data, 11 and 12). The stroke sounds are the server's: a client's
+/// Level.playSound with no player plays nothing (ClientLevel.playSeededSound), and the
+/// server's boat broadcasts them to everyone near, the rower included.
 pub fn animate_paddles(g: &mut Game, t: &EntityTable, ours: Option<(i32, [bool; 2])>) {
     use core::f32::consts::PI;
-    let mut sounds: Vec<(String, [f64; 3], f32)> = Vec::new();
-    let time = g.game_time;
     for (&id, e) in g.entities.iter_mut() {
         let name = t.types.get(e.kind as usize).map_or("", |x| x.name.as_str());
         if !(name.ends_with("_boat") || name.ends_with("_raft")) {
@@ -338,27 +338,12 @@ pub fn animate_paddles(g: &mut Game, t: &EntityTable, ours: Option<(i32, [bool; 
         for (i, key) in [crate::riding::D_PADDLE_LEFT, crate::riding::D_PADDLE_RIGHT].iter().enumerate() {
             let mut phase = f32::from_bits(e.data.get(key).copied().unwrap_or(0) as u32);
             if rowing[i] {
-                let p = math::wrap(phase as f64, 2.0 * PI as f64) as f32;
-                if p <= PI / 4.0 && math::wrap((phase + PI / 8.0) as f64, 2.0 * PI as f64) as f32 >= PI / 4.0 {
-                    let yr = math::to_rad(e.yaw as f64);
-                    let v = [-math::sin(yr), math::cos(yr)];
-                    let (dx, dz) = if i == 1 { (-v[1], v[0]) } else { (v[1], -v[0]) };
-                    let r = ((time.wrapping_mul(1103515245).wrapping_add(id as i64 * 12345 + i as i64) >> 8) & 1023) as f32 / 1023.0;
-                    let pitch = 0.8 + 0.4 * r;
-                    // getPaddleSound: water, or land for a boat on the ground (the status of
-                    // a boat this client does not move is not known; its ground flag is).
-                    let sound = if e.on_ground { "entity.boat.paddle_land" } else { "entity.boat.paddle_water" };
-                    sounds.push((String::from(sound), [e.pos[0] + dx, e.pos[1], e.pos[2] + dz], pitch));
-                }
                 phase += PI / 8.0;
             } else {
                 phase = 0.0;
             }
             e.data.insert(*key, phase.to_bits() as i64);
         }
-    }
-    for (name, pos, pitch) in sounds {
-        g.sounds.push(crate::client::Sound { sound: crate::client::SoundRef::Name(name), pos: Some(pos), volume: 1.0, pitch, source: 6 });
     }
 }
 

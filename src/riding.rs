@@ -502,7 +502,7 @@ impl Rider {
         };
         if vid < 0 {
             if self.vehicle >= 0 {
-                self.dismount(g, t, mover);
+                self.dismount(g, mover);
             }
             g.riding.jump_bar = None;
             g.riding.vehicle_health = None;
@@ -684,8 +684,7 @@ impl Rider {
         self.yaw = g.player.yaw;
         self.pitch = g.player.pitch * 0.5;
         // The rider's xxa / zza (KeyboardInput, x 0.98).
-        let zza = (k.forward as i32 - k.back as i32) as f32 * 0.98;
-        let xxa = (k.left as i32 - k.right as i32) as f32 * 0.98;
+        let (xxa, zza) = move_vector(k);
         let (mut strafe, mut forward, speed);
         match kind {
             Kind::Pig | Kind::Strider => {
@@ -695,15 +694,16 @@ impl Rider {
                     self.boost = (true, 0, bt as i32, bt);
                 }
                 if self.boost.0 {
+                    let was = self.boost.1;
                     self.boost.1 += 1;
-                    if self.boost.1 > self.boost.2 {
+                    if was > self.boost.2 {
                         self.boost.0 = false;
                     }
                 }
                 let factor = if self.boost.0 && self.boost.2 > 0 { 1.0 + 1.15 * msin((self.boost.1 as f32 / self.boost.2 as f32 * core::f32::consts::PI) as f64) } else { 1.0 };
                 // Pig: 0.225 of its speed; Strider: 0.55 (0.35 shivering out of lava).
                 let f = if kind == Kind::Pig { 0.225 } else if e.d(18) != 0 { 0.35 } else { 0.55 };
-                speed = if kind == Kind::Pig { (speed_attr * f) as f32 * factor } else { speed_attr as f32 * f as f32 * factor };
+                speed = if kind == Kind::Pig { (speed_attr * f * factor as f64) as f32 } else { speed_attr as f32 * f as f32 * factor };
                 strafe = 0.0;
                 forward = 1.0;
             }
@@ -781,8 +781,8 @@ impl Rider {
 
     /// HappyGhast.tickRidden / getRiddenInput / travel: it turns 8% of the way to the rider's
     /// yaw and flies along the look (forward tilted by the pitch, back at half, jump up 0.5),
-    /// x 3.9 x its flying speed, moved at 5/3 of the flying speed with 0.91 friction (0.8 in
-    /// water), no gravity.
+    /// x 3.9 x its flying speed, moved at 5/3 of the flying speed in air, water and lava alike
+    /// (travelFlying) with 0.91 friction (0.8 in water, 0.5 in lava), no gravity.
     fn ghast_tick(&mut self, g: &mut Game, xxa: f32, zza: f32, k: Keys) {
         let fly = g.riding.attrs.get(&self.vehicle).map(|a| a[4]).filter(|v| !v.is_nan()).unwrap_or(0.05);
         self.yaw += wrap_deg(g.player.yaw - self.yaw) * 0.08;
@@ -802,8 +802,8 @@ impl Rider {
         }
         let scale = 3.9 * fly as f32;
         let input = [(xxa * scale) as f64, (up * scale) as f64, (f * scale) as f64];
-        let in_water = fluid_at(&g.world, &g.blocks, self.pos) == crate::blocks::WATER;
-        let speed = if in_water { 0.02 } else { (fly as f32 * 5.0 / 3.0) as f64 };
+        let fluid = fluid_at(&g.world, &g.blocks, self.pos);
+        let speed = (fly as f32 * 5.0 / 3.0) as f64;
         // Entity.moveRelative / getInputVector (y unrotated).
         let l = input[0] * input[0] + input[1] * input[1] + input[2] * input[2];
         if l >= 1e-7 {
@@ -818,7 +818,7 @@ impl Rider {
         self.mount.pos = self.pos;
         let d = self.mount.vel;
         self.mount.move_entity(&g.world, &g.blocks, d, &Input::idle());
-        let fr = if in_water { 0.8f32 as f64 } else { 0.91f32 as f64 };
+        let fr = if fluid == crate::blocks::WATER { 0.8f32 as f64 } else if fluid == crate::blocks::LAVA { 0.5 } else { 0.91f32 as f64 };
         self.mount.vel = [self.mount.vel[0] * fr, self.mount.vel[1] * fr, self.mount.vel[2] * fr];
         self.pos = self.mount.pos;
         self.on_ground = self.mount.on_ground;
@@ -868,20 +868,15 @@ impl Rider {
         Ok(())
     }
 
-    /// LivingEntity.stopRiding: dismountVehicle puts the player where the vehicle lets it off.
-    fn dismount(&mut self, g: &mut Game, t: &EntityTable, mover: &mut Mover) {
-        let vid = self.vehicle;
+    /// Entity.removeVehicle on the client: the player stays where it sat. Only the server
+    /// runs LivingEntity.dismountVehicle (stopRiding skips it client-side); its teleport to
+    /// the dismount place comes as ClientboundPlayerPosition.
+    fn dismount(&mut self, g: &mut Game, mover: &mut Mover) {
         self.vehicle = -1;
         self.controlled = false;
         g.riding.driven = None;
-        let at = match g.entities.get(&vid) {
-            Some(v) => dismount_location(g, t, v, self.kind, g.player.yaw),
-            None => mover.pos,
-        };
+        let at = mover.pos;
         mover.reset(at);
-        g.player.x = at[0];
-        g.player.y = at[1];
-        g.player.z = at[2];
         self.seat = at;
         self.prev_seat = at;
         if crate::sys::env("PENRYN_DEBUG").is_some() {
@@ -923,81 +918,6 @@ fn fluid_at(world: &World, b: &Blocks, p: [f64; 3]) -> u8 {
         k
     } else {
         0
-    }
-}
-
-/// BlockGetter.getBlockFloorHeight: the top of the collision at `p`, or of the block under it
-/// less one; -inf when neither has one.
-fn floor_height(world: &World, b: &Blocks, x: i32, y: i32, z: i32) -> f64 {
-    let top = |y: i32| -> Option<f64> {
-        let a = physics::Aabb { lo: [x as f64 + 0.01, y as f64, z as f64 + 0.01], hi: [x as f64 + 0.99, y as f64 + 1.0, z as f64 + 0.99] };
-        let bs = physics::boxes(world, b, &a);
-        bs.iter()
-            .filter(|o| o.lo[0] < a.hi[0] && o.hi[0] > a.lo[0] && o.lo[2] < a.hi[2] && o.hi[2] > a.lo[2] && o.lo[1] < y as f64 + 1.0 && o.hi[1] > y as f64 && o.hi[1] - o.lo[1] < 100.0)
-            .map(|o| o.hi[1] - y as f64)
-            .fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))))
-    };
-    match top(y) {
-        Some(h) => h,
-        None => match top(y - 1) {
-            Some(h) if h >= 1.0 => h - 1.0,
-            _ => f64::NEG_INFINITY,
-        },
-    }
-}
-
-/// getDismountLocationForPassenger, for the vehicle kinds that have their own.
-pub fn dismount_location(g: &Game, t: &EntityTable, v: &Entity, kind: Kind, rider_yaw: f32) -> [f64; 3] {
-    let (vw, vh) = t.dims(v);
-    let on_top = [v.pos[0], v.pos[1] + vh as f64, v.pos[2]];
-    let fits = |p: [f64; 3]| physics::fits(&g.world, &g.blocks, p, physics::HEIGHT) || physics::fits(&g.world, &g.blocks, p, physics::SNEAK_HEIGHT);
-    match kind {
-        Kind::Boat | Kind::Raft | Kind::ChestBoat => {
-            // AbstractBoat: out to the side the rider faces (getCollisionHorizontalEscapeVector).
-            let d = ((vw * core::f32::consts::SQRT_2) as f64 + 0.6f32 as f64 + 1.0e-5f32 as f64) / 2.0;
-            let yr = (rider_yaw * 0.017453292f32) as f64;
-            let (f, c) = (-msin(yr), mcos(yr));
-            let h = f.abs().max(c.abs());
-            let (x, z) = (v.pos[0] + f as f64 * d / h as f64, v.pos[2] + c as f64 * d / h as f64);
-            let (bx, by, bz) = (math::ifloor(x), math::ifloor(v.pos[1] + vh as f64), math::ifloor(z));
-            let below = g.world.get(bx, by - 1, bz);
-            if g.blocks.kind(below) != crate::blocks::WATER && !g.blocks.has_fluid(below) {
-                for y in [by, by - 1] {
-                    let fl = floor_height(&g.world, &g.blocks, bx, y, bz);
-                    if fl.is_finite() && fl < 1.0 {
-                        let p = [x, y as f64 + fl, z];
-                        if fits(p) {
-                            return p;
-                        }
-                    }
-                }
-            }
-            on_top
-        }
-        Kind::Horse | Kind::Camel | Kind::Pig | Kind::Llama | Kind::Minecart | Kind::Strider => {
-            // DismountHelper.offsetsForDirection around the vehicle's facing (Animal,
-            // AbstractHorse, AbstractMinecart): right, left, back right, back left, ...
-            let yaw = if kind == Kind::Minecart { v.yaw } else { v.body_yaw };
-            let facing = math::ifloor(yaw as f64 / 90.0 + 0.5);
-            let (fx, fz) = [(0, 1), (-1, 0), (0, -1), (1, 0)][(facing & 3) as usize];
-            let (rx, rz) = (-fz, fx);
-            let offsets = [(rx, rz), (-rx, -rz), (rx - fx, rz - fz), (-rx - fx, -rz - fz), (fx + rx, fz + rz), (fx - rx, fz - rz), (-fx, -fz), (fx, fz)];
-            let (bx, by, bz) = (math::ifloor(v.pos[0]), math::ifloor(v.pos[1]), math::ifloor(v.pos[2]));
-            for (dx, dz) in offsets {
-                let (x, z) = (bx + dx, bz + dz);
-                for y in [by, by + 1, by - 1] {
-                    let fl = floor_height(&g.world, &g.blocks, x, y, z);
-                    if fl.is_finite() && fl < 1.0 {
-                        let p = [x as f64 + 0.5, y as f64 + fl, z as f64 + 0.5];
-                        if fits(p) {
-                            return p;
-                        }
-                    }
-                }
-            }
-            on_top
-        }
-        _ => on_top,
     }
 }
 
@@ -1049,6 +969,21 @@ pub fn hud(gui: &mut crate::gui::Gui, g: &Game) -> (bool, bool) {
     (xp, food)
 }
 
+/// The rider's xxa and zza: KeyboardInput's normalized move vector, LocalPlayer.modifyInput's
+/// x 0.98 and modifyInputSpeedForSquareMovement (straight 0.98, diagonal 0.7071 each).
+fn move_vector(k: Keys) -> (f32, f32) {
+    let (l, f) = ((k.left as i32 - k.right as i32) as f32, (k.forward as i32 - k.back as i32) as f32);
+    if l == 0.0 && f == 0.0 {
+        (0.0, 0.0)
+    } else if l == 0.0 || f == 0.0 {
+        (l * 0.98, f * 0.98)
+    } else {
+        // 0.98 x sqrt(2) is over 1: the square's corner, cut to length 1.
+        let d = core::f32::consts::FRAC_1_SQRT_2;
+        (l * d, f * d)
+    }
+}
+
 /// AbstractHorse.getPlayerJumpPendingScale.
 fn pending_scale(a: i32) -> f32 {
     if a >= 90 {
@@ -1077,6 +1012,10 @@ pub fn selftest(b: &Blocks, w: &World) -> Vec<(&'static str, String, &'static st
     // getPlayerJumpPendingScale.
 
     v.push(("horse jump scale", format!("{:.4} {:.4} {:.4}", pending_scale(0), pending_scale(45), pending_scale(95)), "0.4000 0.6000 1.0000"));
+    // The rider's move vector: straight 0.98, diagonal the unit square's corner cut to 1.
+    let fl = move_vector(Keys { forward: true, left: true, ..Keys::default() });
+    let f = move_vector(Keys { forward: true, ..Keys::default() });
+    v.push(("rider input", format!("{:.4} {:.4} {:.4} {:.4}", fl.0, fl.1, f.0, f.1), "0.7071 0.7071 0.0000 0.9800"));
     // Mth.sin's table.
     v.push(("Mth.sin table", format!("{:.7} {:.7}", msin(1.0), mcos(math::PI)), "0.8414514 -1.0000000"));
     // The LP vector codec round trip (client.rs writes, we read).
