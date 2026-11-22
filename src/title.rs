@@ -615,7 +615,7 @@ impl Front {
         let acc = self.account.clone();
         let name = self.player_name();
         crate::client::JOIN_STAGE.store(0, core::sync::atomic::Ordering::Relaxed);
-        let task = task::spawn(move || Game::login(&host, port, &name, acc.as_ref()).map(Sendable));
+        let task = task::spawn(move || Game::login(&host, port, &name, acc.as_ref(), crate::serverui::Common::default(), false).map(Sendable));
         self.scr = Scr::Connect { task, address: String::from(address), back_to_list };
     }
 

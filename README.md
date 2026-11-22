@@ -92,6 +92,20 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   suggestions from the server's command tree: the list above the input (Tab, arrows), the
   arguments coloured, their usage, parse errors in red, the server's own suggestions; history
   (up and down), cursor keys and the clipboard.
+- **What servers show besides the world**, as vanilla's Hud: the tab list (Tab: names and
+  display names, team prefixes and colours, spectators greyed, ping bars, faces on online-mode
+  servers, the list objective as numbers or hearts, header and footer), the scoreboard sidebar
+  (number formats, team-colour sidebars), below-name scores, team name tag visibility, boss bars
+  (every colour and notch style, darkened sky and world fog), titles, subtitles and the action
+  bar with vanilla's fades, the world border (its wall, the red edge when near, and the player
+  stopping at it), the death message and score on the death screen, the immediate respawn rule,
+  the pause menu's Server Links (with vanilla's link confirmation), cookies, and transfers to
+  another server. Item tooltips show what servers put on stacks: custom names, lore, rarity,
+  enchantments and stored enchantments, attribute modifiers (the defaults too), dyed, unbreakable,
+  can break and can place on, hidden parts. Every 26.3 data component is read, so containers
+  holding unusual stacks arrive whole. Spectators fly through blocks without a HUD and see from
+  the entity they spectate; adventure players break only what their item's can_break allows.
+  The pictures (boss bars, ping icons, the border wall) are in `serverui.bin` (optional).
 - **Status effects**: their icons at the top right and beside the inventory (names, times,
   blinking as they run out), jump boost, levitation, slow falling and dolphin's grace on
   movement, blindness and darkness closing the fog in, night vision lifting the night.
@@ -157,8 +171,10 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 - Only menus listed above have their own screen; others show their slots as chest rows.
 - Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);
   no elytra, and Dinnerbone and Grumm stand the right way up.
-- Item stacks with unusual data components (potions, books, banners...) can hide the slots after
-  them in a container until the server sends them again.
+- Tooltips have no potion effects, book authors, firework or banner lines for stacks whose
+  components the server changed; italics and bold are drawn as plain text; no advanced tooltips
+  (F3+H). The spectator hotbar menu (teleporting to players) and seeing invisible entities as
+  spectator are not done; can_break and can_place_on check blocks and tags, not block states.
 
 ## Building (on Linux)
 
@@ -185,7 +201,7 @@ secure chat: `POST /certificates`):
 PENRYN_MSA_CLIENT_ID=<your client id> python3 tools/relay.py      # port 25580
 ```
 
-It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`, `effects.bin`, `weather.bin`, `signs.bin`, `particles.bin`, `menu.bin`) from
+It also makes Penryn's game files (`blocks.bin`, `atlas.bin`, `gui.bin`, `entities.bin`, `effects.bin`, `weather.bin`, `signs.bin`, `particles.bin`, `menu.bin`, `serverui.bin`) from
 your own copy of Minecraft: the 26.3 client jar from an existing install (Horizon's launcher, the
 official launcher, Prism), or downloaded from Mojang for a signed-in account that owns the game,
 plus the data Horizon's `horizon-prepare` writes (install a Horizon release with its launcher).
@@ -263,6 +279,8 @@ E inventory, T chat, / command, F3 debug, F11 full screen, Esc menu.
 | `src/gui.rs`, `screens.rs`, `lang.rs` | vanilla's GUI |
 | `src/play.rs`, `physics.rs` | the game window, input, movement, digging |
 | `src/effects.rs`, `moving.rs` | status effects; pistons and shulker lids in motion |
+| `src/serverui.rs`, `serverhud.rs` | tab list, scoreboard, teams, boss bars, titles, world border, links, cookies, transfers |
+| `src/tooltip.rs`, `gamemode.rs` | item components and tooltips; spectator and adventure mode |
 | `src/sys.rs`, `sdl.rs`, `math.rs` | the C library, SDL2 and OpenGL, float maths (no libm) |
 | `src/account.rs`, `http.rs`, `tools/relay.py` | sign-in and the relay |
 | `tools/make_assets.py` | the game files, from your copy of Minecraft |

@@ -15,8 +15,6 @@ use alloc::vec::Vec;
 
 /// Packet ids of protocol 777 these need (Horizon's table).
 pub const C_ENTITY_EVENT: i32 = 34;
-pub const C_PLAYER_INFO_REMOVE: i32 = 70;
-pub const C_PLAYER_INFO_UPDATE: i32 = 71;
 pub const C_SET_EQUIPMENT: i32 = 104;
 
 /// One entry of a variant registry: the textures it names.

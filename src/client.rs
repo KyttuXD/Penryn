@@ -112,6 +112,8 @@ pub struct Game {
     pub reconfigure: bool,
     /// Chat: the log, secure chat, the command tree, titles (talk.rs).
     pub talk: crate::talk::Talk,
+    /// The tab list, scoreboard, teams, boss bars, titles, world border... (serverui.rs).
+    pub ui: crate::serverui::ServerUi,
 }
 
 /// A sound to play: a sound-event registry id or a name, where (None: no position), volume,
@@ -135,6 +137,8 @@ pub struct Container {
     pub menu: i32,
     pub title: String,
     pub slots: Vec<Option<(i32, i32)>>,
+    /// Each slot's component patch (creative.rs's delimited form), for tooltips.
+    pub patches: Vec<Vec<u8>>,
     pub state: i32,
 }
 
@@ -196,19 +200,35 @@ fn random_bytes(n: usize) -> Vec<u8> {
 /// A login that got through to configuration (Game::login); Game::configure finishes the join
 /// on the thread that owns the window, where the resource packs can ask and reload.
 pub struct Login {
-    conn: Conn,
-    host: String,
-    port: u16,
-    name: String,
-    uuid: [u8; 16],
+    pub conn: Conn,
+    pub host: String,
+    pub port: u16,
+    pub name: String,
+    pub uuid: [u8; 16],
+    /// What a transfer keeps: the cookies (serverui.rs).
+    pub common: crate::serverui::Common,
+    pub account: Option<Account>,
+}
+
+/// Why a join stopped: an error, or a transfer to another server (its address, and what it keeps).
+pub enum Join {
+    Failed(String),
+    Transfer(String, u16, crate::serverui::Common),
+}
+
+impl From<String> for Join {
+    fn from(e: String) -> Join {
+        Join::Failed(e)
+    }
 }
 
 impl Game {
-    /// Connects and logs in (the connect screen's stages). Runs on the join's thread.
-    pub fn login(host: &str, port: u16, name: &str, account: Option<&Account>) -> Result<Login, String> {
+    /// Connects and logs in (the connect screen's stages). Runs on the join's thread. `common` is
+    /// what a transfer keeps (the cookies); `transferred` says so in the handshake (ClientIntent.TRANSFER).
+    pub fn login(host: &str, port: u16, name: &str, account: Option<&Account>, mut common: crate::serverui::Common, transferred: bool) -> Result<Login, String> {
         crate::talk::set_account(account);
         let mut c = Conn::open(host, port)?;
-        handshake(&mut c, host, port, 2)?;
+        handshake(&mut c, host, port, if transferred { 3 } else { 2 })?;
         let (name, uuid) = match account {
             Some(a) => (a.name.clone(), uuid_bytes(&a.uuid)),
             None => (String::from(name), crate::md5::offline_uuid(name)),
@@ -269,12 +289,7 @@ impl Game {
                     o.varint(id).bool(false);
                     c.send(login::S_CUSTOM_QUERY_ANSWER, &o)?;
                 }
-                login::C_COOKIE_REQUEST => {
-                    let key = r.string().unwrap_or_default();
-                    let mut o = Out::new();
-                    o.string(&key).bool(false);
-                    c.send(login::S_COOKIE_RESPONSE, &o)?;
-                }
+                login::C_COOKIE_REQUEST => crate::serverui::login_cookie(&mut c, &mut r, &mut common)?,
                 login::C_FINISHED => {
                     let u = r.uuid().unwrap_or([0; 16]);
                     final_uuid = u;
@@ -282,24 +297,37 @@ impl Game {
                     crate::say!("logged in as {} ({})", n, uuid_text(&u));
                     stage(3);
                     c.send(login::S_ACKNOWLEDGED, &Out::new())?;
+                    // ClientHandshakePacketListenerImpl: the brand goes first in the configuration.
+                    crate::serverui::send_brand(&mut c)?;
                     break;
                 }
                 other => return Err(format!("unexpected login packet {}", other)),
             }
         }
-        Ok(Login { conn: c, host: String::from(host), port, name, uuid: final_uuid })
+        Ok(Login { conn: c, host: String::from(host), port, name, uuid: final_uuid, common, account: account.cloned() })
     }
 
     /// Joins with the login made by `login`: the configuration (resource packs, registries)
     /// and the start of play. `ui` is the window: the packs' prompt and reloads run on it.
-    pub fn configure(login: Login, mut blocks: Blocks, view: i8, local_packs: Vec<String>, ui: &mut dyn crate::packs::Host) -> Result<Game, String> {
-        let Login { conn: mut c, host, port, name, uuid: final_uuid } = login;
+    pub fn configure(login: Login, mut blocks: Blocks, view: i8, local_packs: Vec<String>, ui: &mut dyn crate::packs::Host) -> Result<Game, Join> {
+        let Login { conn: mut c, host, port, name, uuid: final_uuid, mut common, .. } = login;
         // ---- configuration
         let mut biomes: Vec<String> = Vec::new();
         let mut creative = crate::creative::Sync::new();
         let mut variants = crate::mobs::Variants::default();
         let mut packs = crate::packs::Packs::new(&host, port, &name, &final_uuid, local_packs);
-        configure(&mut c, view, &mut biomes, &mut creative.registries, &mut variants, &mut packs, ui, None, &mut blocks)?;
+        let configured = configure(&mut c, view, &mut biomes, &mut creative.registries, &mut variants, &mut packs, ui, None, &mut blocks, &mut common);
+        if let Err(e) = configured {
+            // A transfer in the configuration: the packs go back to the player's own, and the
+            // server to connect to comes back for the next join (serverui's join_with).
+            if let Some((h, p)) = common.transfer.take() {
+                packs.leave(ui, None, &mut blocks);
+                return Err(Join::Transfer(h, p, common));
+            }
+            return Err(Join::Failed(e));
+        }
+        let mut su = crate::serverui::ServerUi::new(common);
+        su.online = c.cipher.is_some();
         let block_bits = blocks.global_bits();
         let mut world = World::new(block_bits, crate::blocks::ceil_log2(biomes.len().max(1)));
         world.set_biomes(&biomes, &blocks);
@@ -351,20 +379,24 @@ impl Game {
             packs,
             reconfigure: false,
             talk: crate::talk::Talk::new(),
+            ui: su,
         })
     }
 
     /// Connects, logs in and configures (main.rs's headless join).
     pub fn join(host: &str, port: u16, name: &str, account: Option<&Account>, blocks: Blocks, view: i8, local_packs: Vec<String>, ui: &mut dyn crate::packs::Host) -> Result<Game, String> {
-        let login = Game::login(host, port, name, account)?;
-        Game::configure(login, blocks, view, local_packs, ui)
+        let login = Game::login(host, port, name, account, crate::serverui::Common::default(), false)?;
+        Game::configure(login, blocks, view, local_packs, ui).map_err(|e| match e {
+            Join::Failed(e) => e,
+            Join::Transfer(h, p, _) => alloc::format!("the server transferred to {}:{} (penryn join does not follow transfers)", h, p),
+        })
     }
 
     /// The configuration phase the server started from play (ClientboundStartConfiguration).
     pub fn reconfigure_now(&mut self, ui: &mut dyn crate::packs::Host) -> Result<(), String> {
         self.reconfigure = false;
         let mut b: Vec<String> = Vec::new();
-        configure(&mut self.conn, 8, &mut b, &mut self.creative.registries, &mut self.variants, &mut self.packs, ui, Some(&mut self.world), &mut self.blocks)?;
+        configure(&mut self.conn, 8, &mut b, &mut self.creative.registries, &mut self.variants, &mut self.packs, ui, Some(&mut self.world), &mut self.blocks, &mut self.ui.common)?;
         if !b.is_empty() {
             self.world.biome_bits = crate::blocks::ceil_log2(b.len());
             self.world.set_biomes(&b, &self.blocks);
@@ -403,7 +435,7 @@ impl Game {
     }
 
     fn handle(&mut self, p: Packet) -> Result<(), String> {
-        if self.talk_packet(&p)? {
+        if self.talk_packet(&p)? || crate::serverui::handle(self, &p)? {
             return Ok(());
         }
         let mut r = p.reader();
@@ -665,9 +697,13 @@ impl Game {
                     if c.slots.len() < n {
                         c.slots.resize(n, None);
                     }
+                    if c.patches.len() < n {
+                        c.patches.resize(n, Vec::new());
+                    }
                     let own = n.saturating_sub(36);
                     for (i, it) in got.into_iter().enumerate() {
                         c.slots[i] = it;
+                        c.patches[i] = patches.get(i).cloned().unwrap_or_default();
                         // The player's own rows at the bottom of every container.
                         if i >= own {
                             let k = i - own;
@@ -700,6 +736,10 @@ impl Game {
                             c.slots.resize(i as usize + 1, None);
                         }
                         c.slots[i as usize] = item;
+                        if c.patches.len() <= i as usize {
+                            c.patches.resize(i as usize + 1, Vec::new());
+                        }
+                        c.patches[i as usize] = patch;
                     }
                 }
             }
@@ -712,7 +752,7 @@ impl Game {
                 let id = r.varint().unwrap_or(0);
                 let menu = r.varint().unwrap_or(0);
                 let title = nbt::text(&mut r);
-                self.container = Some(Container { id, menu, title, slots: Vec::new(), state: 0 });
+                self.container = Some(Container { id, menu, title, slots: Vec::new(), patches: Vec::new(), state: 0 });
             }
             play::C_CONTAINER_CLOSE => {
                 let id = r.varint().unwrap_or(0);
@@ -858,8 +898,6 @@ impl Game {
                     e.hurt = 10;
                 }
             }
-            play::C_PLAYER_INFO_UPDATE => crate::skins::player_info(&mut r, self.uuid),
-            play::C_PLAYER_INFO_REMOVE => crate::skins::player_remove(&mut r),
             play::C_SET_ENTITY_DATA => {
                 let id = r.varint().unwrap_or(0);
                 if let Some(e) = self.entities.get_mut(&id) {
@@ -872,12 +910,6 @@ impl Game {
                 if let Some(e) = self.entities.get_mut(&id) {
                     crate::mobs::equipment(&mut r, e, slot);
                 }
-            }
-            crate::mobs::C_PLAYER_INFO_UPDATE => {
-                crate::mobs::player_info(&mut r, &mut self.player_names);
-            }
-            crate::mobs::C_PLAYER_INFO_REMOVE => {
-                crate::mobs::player_info_remove(&mut r, &mut self.player_names);
             }
             crate::mobs::C_ENTITY_EVENT => {
                 // 3: LivingEntity.handleEntityEvent's death (health to 0, it falls over).
@@ -1167,6 +1199,7 @@ fn configure(
     ui: &mut dyn crate::packs::Host,
     mut world: Option<&mut World>,
     blocks: &mut Blocks,
+    common: &mut crate::serverui::Common,
 ) -> Result<(), String> {
     c.send(config::S_CLIENT_INFORMATION, &crate::options::client_information(view))?;
     let mut heard = crate::sys::now_ms();
@@ -1195,11 +1228,6 @@ fn configure(
                 let mut o = Out::new();
                 o.i32(r.i32().unwrap_or(0));
                 c.send(config::S_PONG, &o)?;
-            }
-            config::C_COOKIE_REQUEST => {
-                let mut o = Out::new();
-                o.string(&r.string().unwrap_or_default()).bool(false);
-                c.send(config::S_COOKIE_RESPONSE, &o)?;
             }
             config::C_SELECT_KNOWN_PACKS => {
                 // We know no packs: the server sends every registry entry in full.
@@ -1253,7 +1281,9 @@ fn configure(
                 c.send(config::S_FINISH, &Out::new())?;
                 return Ok(());
             }
-            _ => {}
+            _ => {
+                crate::serverui::config_packet(c, &p, common)?;
+            }
         }
     }
 }
@@ -1296,7 +1326,7 @@ fn lp_vec3(r: &mut In) {
 
 /// Entity data values: bytes and VarInts kept by index, an item stack taken (a dropped
 /// item's DATA_ITEM). Stops at a value it cannot read past.
-fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option<()> {
+pub(crate) fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option<()> {
     loop {
         let index = r.u8()?;
         if index == 0xFF {
@@ -1514,7 +1544,8 @@ pub(crate) fn skip_component(kind: i32, r: &mut In) -> Option<()> {
             r.varint()?;
             nbt::skip_root(r)
         }
-        _ => None,
+        // Every other component's codec (tooltip.rs).
+        _ => crate::tooltip::skip(kind, r),
     }
 }
 

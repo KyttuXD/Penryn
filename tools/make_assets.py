@@ -1965,6 +1965,7 @@ def main():
         make_sounds(res, out_dir, sound_names)
     make_weather(res, assets, out_dir, reg)
     make_menu(res, assets, out_dir)
+    make_serverui(assets, out_dir, res, reg)
     print("blocks.bin: %d states, %d blocks, %d quads; atlas %dx%d with %d textures%s"
           % (len(state_rows), len(blocks_out), len(quads), width, height, len(tiles),
              (", missing: " + ", ".join(sorted(missing))) if missing else ""))
@@ -2111,6 +2112,59 @@ def make_weather(res, assets, out_dir, reg):
     with open(os.path.join(out_dir, "weather.bin"), "wb") as f:
         f.write(out)
     print("weather.bin: rain and snow textures, %d biomes" % len(rows))
+
+def make_serverui(assets, out_dir, res=None, reg=None):
+    """serverui.bin, "PNU1" (little-endian): the pictures of what servers show besides the
+    world: the boss bars (gui/sprites/boss_bar/), the tab list's ping icons (icon/ping_*), the
+    spectator hotbar's icons (spectator/), the world border's wall (misc/forcefield) and the
+    vignette (misc/vignette). u16 count; per picture: u8 name length, name, u16 width,
+    u16 height, RGBA. Then the items' default attribute modifiers (items.json), which tooltips
+    list: u16 items; per item: u16 item id, u8 modifiers; per modifier: u8 attribute id, f64
+    amount, u8 operation, u8 EquipmentSlotGroup id, u8 flags (1 the base attack damage, 2 the
+    base attack speed, 4 hidden). Optional for Penryn: without it boss bars are plain bars, the
+    border is not drawn and tooltips have no default attributes."""
+    names = []
+    for colour in ("pink", "blue", "red", "green", "yellow", "purple", "white"):
+        names += ["boss_bar/%s_background" % colour, "boss_bar/%s_progress" % colour]
+    for n in (6, 10, 12, 20):
+        names += ["boss_bar/notched_%d_background" % n, "boss_bar/notched_%d_progress" % n]
+    names += ["icon/ping_%s" % p for p in ("unknown", "1", "2", "3", "4", "5")]
+    names += ["spectator/%s" % s for s in ("close", "scroll_left", "scroll_right", "teleport_to_player", "teleport_to_team")]
+    pics = []
+    for n in names:
+        img = png_decode(assets.read("textures/gui/sprites/%s.png" % n))
+        if img is not None:
+            pics.append((n, img))
+    for n in ("forcefield", "vignette"):
+        img = png_decode(assets.read("textures/misc/%s.png" % n))
+        if img is not None:
+            pics.append(("misc/" + n, img))
+    out = bytearray(b"PNU1" + struct.pack("<H", len(pics)))
+    for n, (w, h, px) in pics:
+        nb = n.encode()
+        out += struct.pack("<B", len(nb)) + nb + struct.pack("<HH", w, h) + bytes(px)
+    groups = ["any", "mainhand", "offhand", "hand", "feet", "legs", "chest", "head", "armor", "body", "saddle"]
+    ops = ["add_value", "add_multiplied_base", "add_multiplied_total"]
+    rows = []
+    path = os.path.join(res, "items.json") if res else None
+    if path and reg and os.path.isfile(path):
+        attrs = reg["minecraft:attribute"]["entries"]
+        item_ids = reg["minecraft:item"]["entries"]
+        for name, comps in sorted(json.load(open(path)).items(), key=lambda kv: item_ids[kv[0]]["protocol_id"]):
+            mods = comps.get("minecraft:attribute_modifiers") or []
+            if not mods or name not in item_ids:
+                continue
+            ms = []
+            for m in mods[:255]:
+                flags = (1 if m["id"] == "minecraft:base_attack_damage" else 0) | (2 if m["id"] == "minecraft:base_attack_speed" else 0)
+                flags |= 4 if (m.get("display") or {}).get("type") == "hidden" else 0
+                ms.append(struct.pack("<BdBBB", attrs[m["type"]]["protocol_id"], float(m["amount"]),
+                                      ops.index(m["operation"]), groups.index(m.get("slot", "any")), flags))
+            rows.append(struct.pack("<HB", item_ids[name]["protocol_id"], len(ms)) + b"".join(ms))
+    out += struct.pack("<H", len(rows)) + b"".join(rows)
+    with open(os.path.join(out_dir, "serverui.bin"), "wb") as f:
+        f.write(out)
+    print("serverui.bin: %d pictures, %d items' attributes" % (len(pics), len(rows)))
 
 def make_signs(assets, block_names, out_dir):
     """signs.bin, "PNT1": the sign editing screen's pictures, gui/signs/<wood>.png (24 x 26)
