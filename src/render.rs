@@ -200,6 +200,21 @@ impl Renderer {
         self.done.clear();
     }
 
+    /// Rebuilds every chunk mesh (vanilla's F3+A, and after a long teleport): the meshes and the
+    /// meshing on its way go, and every loaded section is dirty again.
+    pub fn reload(&mut self, gl: &Gl, world: &mut World) {
+        self.cancel_meshing();
+        self.terrain.clear(gl);
+        self.graph.clear();
+        let n = world.height / 16;
+        let cols: alloc::vec::Vec<(i32, i32)> = world.columns.keys().copied().collect();
+        for (x, z) in cols {
+            for sy in 0..n {
+                world.dirty.insert((x, sy, z));
+            }
+        }
+    }
+
     /// Meshes the dirty sections nearest the camera: hands them to the worker threads and
     /// puts what they finished on the card (for up to `budget_ms`), or without threads meshes
     /// them here for up to `budget_ms`.
