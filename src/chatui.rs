@@ -170,7 +170,7 @@ impl ChatUi {
                 let mut ctx = None;
                 if cursor >= 1 && (self.list.is_none() || !self.keep) {
                     let (node, start) = tree.suggestion_context(&parse, cursor);
-                    let players: Vec<String> = g.player_names.values().cloned().collect();
+                    let players: Vec<String> = g.talk.names.values().cloned().collect();
                     let (sugs, ask) = tree.suggest(node, &text[..cursor], start, &players, &g.blocks.items);
                     self.pending = sugs.into_iter().map(|t| Suggestion { text: t, tooltip: None, start, end: cursor }).collect();
                     ctx = Some((node, start, ask));
@@ -191,7 +191,7 @@ impl ChatUi {
             let before = &text[..cursor];
             let start = last_word(before);
             let word = before[start..].to_ascii_lowercase();
-            let mut names: Vec<String> = g.player_names.values().filter(|n| n.to_ascii_lowercase().starts_with(&word)).cloned().collect();
+            let mut names: Vec<String> = g.talk.names.values().filter(|n| n.to_ascii_lowercase().starts_with(&word)).cloned().collect();
             crate::commands::sort_suggestions(&mut names, &word);
             self.pending = names.into_iter().map(|t| Suggestion { text: t, tooltip: None, start, end: cursor }).collect();
         } else {

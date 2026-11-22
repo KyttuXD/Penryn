@@ -536,6 +536,8 @@ pub struct Talk {
     tracker: Tracker,
     cache: Cache,
     players: BTreeMap<[u8; 16], Validator>,
+    /// The players' names (the tab list's profiles), for suggestions.
+    pub names: BTreeMap<[u8; 16], String>,
     next_index: i32,
     /// The server's command tree.
     pub tree: Option<crate::commands::Tree>,
@@ -564,6 +566,7 @@ impl Talk {
             tracker: Tracker::new(),
             cache: Cache((0..128).map(|_| None).collect()),
             players: BTreeMap::new(),
+            names: BTreeMap::new(),
             next_index: 0,
             tree: None,
             suggest_id: 0,
@@ -883,6 +886,7 @@ impl Game {
                 for _ in 0..n {
                     let Some(u) = r.uuid() else { break };
                     self.talk.players.remove(&u);
+                    self.talk.names.remove(&u);
                 }
                 Ok(false)
             }
@@ -1005,7 +1009,8 @@ impl Game {
             for _ in 0..n {
                 let uuid = r.uuid()?;
                 if actions & 1 != 0 {
-                    r.string()?;
+                    let name = r.string()?;
+                    self.talk.names.insert(uuid, name);
                     let props = r.varint()?;
                     for _ in 0..props {
                         r.string()?;
