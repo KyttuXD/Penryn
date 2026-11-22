@@ -51,6 +51,13 @@ pub struct Entity {
     pub variant: i32,
     /// Bumped whenever something its looks depend on changes.
     pub version: u32,
+    /// Where the server says it is, and the steps left to get there (InterpolationHandler:
+    /// each client tick covers 1/steps of the way, so movement is smooth whatever the packets'
+    /// timing).
+    pub target: [f64; 3],
+    pub target_yaw: f32,
+    pub target_pitch: f32,
+    pub steps: u32,
 }
 
 impl Entity {
@@ -60,6 +67,10 @@ impl Entity {
             uuid,
             pos,
             prev: pos,
+            target: pos,
+            target_yaw: yaw,
+            target_pitch: pitch,
+            steps: 0,
             yaw,
             pitch,
             head_yaw,
@@ -92,9 +103,39 @@ impl Entity {
         self.health.map_or(false, |h| h <= 0.0)
     }
 
+    /// Sets where the server says the entity is, to be reached over `steps` ticks
+    /// (InterpolationHandler.setTargetPos; 3 for movement packets and teleports).
+    pub fn set_target(&mut self, pos: [f64; 3], yaw: f32, pitch: f32, steps: u32) {
+        self.target = pos;
+        self.target_yaw = yaw;
+        self.target_pitch = pitch;
+        self.steps = steps;
+    }
+
+    /// One tick of InterpolationHandler.interpolate: a share of the way to the target.
+    fn interpolate(&mut self) {
+        if self.steps == 0 {
+            return;
+        }
+        let k = 1.0 / self.steps as f64;
+        for a in 0..3 {
+            self.pos[a] += (self.target[a] - self.pos[a]) * k;
+        }
+        let k32 = (1.0 / self.steps as f32).min(1.0);
+        self.yaw += wrap_deg(self.target_yaw - self.yaw) * k32;
+        self.pitch += (self.target_pitch - self.pitch) * k32;
+        self.steps -= 1;
+        if self.steps == 0 {
+            self.pos = self.target;
+            self.yaw = self.target_yaw;
+            self.pitch = self.target_pitch;
+        }
+    }
+
     /// The client tick: walk animation from the distance moved (LivingEntity.calculateEntityAnimation),
     /// the body turning towards where the head looks, the death time.
     pub fn tick(&mut self) {
+        self.interpolate();
         let (dx, dz) = (self.pos[0] - self.prev[0], self.pos[2] - self.prev[2]);
         let dist = math::sqrt(dx * dx + dz * dz) as f32;
         let target = (dist * 4.0).min(1.0);
@@ -1031,4 +1072,25 @@ pub fn draw_items(
         (gl.Disable)(TEXTURE_2D);
         (gl.DisableClientState)(TEXTURE_COORD_ARRAY);
     }
+}
+
+/// Selftest: movement glides to the server's target over its steps (InterpolationHandler).
+pub fn selftest() -> alloc::vec::Vec<(&'static str, alloc::string::String, &'static str)> {
+    let mut e = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    e.set_target([3.0, 0.0, 0.0], 0.0, 0.0, 3);
+    let mut xs = alloc::vec::Vec::new();
+    for _ in 0..3 {
+        e.interpolate();
+        xs.push(e.pos[0]);
+    }
+    let even = (xs[0] - 1.0).abs() < 1e-9 && (xs[1] - 2.0).abs() < 1e-9 && (xs[2] - 3.0).abs() < 1e-9;
+    let mut f = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    f.set_target([1.0, 0.0, 0.0], 0.0, 0.0, 3);
+    for _ in 0..10 {
+        f.interpolate();
+    }
+    alloc::vec![
+        ("entity glides in equal steps", alloc::format!("{}", even), "true"),
+        ("entity stops on its target", alloc::format!("{}", f.pos[0] == 1.0 && f.steps == 0), "true"),
+    ]
 }
