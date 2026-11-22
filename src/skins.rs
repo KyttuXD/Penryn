@@ -612,7 +612,7 @@ fn cape_angles(e: &crate::entities::Entity, c: &Cloak, partial: f32) -> (f32, f3
     let dx = lerp(c.prev[0], c.at[0]) - lerp(e.prev[0], e.pos[0]);
     let dy = lerp(c.prev[1], c.at[1]) - lerp(e.prev[1], e.pos[1]);
     let dz = lerp(c.prev[2], c.at[2]) - lerp(e.prev[2], e.pos[2]);
-    let yaw = math::to_rad(e.body_yaw as f64);
+    let yaw = math::to_rad(e.body_rot(partial) as f64);
     let (s, co) = (math::sin(yaw), -math::cos(yaw));
     let mut flap = ((dy * 10.0) as f32).clamp(-6.0, 32.0);
     let lean = (((dx * s + dz * co) * 100.0) as f32).clamp(0.0, 150.0);
@@ -664,9 +664,9 @@ fn rot(axis: usize, a: f64) -> M {
 /// The cape's quads for a player at `at` (relative to the eye), as CapeLayer poses it: on the
 /// body at (0, 0, 2), turned by rotateY(-180) rotateX(6 + lean / 2 + flap) rotateZ(lean2 / 2)
 /// rotateY(180 - lean2 / 2) after the part's own yRot 180.
-fn cape_quads(out: &mut Vec<V>, e: &crate::entities::Entity, at: [f64; 3], angles: (f32, f32, f32)) {
+fn cape_quads(out: &mut Vec<V>, body: f32, at: [f64; 3], angles: (f32, f32, f32)) {
     let (flap, lean, lean2) = angles;
-    let yaw = math::to_rad((180.0 - e.body_yaw) as f64);
+    let yaw = math::to_rad((180.0 - body) as f64);
     let base = mul(
         &mul(&[[1.0, 0.0, 0.0, at[0]], [0.0, 1.0, 0.0, at[1]], [0.0, 0.0, 1.0, at[2]]], &rot(1, yaw)),
         &[[-1.0 / 16.0, 0.0, 0.0, 0.0], [0.0, -1.0 / 16.0, 0.0, 1.501], [0.0, 0.0, 1.0 / 16.0, 0.0]],
@@ -761,7 +761,7 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, crate
         if let (Some(tex), true) = (cape_of(&e.uuid), shown) {
             let c = s.cloaks.get(&id).copied().unwrap_or(Cloak { at: e.pos, prev: e.prev, ..Cloak::default() });
             v.clear();
-            cape_quads(&mut v, e, at, cape_angles(e, &c, partial));
+            cape_quads(&mut v, e.body_rot(partial), at, cape_angles(e, &c, partial));
             submit(gl, tex, &v, false); // RenderTypes.entitySolid
         }
     }

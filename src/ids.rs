@@ -41,6 +41,7 @@ pub mod config {
 
 pub mod play {
     pub const C_ADD_ENTITY: i32 = 1;
+    pub const C_ANIMATE: i32 = 2;
     pub const C_BLOCK_CHANGED_ACK: i32 = 4;
     pub const C_BLOCK_ENTITY_DATA: i32 = 6;
     pub const C_BLOCK_EVENT: i32 = 7;
