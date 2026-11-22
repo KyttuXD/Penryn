@@ -796,10 +796,26 @@ impl Game {
                 }
             }
             play::C_ENTITY_EVENT => {
-                // 24-28: the player's permission level (0-4).
+                // One arm for every entity event: the player's permission level (24-28), the hurt
+                // flash (2), the death (3, LivingEntity.handleEntityEvent) and the particle effects
+                // (particles.rs: the breed hearts, the totem of undying, the poofs).
                 let (id, ev) = (r.i32().unwrap_or(0), r.u8().unwrap_or(0));
                 if id == self.entity_id && (24..=28).contains(&ev) {
                     self.creative.op_level = ev as i32 - 24;
+                }
+                if let Some(e) = self.entities.get_mut(&id) {
+                    match ev {
+                        2 => e.hurt = 10,
+                        3 => {
+                            if e.item.is_none() {
+                                e.health = Some(0.0);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if self.particle_events.len() < 512 {
+                        self.particle_events.push(crate::particles::Effect::Entity(ev, e.pos, e.kind));
+                    }
                 }
             }
             play::C_SET_HELD_SLOT => {
@@ -959,17 +975,6 @@ impl Game {
                     crate::mobs::equipment(&mut r, e, slot);
                 }
             }
-            crate::mobs::C_ENTITY_EVENT => {
-                // 3: LivingEntity.handleEntityEvent's death (health to 0, it falls over).
-                let id = r.i32().unwrap_or(0);
-                if r.u8() == Some(3) {
-                    if let Some(e) = self.entities.get_mut(&id) {
-                        if e.item.is_none() {
-                            e.health = Some(0.0);
-                        }
-                    }
-                }
-            }
             play::C_SOUND | play::C_SOUND_ENTITY => {
                 // SoundEvent holder: registry id + 1, or 0 and an inline name (and range).
                 let holder = r.varint().unwrap_or(0);
@@ -1024,14 +1029,6 @@ impl Game {
             play::C_LEVEL_PARTICLES | play::C_EXPLODE => {
                 if self.particle_events.len() < 512 {
                     self.particle_events.push(crate::particles::Effect::Packet(p.id, p.body.clone()));
-                }
-            }
-            play::C_ENTITY_EVENT => {
-                let (id, ev) = (r.i32().unwrap_or(0), r.u8().unwrap_or(0));
-                if let Some(e) = self.entities.get(&id) {
-                    if self.particle_events.len() < 512 {
-                        self.particle_events.push(crate::particles::Effect::Entity(ev, e.pos, e.kind));
-                    }
                 }
             }
             play::C_TAKE_ITEM_ENTITY => {

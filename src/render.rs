@@ -131,7 +131,7 @@ impl Renderer {
 
     /// Uploads atlas.bin (16x16 tiles) with mipmaps made per tile, so tiles never bleed.
     pub fn load_atlas(&mut self, gl: &Gl, d: &[u8]) -> Result<(), String> {
-        if d.get(..4) != Some(b"PNA1") || d.len() < 8 {
+        if d.get(..4) != Some(b"PNA2") || d.len() < 8 {
             return Err(String::from("atlas.bin is damaged"));
         }
         let w = u16::from_le_bytes([d[4], d[5]]) as usize;
