@@ -132,6 +132,8 @@ pub struct Gui {
     /// clouds.png: which of its 256 x 256 pixels are cloud.
     pub clouds: Vec<bool>,
     pub clouds_side: usize,
+    /// The creative inventory's tabs and stacks (the end of gui.bin).
+    pub creative: Option<crate::creative::Data>,
     pub scale: f32,
     pub width: f32,
     pub height: f32,
@@ -287,6 +289,7 @@ impl Gui {
             hands,
             clouds,
             clouds_side,
+            creative: crate::creative::Data::from_gui_bin(d),
             scale: 2.0,
             width: 0.0,
             height: 0.0,

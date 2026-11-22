@@ -13,6 +13,7 @@ mod gui;
 mod hand;
 mod client;
 mod conn;
+mod creative;
 mod crypto;
 mod entities;
 mod http;
@@ -230,6 +231,12 @@ fn selftest() -> Result<(), String> {
             }
         }
         Err(e) => say!("skip physics checks: {}", e),
+    }
+    // The creative inventory's tabs, search and clicks (needs gui.bin and blocks.bin).
+    if let (Some(gui), Ok(b)) = (sys::read_file(&alloc::format!("{}/gui.bin", data_dir())), load_blocks()) {
+        for (what, got, want) in creative::checks(&gui, &b.items) {
+            check(what, got, want);
+        }
     }
     if ok {
         Ok(())

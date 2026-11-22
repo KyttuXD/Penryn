@@ -489,6 +489,300 @@ def applied_models(bs, props):
     return out
 
 
+# ------------------------------------------------------------------ the creative inventory
+
+def snbt_parse(s):
+    """SNBT as creative-inventory.json writes stacks: compounds, lists, strings, numbers."""
+    i = 0
+
+    def ws():
+        nonlocal i
+        while i < len(s) and s[i] in " \t\n":
+            i += 1
+
+    def value():
+        nonlocal i
+        ws()
+        c = s[i]
+        if c == "{":
+            i += 1
+            out = {}
+            ws()
+            if s[i] == "}":
+                i += 1
+                return out
+            while True:
+                ws()
+                k = word()
+                ws()
+                assert s[i] == ":", s[i:i + 20]
+                i += 1
+                out[k] = value()
+                ws()
+                if s[i] == ",":
+                    i += 1
+                    continue
+                assert s[i] == "}"
+                i += 1
+                return out
+        if c == "[":
+            i += 1
+            out = []
+            ws()
+            if s[i] == "]":
+                i += 1
+                return out
+            while True:
+                out.append(value())
+                ws()
+                if s[i] == ",":
+                    i += 1
+                    continue
+                assert s[i] == "]"
+                i += 1
+                return out
+        return word()
+
+    def word():
+        nonlocal i
+        if s[i] in "\"'":
+            q = s[i]
+            i += 1
+            out = []
+            while s[i] != q:
+                if s[i] == "\\":
+                    i += 1
+                out.append(s[i])
+                i += 1
+            i += 1
+            return "".join(out)
+        j = i
+        while i < len(s) and s[i] not in ",:}] \t\n":
+            i += 1
+        t = s[j:i]
+        try:
+            if t[-1:] in "bBsSlL" and t[:-1].lstrip("-").isdigit():
+                return int(t[:-1])
+            if t.lstrip("-").isdigit():
+                return int(t)
+            if t[-1:] in "fFdD":
+                return float(t[:-1])
+            if t == "true":
+                return 1
+            if t == "false":
+                return 0
+        except ValueError:
+            pass
+        return t
+
+    return value()
+
+
+def varint(v):
+    v &= 0xFFFFFFFF
+    out = bytearray()
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        if v:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def creative_section(res, reg, items):
+    """The creative inventory (CreativeModeTabs as horizon-prepare exported them) for gui.bin:
+
+        "CRT1"
+        u16 items; per item (registry order): u8 max stack size, u8 rarity (0 common 1 uncommon
+            2 rare 3 epic), u8 equipment slot (0 none 1 head 2 chest 3 legs 4 feet 5 offhand)
+        u16 tags; per tag: u8 length, name ("minecraft:logs")
+        u32 entries; per entry (a distinct stack): u16 item, u8 flags (1 operator only),
+            u16 tabs it is in (bit per tab), u8 lines (its tooltip, the name first); per line
+            u16 length, text; u8 tags, u16 each; u16 length, component spec
+        u8 tabs; per tab: u8 type (0 category 1 hotbar 2 search 3 inventory), u8 row (0 top
+            1 bottom), u8 column, u8 flags (1 aligned right, 2 no title, 4 no scroll bar, 8
+            operators only), u8 length + title key, u8 length + English title, u16 icon item,
+            u8 length + background sprite, u32 entries, u32 index each
+    The component spec is the stack's data components for ServerboundSetCreativeModeSlot:
+    per component u16 type, then ops up to a 0: 1 u16 length + bytes (literal), 2 u8 registry
+    (0 enchantment 1 painting_variant 2 instrument 3 banner_pattern, numbered by the server)
+    u8 length + name, i8 added (a holder id of the synchronised registry, + 1 for a holder)."""
+    path = os.path.join(res, "creative-inventory.json")
+    if not os.path.isfile(path):
+        return None
+    tabs = json.load(open(path))["tabs"]
+    ids = {n: i for i, n in enumerate(items)}
+
+    def rid(r, name):
+        return reg[r]["entries"][name]["protocol_id"]
+
+    comp_id = {k: v["protocol_id"] for k, v in reg["minecraft:data_component_type"]["entries"].items()}
+    idata = {}
+    ip = os.path.join(res, "items.json")
+    if os.path.isfile(ip):
+        idata = json.load(open(ip))
+    rar = {"common": 0, "uncommon": 1, "rare": 2, "epic": 3}
+    slots = {"head": 1, "chest": 2, "legs": 3, "feet": 4, "offhand": 5}
+    out = bytearray(b"CRT1") + struct.pack("<H", len(items))
+    for n in items:
+        d = idata.get(n, {})
+        eq = d.get("minecraft:equippable") or {}
+        out += struct.pack("<BBB", min(255, d.get("minecraft:max_stack_size", 64)), rar.get(d.get("minecraft:rarity"), 0),
+                           slots.get(eq.get("slot"), 0) if isinstance(eq, dict) else 0)
+
+    def string(t):
+        b = t.encode()
+        return varint(len(b)) + b
+
+    def nbt_text(v):
+        """A text component as network NBT (an unnamed root tag)."""
+        if isinstance(v, str):
+            b = v.encode()
+            return b"\x08" + struct.pack(">H", len(b)) + b
+        body = bytearray(b"\x0a")
+        for k, x in v.items():
+            if not isinstance(x, str):
+                raise ValueError("text")
+            kb, xb = k.encode(), x.encode()
+            body += b"\x08" + struct.pack(">H", len(kb)) + kb + struct.pack(">H", len(xb)) + xb
+        return bytes(body + b"\x00")
+
+    def lit(b):
+        return b"\x01" + struct.pack("<H", len(b)) + b
+
+    def dyn(r, name, add):
+        nb = name.encode()
+        return b"\x02" + bytes([r, len(nb)]) + nb + struct.pack("<b", add)
+
+    dyes = ["white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan",
+            "purple", "blue", "brown", "green", "red", "black"]
+
+    def component(name, v):
+        """The ops of one component's network value (its STREAM_CODEC), or ValueError."""
+        if name == "minecraft:potion_contents":
+            if set(v) != {"potion"}:
+                raise ValueError(name)
+            return lit(b"\x01" + varint(rid("minecraft:potion", v["potion"])) + b"\x00\x00\x00")
+        if name in ("minecraft:stored_enchantments", "minecraft:enchantments"):
+            ops = lit(varint(len(v)))
+            for e, lvl in v.items():
+                ops += dyn(0, e, 0) + lit(varint(lvl))
+            return ops
+        if name == "minecraft:painting/variant":
+            return dyn(1, v, 1)
+        if name == "minecraft:instrument":
+            return dyn(2, v, 1)
+        if name == "minecraft:suspicious_stew_effects":
+            b = varint(len(v))
+            for e in v:
+                b += varint(rid("minecraft:mob_effect", e["id"])) + varint(e.get("duration", 160))
+            return lit(b)
+        if name == "minecraft:ominous_bottle_amplifier":
+            return lit(varint(v))
+        if name == "minecraft:fireworks":
+            if v.get("explosions"):
+                raise ValueError(name)
+            return lit(varint(v.get("flight_duration", 1)) + b"\x00")
+        if name == "minecraft:block_state":
+            b = varint(len(v))
+            for k, x in v.items():
+                b += string(k) + string(str(x))
+            return lit(b)
+        if name == "minecraft:banner_patterns":
+            ops = lit(varint(len(v)))
+            for layer in v:
+                ops += dyn(3, layer["pattern"], 1) + lit(varint(dyes.index(layer["color"])))
+            return ops
+        if name == "minecraft:item_name":
+            return lit(nbt_text(v))
+        if name == "minecraft:rarity":
+            return lit(varint(rar[v]))
+        if name == "minecraft:tooltip_display":
+            hidden = v.get("hidden_components", [])
+            return lit(bytes([1 if v.get("hide_tooltip") else 0]) + varint(len(hidden)) +
+                       b"".join(varint(comp_id[h]) for h in hidden))
+        raise ValueError(name)
+
+    search = next((t for t in tabs if t["type"] == "SEARCH"), None)
+    lines = {}
+    tags_of = {}
+    op_only = set()
+    if search:
+        for k, it in enumerate(search.get("items", [])):
+            lines[it] = search.get("lines", [])[k] if k < len(search.get("lines", [])) else []
+            tags_of[it] = search.get("tags", [])[k] if k < len(search.get("tags", [])) else []
+        for k in search.get("permissions_only", []):
+            if k < len(search["items"]):
+                op_only.add(search["items"][k])
+    for t in tabs:
+        if t.get("permissions_only") is True or (t["type"] == "CATEGORY" and not t.get("visible", True)):
+            op_only.update(t.get("items", []))
+    entries = {}
+    order = []
+    mask = {}
+    for ti, t in enumerate(tabs):
+        for it in t.get("items", []):
+            if it not in entries:
+                entries[it] = len(order)
+                order.append(it)
+            if t["type"] != "SEARCH":
+                mask[it] = mask.get(it, 0) | (1 << ti)
+    tag_names = sorted({tg for v in tags_of.values() for tg in v})
+    tag_idx = {n: i for i, n in enumerate(tag_names)}
+    out += struct.pack("<H", len(tag_names))
+    for n in tag_names:
+        nb = n.encode()
+        out += bytes([len(nb)]) + nb
+    out += struct.pack("<I", len(order))
+    plain = 0
+    for it in order:
+        st = snbt_parse(it)
+        item = ids.get(st.get("id"), 0)
+        spec = bytearray()
+        try:
+            for cn, cv in (st.get("components") or {}).items():
+                spec += struct.pack("<H", comp_id[cn]) + component(cn, cv) + b"\x00"
+        except (ValueError, KeyError):
+            spec = bytearray()
+            plain += 1
+        ls = lines.get(it, [])[:255]
+        out += struct.pack("<HBHB", item, 1 if it in op_only else 0, mask.get(it, 0) & 0xFFFF, len(ls))
+        for l in ls:
+            lb = l.encode()[:65535]
+            out += struct.pack("<H", len(lb)) + lb
+        tg = tags_of.get(it, [])[:255]
+        out += bytes([len(tg)]) + b"".join(struct.pack("<H", tag_idx[x]) for x in tg)
+        out += struct.pack("<H", len(spec)) + spec
+    keys = {"minecraft:building_blocks": "itemGroup.buildingBlocks", "minecraft:colored_blocks": "itemGroup.coloredBlocks",
+            "minecraft:natural_blocks": "itemGroup.natural", "minecraft:functional_blocks": "itemGroup.functional",
+            "minecraft:redstone_blocks": "itemGroup.redstone", "minecraft:hotbar": "itemGroup.hotbar",
+            "minecraft:search": "itemGroup.search", "minecraft:tools_and_utilities": "itemGroup.tools",
+            "minecraft:combat": "itemGroup.combat", "minecraft:food_and_drinks": "itemGroup.foodAndDrink",
+            "minecraft:ingredients": "itemGroup.ingredients", "minecraft:spawn_eggs": "itemGroup.spawnEggs",
+            "minecraft:op_blocks": "itemGroup.op", "minecraft:inventory": "itemGroup.inventory"}
+    kinds = {"CATEGORY": 0, "HOTBAR": 1, "SEARCH": 2, "INVENTORY": 3}
+    out += bytes([len(tabs)])
+    for t in tabs:
+        kind = kinds.get(t["type"], 0)
+        col = t["column"]
+        # CreativeModeTabs: the hotbar, search, operator and inventory tabs sit on the right.
+        right = kind != 0 or t["id"] == "minecraft:op_blocks"
+        flags = (1 if right else 0) | (2 if kind == 3 else 0) | (4 if kind == 3 else 0)
+        flags |= 8 if t["id"] == "minecraft:op_blocks" else 0
+        bg = {2: "container/creative_inventory/tab_item_search", 3: "container/creative_inventory/tab_inventory"}.get(
+            kind, "container/creative_inventory/tab_items")
+        icon = ids.get(snbt_parse(t["icon"]).get("id"), 0)
+        kb, tb, bb = keys.get(t["id"], t["id"]).encode(), t.get("title", "").encode(), bg.encode()
+        out += bytes([kind, 0 if t["row"] == "TOP" else 1, col, flags, len(kb)]) + kb + bytes([len(tb)]) + tb
+        out += struct.pack("<H", icon) + bytes([len(bb)]) + bb
+        its = t.get("items", [])
+        out += struct.pack("<I", len(its)) + b"".join(struct.pack("<I", entries[x]) for x in its)
+    print("creative: %d tabs, %d stacks (%d sent without their components), %d tags" % (len(tabs), len(order), plain, len(tag_names)))
+    return bytes(out)
+
+
 # ------------------------------------------------------------------ main
 
 def main():
@@ -1062,12 +1356,14 @@ def main():
                 listing.append("assets/minecraft/textures/" + os.path.relpath(os.path.join(root, fn), base).replace(os.sep, "/"))
     for full in listing:
         for folder in ("hud/", "widget/", "tooltip/", "container/slot/", "container/inventory/", "container/furnace/",
-                       "container/blast_furnace/", "container/smoker/"):
+                       "container/blast_furnace/", "container/smoker/", "container/creative_inventory/"):
             pre = "assets/minecraft/textures/gui/sprites/" + folder
             if full.startswith(pre) and full.endswith(".png"):
                 rel = full[len("assets/minecraft/textures/"):-4]
                 add_sprite(rel[len("gui/sprites/"):], rel)
     add_sprite("container/inventory", "gui/container/inventory", crop=(176, 166))
+    for name in ("tab_items", "tab_item_search", "tab_inventory"):
+        add_sprite("container/creative_inventory/" + name, "gui/container/creative_inventory/" + name, crop=(195, 136))
     # The sky: sun, the eight moon phases (MoonPhase order), clouds.
     add_sprite("sky/sun", "environment/celestial/sun")
     for phase in ("full_moon", "waning_gibbous", "third_quarter", "waning_crescent", "new_moon", "waxing_crescent",
@@ -1356,7 +1652,7 @@ def main():
             gatlas[o:o + w * 4] = px[yy * w * 4:(yy + 1) * w * 4]
 
     with open(os.path.join(out_dir, "gui.bin"), "wb") as f:
-        f.write(b"PNG2" + struct.pack("<HH", gw, gh) + bytes(gatlas))
+        f.write(b"PNG3" + struct.pack("<HH", gw, gh) + bytes(gatlas))
         names_ = [k for k in sprites if not k.startswith("font/")]
         f.write(struct.pack("<I", len(names_)))
         for k in names_:
@@ -1407,6 +1703,12 @@ def main():
                 f.write(struct.pack("<9f", *(list(rot) + list(tr) + list(sc))))
             else:
                 f.write(bytes([0, 0]))
+        # The creative inventory, found from the offset in the last 4 bytes (0: none).
+        crt = creative_section(res, reg, items)
+        at = f.tell()
+        if crt:
+            f.write(crt)
+        f.write(struct.pack("<I", at if crt else 0))
     print("gui.bin: %d sprites, %d glyphs, %d translations, atlas %dx%d; %d items (%d flat, %d 3D)"
           % (len(sprites) - len(font_pages), len(glyphs), len(lang), gw, gh, len(item_icons),
              sum(1 for i in item_icons if i[0] == 1), sum(1 for i in item_icons if i[0] == 2)))

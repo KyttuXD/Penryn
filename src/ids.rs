@@ -49,6 +49,7 @@ pub mod play {
     pub const C_DAMAGE_EVENT: i32 = 25;
     pub const C_DISCONNECT: i32 = 32;
     pub const C_DISGUISED_CHAT: i32 = 33;
+    pub const C_ENTITY_EVENT: i32 = 34;
     pub const C_ENTITY_POSITION_SYNC: i32 = 35;
     pub const C_FORGET_LEVEL_CHUNK: i32 = 38;
     pub const C_GAME_EVENT: i32 = 39;
@@ -107,6 +108,7 @@ pub mod play {
     pub const S_PONG: i32 = 45;
     pub const S_PUNCH: i32 = 46;
     pub const S_SET_CARRIED_ITEM: i32 = 54;
+    pub const S_SET_CREATIVE_MODE_SLOT: i32 = 57;
     pub const S_USE_ITEM_ON: i32 = 66;
     pub const S_USE_ITEM: i32 = 67;
 }
