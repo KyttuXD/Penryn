@@ -394,7 +394,7 @@ def download_pack(data_dir, url, want, name, uuid, job):
 
 def local_packs(data_dir):
     """DATA/resourcepacks: zips and folders with a pack.mcmeta, as vanilla's FolderRepositorySource.
-    (id, compatible, description) sorted by id."""
+    (id, compat word (make_assets.Pack.compat_word), description) sorted by id."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     sys.dont_write_bytecode = True
     import make_assets  # noqa: E402 - the same reader the bake uses
@@ -416,7 +416,7 @@ def local_packs(data_dir):
                 d = d.get("text", "") or d.get("translate", "")
             elif isinstance(d, list):
                 d = "".join(x if isinstance(x, str) else x.get("text", "") for x in d)
-            out.append(("file/" + n, pk.compatible, str(d).replace("\n", " ").replace("\t", " ")))
+            out.append(("file/" + n, pk.compat_word(), str(d).replace("\n", " ").replace("\t", " ")))
     return out
 
 
@@ -603,7 +603,7 @@ def make_handler(relay):
             if self.path == "/pack/list":
                 try:
                     rows = local_packs(relay.data_dir)
-                    return self.reply(200, "".join("%s\t%d\t%s\n" % (i, c, d) for i, c, d in rows))
+                    return self.reply(200, "".join("%s\t%s\t%s\n" % (i, c, d) for i, c, d in rows))
                 except Exception as e:  # noqa: BLE001 - reported to the client
                     return self.reply(500, str(e))
             m = re.fullmatch(r"/pack/files/([0-9a-f]{20})/([a-z]+\.bin)", self.path)

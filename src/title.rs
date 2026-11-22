@@ -789,7 +789,9 @@ impl Front {
                 mp.tick(&ui.v.gl);
             }
         }
-        self.test_step(ui);
+        if let Some(next) = self.test_step(ui) {
+            return Some(next);
+        }
         match &mut self.scr {
             Scr::Connect { task, address, back_to_list } => {
                 if let Some(r) = task.take() {
@@ -845,9 +847,9 @@ impl Front {
     }
 
     /// PENRYN_TEST_INPUT's menu steps, for tests without a mouse.
-    fn test_step(&mut self, ui: &mut Ui) {
+    fn test_step(&mut self, ui: &mut Ui) -> Option<Next> {
         if self.test.is_empty() || sys::now_ms() < self.test_next {
-            return;
+            return None;
         }
         self.test_next = sys::now_ms() + 500;
         let step = self.test.remove(0);
@@ -855,7 +857,8 @@ impl Front {
         if let Some(xy) = step.strip_prefix("mclick=") {
             if let Some((x, y)) = xy.split_once(':') {
                 self.mouse = (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
-                let _ = self.press(ui, 1);
+                // A click can leave the title (Options > Resource Packs): the tick returns it.
+                return self.press(ui, 1);
             }
         } else if let Some(t) = step.strip_prefix("mtype=") {
             self.text(t);
@@ -872,6 +875,7 @@ impl Front {
             };
             let _ = self.key(ui, sc);
         }
+        None
     }
 
     fn text(&mut self, s: &str) {

@@ -174,6 +174,33 @@ class Pack:
             self._names = out
         return self._names
 
+    def compat_word(self):
+        """Vanilla's Pack.Compatibility for the pack list: "1" (compatible), "new" (made for a
+        newer version), "old" (for an older one) or "unknown" (no format, or a broken one)."""
+        if self.compatible:
+            return "1"
+        pk = self.meta.get("pack", {}) if isinstance(self.meta, dict) else {}
+        try:
+            if "min_format" in pk or "max_format" in pk:
+                lo = pack_format_value(pk.get("min_format", 0))
+                hi = pk.get("max_format")
+                hi = pack_format_value(hi) if hi is not None else (1 << 30, 0)
+            else:
+                sup = pk.get("supported_formats", pk.get("pack_format"))
+                if isinstance(sup, list) and sup:
+                    lo, hi = pack_format_value(sup[0]), pack_format_value(sup[-1])
+                elif sup is None or isinstance(sup, (dict, list)):
+                    return "unknown"
+                else:
+                    lo = hi = pack_format_value(sup)
+            if lo > RESOURCE_FORMAT:
+                return "new"
+            if hi < RESOURCE_FORMAT:
+                return "old"
+        except (TypeError, ValueError, IndexError):
+            pass
+        return "unknown"
+
     def hides(self, full):
         """The pack's filter hides `full` (assets/ns/path) of the packs below it."""
         parts = full.split("/", 2)

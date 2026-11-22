@@ -207,8 +207,18 @@ fn relay_job(path: &str, body: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// The local packs the relay has (DATA/resourcepacks): (id, compatible, description).
-pub fn list_local() -> Result<Vec<(String, bool, String)>, String> {
+/// Vanilla's Pack.Compatibility as the relay names it: compatible, made for a newer or an older
+/// version, or unknown (no format, or broken).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Compat {
+    Ok,
+    New,
+    Old,
+    Unknown,
+}
+
+/// The local packs the relay has (DATA/resourcepacks): (id, compatibility, description).
+pub fn list_local() -> Result<Vec<(String, Compat, String)>, String> {
     let r = relay().ok_or("no relay")?;
     let resp = crate::http::get(&r.0, r.1, "/pack/list", 15000)?;
     if resp.status != 200 {
@@ -218,7 +228,13 @@ pub fn list_local() -> Result<Vec<(String, bool, String)>, String> {
     for l in resp.text().lines() {
         let mut f = l.splitn(3, '\t');
         let (Some(id), Some(c), d) = (f.next(), f.next(), f.next()) else { continue };
-        out.push((String::from(id), c == "1", String::from(d.unwrap_or(""))));
+        let c = match c {
+            "1" => Compat::Ok,
+            "new" => Compat::New,
+            "old" => Compat::Old,
+            _ => Compat::Unknown,
+        };
+        out.push((String::from(id), c, String::from(d.unwrap_or(""))));
     }
     Ok(out)
 }
@@ -947,7 +963,7 @@ fn prompt_hit(size: (f32, f32), mx: f32, my: f32) -> Option<bool> {
 /// up or down. Done applies the change. Returns the new list when it changed.
 pub fn selection_screen(host: &mut dyn Host, local: &[String]) -> Option<Vec<String>> {
     let found = list_local();
-    let all: Vec<(String, bool, String)> = match &found {
+    let all: Vec<(String, Compat, String)> = match &found {
         Ok(v) => v.clone(),
         Err(_) => Vec::new(),
     };
@@ -955,8 +971,18 @@ pub fn selection_screen(host: &mut dyn Host, local: &[String]) -> Option<Vec<Str
     let error = found.err();
     let mut input = Vec::new();
     let mut done = false;
+    // An incompatible pack waits for the player's yes: (its id, why).
+    let mut confirm: Option<(String, Compat)> = None;
     let auto = sys::env("PENRYN_TEST_PACKS");
+    // PENRYN_TEST_INPUT's pclick=X:Y steps: clicks on this screen, one each half second.
+    let mut clicks: Vec<(f32, f32)> = sys::env("PENRYN_TEST_INPUT")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|t| t.strip_prefix("pclick=")?.split_once(':').map(|(x, y)| (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0))))
+        .collect();
+    clicks.reverse();
     let started = sys::now_ms();
+    let mut next_click = started + 1500;
     loop {
         if let Some(a) = auto.as_deref() {
             if sys::now_ms() > started + 1500 {
@@ -968,24 +994,60 @@ pub fn selection_screen(host: &mut dyn Host, local: &[String]) -> Option<Vec<Str
             break;
         }
         let sel = selected.clone();
-        let open = host.ui_frame(&mut |gui, mx, my| draw_selection(gui, &all, &sel, error.as_deref(), mx, my), &mut input);
+        let asked = confirm.as_ref().map(|c| c.1);
+        let open = host.ui_frame(
+            &mut |gui, mx, my| {
+                draw_selection(gui, &all, &sel, error.as_deref(), mx, my);
+                if let Some(k) = asked {
+                    draw_pack_confirm(gui, k, mx, my);
+                }
+            },
+            &mut input,
+        );
         if !open {
             return None;
         }
         let (w, h) = host_gui_size();
+        if sys::now_ms() >= next_click {
+            if let Some((x, y)) = clicks.pop() {
+                input.push(Input::Click(x, y));
+                next_click = sys::now_ms() + 700;
+            }
+        }
         for ev in input.drain(..) {
             match ev {
-                Input::Escape => done = true,
+                Input::Escape => {
+                    if confirm.is_some() {
+                        confirm = None;
+                    } else {
+                        done = true;
+                    }
+                }
                 Input::Click(mx, my) => {
+                    if let Some((id, _)) = confirm.clone() {
+                        match prompt_hit((w, h), mx, my) {
+                            Some(true) => {
+                                selected.push(id);
+                                confirm = None;
+                            }
+                            Some(false) => confirm = None,
+                            None => {}
+                        }
+                        continue;
+                    }
                     let l = selection_layout(w, h);
                     if done_button(w, h).hit(mx, my) {
                         done = true;
                         continue;
                     }
-                    let available: Vec<&(String, bool, String)> = all.iter().filter(|a| !selected.contains(&a.0)).collect();
+                    let available: Vec<&(String, Compat, String)> = all.iter().filter(|a| !selected.contains(&a.0)).collect();
                     if let Some(i) = l.row(mx, my, l.left) {
                         if let Some(a) = available.get(i) {
-                            selected.push(a.0.clone()); // to the top
+                            if a.1 == Compat::Ok {
+                                selected.push(a.0.clone()); // to the top
+                            } else {
+                                confirm = Some((a.0.clone(), a.1));
+                            }
                         }
                     } else if let Some(i) = l.row(mx, my, l.right) {
                         // Displayed top first.
@@ -1049,7 +1111,8 @@ fn pack_name(id: &str) -> &str {
     id.strip_prefix("file/").unwrap_or(id)
 }
 
-fn draw_entry(gui: &mut Gui, x: f32, y: f32, name: &str, desc: &str, compatible: bool, hover: bool, arrows: bool) {
+fn draw_entry(gui: &mut Gui, x: f32, y: f32, name: &str, desc: &str, kind: Compat, hover: bool, arrows: bool) {
+    let compatible = kind == Compat::Ok;
     if hover {
         gui.fill(x, y, x + LIST_W, y + ROW, 0x40FF_FFFF);
     }
@@ -1060,7 +1123,13 @@ fn draw_entry(gui: &mut Gui, x: f32, y: f32, name: &str, desc: &str, compatible:
     gui.text(&name, tx, y + 3.0, WHITE);
     let mut lines = screens::wrap(gui, if compatible { desc } else { "" }, LIST_W - 40.0);
     if !compatible {
-        lines = alloc::vec![crate::lang::get("pack.incompatible")];
+        // PackCompatibility's reason: made for a newer or an older version, or broken.
+        let key = match kind {
+            Compat::New => "pack.incompatible.new",
+            Compat::Old => "pack.incompatible.old",
+            _ => "pack.incompatible.unknown",
+        };
+        lines = alloc::vec![crate::lang::get(key)];
     }
     for (i, l) in lines.iter().take(2).enumerate() {
         gui.text(l, tx, y + 14.0 + i as f32 * 9.0, if compatible { 0xFF80_8080 } else { 0xFFFF_5555 });
@@ -1071,7 +1140,32 @@ fn draw_entry(gui: &mut Gui, x: f32, y: f32, name: &str, desc: &str, compatible:
     }
 }
 
-fn draw_selection(gui: &mut Gui, all: &[(String, bool, String)], selected: &[String], error: Option<&str>, mx: f32, my: f32) {
+/// ConfirmScreen before an incompatible pack is taken (vanilla's PackSelectionScreen): the
+/// question, the reason, Yes and No, over the dimmed selection.
+fn draw_pack_confirm(gui: &mut Gui, kind: Compat, mx: f32, my: f32) {
+    note_size(gui);
+    let reason = match kind {
+        Compat::New => "pack.incompatible.confirm.new",
+        Compat::Old => "pack.incompatible.confirm.old",
+        _ => "pack.incompatible.confirm.unknown",
+    };
+    let title = crate::lang::get("pack.incompatible.confirm.title");
+    let mut lines: Vec<String> = screens::wrap(gui, &crate::lang::get(reason), gui.width - 50.0);
+    lines.truncate(15);
+    let (w, h) = (gui.width, gui.height);
+    gui.fill(0.0, 0.0, w, h, 0xC000_0000);
+    let (ty, my0, by) = prompt_layout(h, lines.len());
+    gui.text_centered(&title, w / 2.0, ty, WHITE);
+    for (i, l) in lines.iter().enumerate() {
+        gui.text_centered(l, w / 2.0, my0 + i as f32 * 9.0, WHITE);
+    }
+    for b in prompt_buttons(w, by, false).iter() {
+        b.draw(gui, mx, my);
+    }
+    PROMPT_ROWS.store(lines.len() as u32, Ordering::Relaxed);
+}
+
+fn draw_selection(gui: &mut Gui, all: &[(String, Compat, String)], selected: &[String], error: Option<&str>, mx: f32, my: f32) {
     note_size(gui);
     let (w, h) = (gui.width, gui.height);
     let l = selection_layout(w, h);
@@ -1102,11 +1196,11 @@ fn draw_selection(gui: &mut Gui, all: &[(String, bool, String)], selected: &[Str
         }
         let a = all.iter().find(|a| &a.0 == s);
         let hover = mx >= l.right && mx < l.right + LIST_W && my >= y && my < y + ROW;
-        draw_entry(gui, l.right, y, pack_name(s), a.map_or("", |a| a.2.as_str()), a.map_or(true, |a| a.1), hover, true);
+        draw_entry(gui, l.right, y, pack_name(s), a.map_or("", |a| a.2.as_str()), a.map_or(Compat::Ok, |a| a.1), hover, true);
         y += ROW;
     }
     if y + ROW <= l.bottom {
-        draw_entry(gui, l.right, y, &crate::lang::get("resourcePack.vanilla.name"), &crate::lang::get("resourcePack.vanilla.description"), true, false, false);
+        draw_entry(gui, l.right, y, &crate::lang::get("resourcePack.vanilla.name"), &crate::lang::get("resourcePack.vanilla.description"), Compat::Ok, false, false);
     }
     folder_button(w, h).draw(gui, mx, my);
     done_button(w, h).draw(gui, mx, my);
