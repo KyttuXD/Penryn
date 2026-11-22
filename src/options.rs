@@ -285,6 +285,17 @@ impl Settings {
         self.v[o as usize] = v;
     }
 
+    /// A line of options.txt Penryn has no option for (lastServer...).
+    pub fn other(&self, key: &str) -> Option<&str> {
+        self.other.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+    pub fn set_other(&mut self, key: &str, v: &str) {
+        match self.other.iter_mut().find(|(k, _)| k == key) {
+            Some(e) => e.1 = String::from(v),
+            None => self.other.push((String::from(key), String::from(v))),
+        }
+    }
+
     /// The mixer's gain per category (SoundSource order).
     pub fn volumes(&self) -> [f32; 11] {
         let mut out = [1.0; 11];
@@ -660,6 +671,15 @@ impl Menu {
         if self.stack.is_empty() && p != Page::Main {
             self.stack.push(Page::Main);
         }
+        self.stack.push(p);
+        self.scroll = 0.0;
+        self.drag = None;
+    }
+
+    /// One options screen on its own (the title screen's accessibility button): Done and
+    /// Escape close it.
+    pub fn open_only(&mut self, p: Page) {
+        self.stack.clear();
         self.stack.push(p);
         self.scroll = 0.0;
         self.drag = None;

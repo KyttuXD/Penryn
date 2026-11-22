@@ -171,6 +171,13 @@ impl Renderer {
         Ok(())
     }
 
+    /// A new world (another server): the old world's meshes go.
+    pub fn forget_world(&mut self, gl: &Gl) {
+        for (_, m) in core::mem::take(&mut self.meshes) {
+            Self::drop_mesh(gl, m);
+        }
+    }
+
     fn drop_mesh(gl: &Gl, m: SectionMesh) {
         for b in [m.opaque.vbo, m.water.vbo] {
             if b != 0 {

@@ -1631,10 +1631,150 @@ def main():
     make_effects(assets, out_dir, reg, facts)
     make_sounds(res, out_dir, sound_names)
     make_weather(res, assets, out_dir, reg)
+    make_menu(res, assets, out_dir)
     print("blocks.bin: %d states, %d blocks, %d quads; atlas %dx%d with %d textures%s"
           % (len(state_rows), len(blocks_out), len(quads), width, height, len(tiles),
              (", missing: " + ", ".join(sorted(missing))) if missing else ""))
 
+
+
+def make_menu(res, assets, out_dir):
+    """menu.bin, "PNM1": the title screen and the multiplayer screens (TitleScreen, Panorama,
+    LogoRenderer, SplashRenderer, JoinMultiplayerScreen). Optional for Penryn: without it the
+    title screen is drawn on a plain background, without the logo and splashes.
+
+        "PNM1", u32 size of the rest unpacked, then the rest as one zlib stream:
+        u32 length, texts/splashes.txt (UTF-8)
+        u16 images; per image: u8 name length, name, u16 width, u16 height, u8 channels (3 RGB
+            or 4 RGBA), the pixels (rows top to bottom)
+        u16 sprites; per sprite: u8 name length, name, u8 image, u16 x, y, width, height
+
+    The panorama's six faces (gui/title/background, which the game's jar only holds as
+    placeholders: they come from the prepared data or the installed assets) at 512 x 512, and
+    a blurred 64 x 64 copy of each for the screens drawn over a blurred panorama."""
+    def read_any(rel):
+        # The prepared data and the installed asset objects have the real panorama.
+        p = os.path.join(res, "assets", "minecraft", rel)
+        if os.path.isfile(p):
+            with open(p, "rb") as f:
+                return f.read()
+        index_path, objects = find_objects()
+        if index_path and objects:
+            try:
+                objs = json.load(open(index_path)).get("objects", {})
+                o = objs.get("minecraft/" + rel)
+                if o:
+                    with open(os.path.join(objects, o["hash"][:2], o["hash"]), "rb") as f:
+                        return f.read()
+            except (OSError, ValueError):
+                pass
+        return assets.read(rel)
+
+    images, sprites = [], []
+
+    def add(name, w, h, ch, px):
+        images.append((name, w, h, ch, bytes(px)))
+        return len(images) - 1
+
+    def rgb(px):
+        out = bytearray(len(px) // 4 * 3)
+        out[0::3], out[1::3], out[2::3] = px[0::4], px[1::4], px[2::4]
+        return out
+
+    for i in range(6):
+        img = png_decode(read_any("textures/gui/title/background/panorama_%d.png" % i))
+        if img is None:
+            print("menu.bin: panorama_%d.png missing: no panorama" % i)
+            images = [im for im in images if not im[0].startswith("panorama")]
+            break
+        w, h, px = img
+        step = max(1, w // 512)
+        n = w // step
+        full = rgb(px)
+        face = bytearray()
+        for y in range(0, h, step):
+            row = full[y * w * 3:(y + 1) * w * 3]
+            r = bytearray(n * 3)
+            r[0::3], r[1::3], r[2::3] = row[0::3 * step], row[1::3 * step], row[2::3 * step]
+            face += r
+        add("panorama_%d" % i, n, h // step, 3, face)
+        # The blurred copy: 4 x 4 boxes of every fourth pixel, then three box blurs.
+        b = 64
+        k = w // b
+        small = [[0.0, 0.0, 0.0] for _ in range(b * b)]
+        for by in range(b):
+            for bx in range(b):
+                acc = [0, 0, 0]
+                for sy in range(0, k, max(1, k // 4)):
+                    for sx in range(0, k, max(1, k // 4)):
+                        o = ((by * k + sy) * w + bx * k + sx) * 3
+                        acc[0] += full[o]; acc[1] += full[o + 1]; acc[2] += full[o + 2]
+                cnt = len(range(0, k, max(1, k // 4))) ** 2
+                small[by * b + bx] = [acc[0] / cnt, acc[1] / cnt, acc[2] / cnt]
+        for _ in range(3):
+            for horiz in (True, False):
+                nxt = []
+                for y in range(b):
+                    for x in range(b):
+                        acc = [0.0, 0.0, 0.0]
+                        for d in (-1, 0, 1):
+                            xx, yy = (min(b - 1, max(0, x + d)), y) if horiz else (x, min(b - 1, max(0, y + d)))
+                            c = small[yy * b + xx]
+                            acc[0] += c[0]; acc[1] += c[1]; acc[2] += c[2]
+                        nxt.append([acc[0] / 3, acc[1] / 3, acc[2] / 3])
+                small = nxt
+        add("panorama_blur_%d" % i, b, b, 3, bytes(int(min(255, c[j] + 0.5)) for c in small for j in range(3)))
+    for name, rel in (("overlay", "gui/title/background/panorama_overlay"), ("minecraft", "gui/title/minecraft"),
+                      ("minceraft", "gui/title/minceraft"), ("edition", "gui/title/edition"),
+                      ("menu_background", "gui/menu_background"), ("menu_list_background", "gui/menu_list_background"),
+                      ("header_separator", "gui/header_separator"), ("footer_separator", "gui/footer_separator"),
+                      ("unknown_server", "misc/unknown_server")):
+        img = png_decode(read_any("textures/%s.png" % rel))
+        if img is None:
+            print("menu.bin: %s.png missing" % rel)
+            continue
+        add(name, img[0], img[1], 4, img[2])
+    # The small sprites, side by side in one 256-wide atlas (shelf packing).
+    names = (["server_list/" + n for n in ("incompatible", "unreachable", "join", "join_highlighted", "move_up",
+                                           "move_up_highlighted", "move_down", "move_down_highlighted")]
+             + ["server_list/ping_%d" % i for i in range(1, 6)] + ["server_list/pinging_%d" % i for i in range(1, 6)]
+             + ["icon/language", "icon/accessibility", "friends/friends"])
+    found = []
+    for n in names:
+        img = png_decode(read_any("textures/gui/sprites/%s.png" % n))
+        if img is not None:
+            found.append((n, img))
+    aw, x, y, shelf = 256, 0, 0, 0
+    placed = []
+    for n, (w, h, px) in found:
+        if x + w > aw:
+            x, y, shelf = 0, y + shelf, 0
+        placed.append((n, x, y, w, h, px))
+        x += w
+        shelf = max(shelf, h)
+    ah = max(1, y + shelf)
+    atlas = bytearray(aw * ah * 4)
+    for n, sx, sy, w, h, px in placed:
+        for j in range(h):
+            atlas[((sy + j) * aw + sx) * 4:((sy + j) * aw + sx + w) * 4] = px[j * w * 4:(j + 1) * w * 4]
+    ai = add("sprites", aw, ah, 4, atlas)
+    for n, sx, sy, w, h, _ in placed:
+        sprites.append((n, ai, sx, sy, w, h))
+    splashes = (read_any("texts/splashes.txt") or b"")
+    raw = bytearray(struct.pack("<I", len(splashes)) + splashes)
+    raw += struct.pack("<H", len(images))
+    for name, w, h, ch, px in images:
+        nb = name.encode()
+        raw += bytes([len(nb)]) + nb + struct.pack("<HHB", w, h, ch) + px
+    raw += struct.pack("<H", len(sprites))
+    for name, i, sx, sy, w, h in sprites:
+        nb = name.encode()
+        raw += bytes([len(nb)]) + nb + struct.pack("<BHHHH", i, sx, sy, w, h)
+    with open(os.path.join(out_dir, "menu.bin"), "wb") as f:
+        f.write(b"PNM1" + struct.pack("<I", len(raw)) + zlib.compress(bytes(raw), 6))
+    print("menu.bin: %d images (%s panorama), %d sprites, %d splashes"
+          % (len(images), "with" if any(im[0] == "panorama_0" for im in images) else "no", len(sprites),
+             splashes.count(b"\n")))
 
 def make_weather(res, assets, out_dir, reg):
     """weather.bin, "PNW1" (little-endian): u16 the lightning_bolt entity type id; rain.png and

@@ -19,17 +19,20 @@ mod effects;
 mod entities;
 mod http;
 mod ids;
+mod json;
 mod lang;
 mod math;
 mod md5;
 mod moving;
 mod mobs;
+mod multiplayer;
 mod nbt;
 mod physics;
 mod play;
 mod render;
 mod screens;
 mod sdl;
+mod servers;
 mod skins;
 mod signs;
 mod sky;
@@ -37,6 +40,8 @@ mod net;
 mod options;
 mod particles;
 mod sys;
+mod task;
+mod title;
 mod weather;
 mod wire;
 mod world;
@@ -76,6 +81,8 @@ core::arch::global_asm!(
 
 const USAGE: &str = "Penryn: a Minecraft Java Edition 26.3 client for old Macs
 
+  penryn [--relay R[:PORT]] [--name NAME]
+                                   the title screen: Multiplayer has the server list
   penryn [--relay R[:PORT]] [--name NAME] HOST[:PORT]
                                    play: signed in if `penryn login` was done, else
                                    offline as NAME (offline-mode servers only)
@@ -94,7 +101,7 @@ pub fn data_dir() -> String {
     sys::env("PENRYN_DATA").unwrap_or_else(|| String::from("."))
 }
 
-fn load_blocks() -> Result<blocks::Blocks, String> {
+pub fn load_blocks() -> Result<blocks::Blocks, String> {
     let path = alloc::format!("{}/blocks.bin", data_dir());
     let d = sys::read_file(&path).ok_or_else(|| alloc::format!("cannot read {} (see README.md)", path))?;
     blocks::Blocks::parse(&d).ok_or_else(|| alloc::format!("{} is damaged", path))
@@ -150,12 +157,13 @@ fn run(args: &[String]) -> Result<(), String> {
             account::logout();
             Ok(())
         }
-        Some("help") | Some("--help") | None => {
+        Some("help") | Some("--help") => {
             say!("{}", USAGE);
             Ok(())
         }
-        Some(_) => {
-            // penryn [play] [--relay R] [--name N] HOST[:PORT] [NAME]
+        _ => {
+            // penryn [play] [--relay R] [--name N] [HOST[:PORT]] [NAME]: without a server,
+            // the title screen.
             let mut relay = sys::env("PENRYN_RELAY").map(|r| http::host_port(&r, 25580));
             let mut name = None;
             let mut host = None;
@@ -176,8 +184,19 @@ fn run(args: &[String]) -> Result<(), String> {
                 }
                 i += 1;
             }
-            let (h, p) = http::host_port(&host.ok_or(USAGE)?, 25565);
-            let acc = if name.is_some() { None } else { account::load_refreshed()? };
+            let server = match host {
+                Some(h) => Some(servers::address(&h).ok_or(USAGE)?),
+                None => None,
+            };
+            let acc = match (&name, &server) {
+                (Some(_), _) => None,
+                (None, Some(_)) => account::load_refreshed()?,
+                // The title screen starts even when the relay cannot renew the sign-in.
+                (None, None) => account::load_refreshed().unwrap_or_else(|e| {
+                    warn!("{}", e);
+                    None
+                }),
+            };
             if let Some(a) = &acc {
                 say!("signed in as {}", a.name);
             }
@@ -185,11 +204,7 @@ fn run(args: &[String]) -> Result<(), String> {
             account::ensure_game_files(fetch_from.as_ref())?;
             skins::set_relay(fetch_from.clone());
             let name = name.unwrap_or_else(|| String::from("Player"));
-            play::run(&h, p, &name, acc.as_ref(), load_blocks()?)
-        }
-        _ => {
-            say!("{}", USAGE);
-            Ok(())
+            play::run(server, &name, acc, fetch_from)
         }
     }
 }
@@ -233,6 +248,9 @@ fn selftest() -> Result<(), String> {
     let z = zlib::store(&data);
     check("zlib stored round trip", alloc::format!("{}", zlib::inflate(&z, data.len()) == Some(data.clone())), "true");
     for (what, got, want) in skins::selftest() {
+        check(what, got, want);
+    }
+    for (what, got, want) in json::selftest().into_iter().chain(servers::selftest()).chain(title::selftest()).chain(multiplayer::selftest()) {
         check(what, got, want);
     }
     // Movement against vanilla's collision, in a made-up world (needs blocks.bin).

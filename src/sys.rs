@@ -96,6 +96,15 @@ extern "C" {
     /// The skin download thread (skins.rs). pthread_t is 8 bytes on both systems.
     pub fn pthread_create(t: *mut usize, attr: *const c_void, f: extern "C" fn(*mut c_void) -> *mut c_void, arg: *mut c_void) -> c_int;
     pub fn pthread_detach(t: usize) -> c_int;
+    /// Background work with its own stack size (task.rs); the menus' LAN discovery (UDP) and
+    /// the local date of the title screen's splash.
+    pub fn pthread_attr_init(attr: *mut c_void) -> c_int;
+    pub fn pthread_attr_setstacksize(attr: *mut c_void, size: SizeT) -> c_int;
+    pub fn pthread_attr_destroy(attr: *mut c_void) -> c_int;
+    pub fn bind(fd: c_int, addr: *const c_void, len: u32) -> c_int;
+    pub fn setsockopt(fd: c_int, level: c_int, name: c_int, val: *const c_void, len: u32) -> c_int;
+    pub fn recvfrom(fd: c_int, buf: *mut c_void, n: SizeT, flags: c_int, from: *mut c_void, len: *mut u32) -> SsizeT;
+    fn localtime_r(t: *const i64, out: *mut c_void) -> *mut c_void;
 }
 
 // The prebuilt `alloc` was compiled with unwinding; with panic = "abort" nothing ever unwinds,
@@ -213,6 +222,19 @@ pub fn now() -> f64 {
     };
     unsafe { gettimeofday(&mut tv, core::ptr::null_mut()) };
     tv.sec as f64 + tv.usec as f64 / 1e6
+}
+
+/// The local date: (month 1-12, day 1-31).
+pub fn local_date() -> (u32, u32) {
+    // struct tm starts with nine ints (sec, min, hour, mday, mon, year, ...) on both systems.
+    let t = now() as i64;
+    let mut tm = [0i32; 16];
+    let ok = unsafe { !localtime_r(&t, tm.as_mut_ptr() as *mut c_void).is_null() };
+    if ok {
+        (tm[4] as u32 + 1, tm[3] as u32)
+    } else {
+        (1, 2)
+    }
 }
 
 pub fn now_ms() -> u64 {
