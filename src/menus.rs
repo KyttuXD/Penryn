@@ -776,7 +776,11 @@ pub fn window(g: &Game, c: &Container) -> Option<Window> {
         }
         _ => return None,
     }
-    player_rows(&mut slots, first, 8.0, if c.menu == BEACON { 137.0 } else { 84.0 });
+    if c.menu == BEACON {
+        player_rows(&mut slots, first, 36.0, 137.0);
+    } else {
+        player_rows(&mut slots, first, 8.0, 84.0);
+    }
     let title = if c.menu == BEACON { String::new() } else { c.title.clone() };
     Some(Window { w, h, parts: Vec::new(), slots, title, title_at, inventory_label_y: label_y, container_id: c.id })
 }
@@ -1098,7 +1102,9 @@ fn enchant_tooltip(g: &Game, c: &Container, left: f32, top: f32, mx: f32, my: f3
         let name = names.and_then(|n| n.get(clue as usize)).map(|n| {
             let short = n.split(':').last().unwrap_or(n);
             let mut s = lang::get(&format!("enchantment.minecraft.{}", short));
-            if level != 1 {
+            // Enchantment.getFullname: the level, unless the enchantment has only one.
+            const SINGLE: [&str; 9] = ["aqua_affinity", "channeling", "flame", "infinity", "mending", "multishot", "silk_touch", "binding_curse", "vanishing_curse"];
+            if level != 1 || !SINGLE.contains(&short) {
                 s.push(' ');
                 s.push_str(&lang::get(&format!("enchantment.level.{}", level)));
             }
@@ -1530,6 +1536,9 @@ pub fn tick(g: &mut Game) -> Result<(), String> {
     g.menus.ids(&items);
     g.blocks.items = items;
     let c = g.container.as_ref().unwrap();
+    if g.menus.ticks % 40 == 0 && crate::sys::env("PENRYN_DEBUG_MENU").is_some() {
+        crate::say!("menu {} id {} data {:?} beacon {:?} slots {:?}", c.menu, c.id, &g.menus.data[..10], g.menus.beacon, c.slots);
+    }
     match c.menu {
         ANVIL => {
             // ItemCombinerScreen.slotChanged: slot 0's name fills the field.

@@ -1126,6 +1126,19 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     if let crate::options::Ev::Click = self.menu.release() {
                         self.ui_click();
                     }
+                } else if self.test_ticks / 10 == clicks.len() + 1 && self.test_ticks % 10 == 1 {
+                    // type=TEXT: typed into the open screen after the clicks; ptr=X:Y: where the
+                    // mouse rests then (menus.rs, books.rs).
+                    if let Some(t) = self.test_keys.split(',').find_map(|t| t.strip_prefix("type=")).map(String::from) {
+                        if self.screen == Screen::Inventory {
+                            crate::menus::text(g, &t)?;
+                        } else if let (Some(gui), Some(b)) = (self.gui.as_ref(), self.book.as_mut()) {
+                            crate::books::text(gui, b, &t);
+                        }
+                    }
+                    if let Some((x, y)) = self.test_keys.split(',').find_map(|t| t.strip_prefix("ptr=")).and_then(|c| c.split_once(':')) {
+                        self.mouse = (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+                    }
                 }
             }
         }
