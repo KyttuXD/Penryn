@@ -72,6 +72,7 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     out
 }
 
+#[derive(Clone)]
 pub enum Icon {
     None,
     Flat(Vec<(u16, u32)>),
@@ -169,6 +170,8 @@ pub struct Gui {
     pub sprites: BTreeMap<String, Sprite>,
     glyphs: BTreeMap<u32, Glyph>,
     pub icons: Vec<Icon>,
+    /// The packs' item definitions (items.bin, itemmodels.rs), by item_model key.
+    pub overlays: Vec<crate::itemmodels::Entry>,
     pub models: Vec<Model>,
     /// Per item: display.firstperson_righthand (rotation, translation, scale).
     pub hands: Vec<[f32; 9]>,
@@ -328,6 +331,7 @@ impl Gui {
             sprites,
             glyphs,
             icons,
+            overlays: Vec::new(),
             models,
             hands,
             clouds,
@@ -668,19 +672,38 @@ impl Gui {
 
     /// An item's icon at (x, y), 16 x 16 units, with its count (vanilla's renderItemDecorations).
     pub fn item(&mut self, b: &Blocks, item: i32, count: i32, x: f32, y: f32) {
+        let icon = self.icons.get(item as usize).cloned().unwrap_or(Icon::None);
+        self.draw_icon(b, &icon, count, x, y);
+    }
+
+    /// A stack's item as its item_model (or custom_model_data case) says, else the item's own icon.
+    pub fn item_patch(&mut self, b: &Blocks, item: i32, patch: &[u8], count: i32, x: f32, y: f32) {
+        let registry = match b.items.get(item as usize) {
+            Some(short) => alloc::format!("minecraft:{}", short),
+            None => return,
+        };
+        match crate::itemmodels::pick(&self.overlays, &registry, patch) {
+            Some(i) => {
+                let icon = self.overlays[i].1.clone();
+                self.draw_icon(b, &icon, count, x, y);
+            }
+            None => self.item(b, item, count, x, y),
+        }
+    }
+
+    /// The icon's quads at (x, y) and the count (vanilla's renderItemDecorations).
+    fn draw_icon(&mut self, b: &Blocks, icon: &Icon, count: i32, x: f32, y: f32) {
         let tiles_row = (self.bw / 16.0) as u32;
-        match self.icons.get(item as usize) {
-            Some(Icon::Flat(layers)) => {
-                let layers = layers.clone();
-                for (tile, tint) in layers {
+        match icon {
+            Icon::Flat(layers) => {
+                for &(tile, tint) in layers.iter() {
                     let (tx, ty) = ((tile as u32 % tiles_row) as f32 * 16.0, (tile as u32 / tiles_row) as f32 * 16.0);
                     let c = if tint != 0 { argb(tint | 0xFF00_0000) } else { [255; 4] };
                     self.quad(Tex::Blocks, x, y, x + 16.0, y + 16.0, tx / self.bw, ty / self.bh, (tx + 16.0) / self.bw, (ty + 16.0) / self.bh, c);
                 }
             }
-            Some(Icon::Model { first, count: n, tint, rot, tr, sc }) => {
-                let (first, n, tint, rot, tr, sc) = (*first, *n, *tint, *rot, *tr, *sc);
-                self.model_icon(b, first, n, tint, rot, tr, sc, x, y);
+            Icon::Model { first, count: n, tint, rot, tr, sc } => {
+                self.model_icon(b, *first, *n, *tint, *rot, *tr, *sc, x, y);
             }
             _ => {}
         }

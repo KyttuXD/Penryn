@@ -321,6 +321,7 @@ pub fn draw_frames(
     ents: &BTreeMap<i32, Entity>,
     maps: &Maps,
     icons: &[crate::gui::Icon],
+    overlays: &[crate::itemmodels::Entry],
     blocks: &crate::blocks::Blocks,
     atlas: u32,
     atlas_size: (f32, f32),
@@ -371,7 +372,8 @@ pub fn draw_frames(
         }
         // ItemDisplayContext.FIXED: half size, turned to face out of the frame.
         let im = im.r(2, rot * 45.0).s(0.5, 0.5, 0.5).r(1, 180.0);
-        match icons.get(item as usize) {
+        let shown = crate::itemmodels::icon_for(overlays, icons, blocks, item, &e.item_patch);
+        match shown.as_ref() {
             Some(crate::gui::Icon::Flat(layers)) => {
                 for &(tile, tint) in layers.iter() {
                     let (tx, ty) = ((tile as u32 % tiles_row) as f32 * 16.0, (tile as u32 / tiles_row) as f32 * 16.0);

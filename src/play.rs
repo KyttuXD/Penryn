@@ -538,6 +538,9 @@ pub fn run(server: Option<(String, u16)>, name: &str, account: Option<Account>, 
     let gui = sys::read_file(&crate::packs::path("gui.bin")).ok_or("cannot read gui.bin (see README.md)")?;
     app.gui = Some(Gui::load(&app.v.gl, &gui, app.r.atlas, app.r.atlas_size)?);
     drop(gui);
+    if let Some(g) = app.gui.as_mut() {
+        g.overlays = crate::itemmodels::read();
+    }
     // The other container screens, maps and item frames (containers.bin, optional).
     crate::menus::load(&app.v.gl);
     // Weather is optional: without weather.bin no rain or snow falls (the sky still greys).
@@ -2201,6 +2204,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let pf = partial as f32;
         let entities = &g.entities;
         let icons = self.gui.as_ref().map(|gui| &gui.icons[..]).unwrap_or(&[]);
+        let overlays = self.gui.as_ref().map(|gui| &gui.overlays[..]).unwrap_or(&[]);
         let (atlas, atlas_size) = (self.r.atlas, self.r.atlas_size);
         let blocks_ref = &g.blocks;
         let block_entities = &g.block_entities;
@@ -2251,8 +2255,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                         crate::skins::draw(gl, view, eye, &mine, pf, -1, t);
                     }
                 }
-                crate::entities::draw_items(gl, view, eye, entities, pf, icons, blocks_ref, atlas, atlas_size);
-                crate::maps::draw_frames(gl, view, eye, entities, maps_ref, icons, blocks_ref, atlas, atlas_size);
+                crate::entities::draw_items(gl, view, eye, entities, pf, icons, overlays, blocks_ref, atlas, atlas_size);
+                crate::maps::draw_frames(gl, view, eye, entities, maps_ref, icons, overlays, blocks_ref, atlas, atlas_size);
                 crate::perf::lap(crate::perf::S::Entities);
                 if let Some(gui) = gui_ref {
                     crate::signs::draw_world(gl, view, eye, block_entities, world_ref, blocks_ref, gui);
@@ -2310,6 +2314,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 w,
                 h,
                 g.held().map(|h| h.0),
+                &g.creative.patches[36 + g.selected as usize],
                 gui,
                 &g.blocks,
                 self.r.atlas,
@@ -2506,10 +2511,11 @@ impl crate::packs::Host for App {
             let pd = sys::read_file(&path("particles.bin"));
             self.particles = Some(crate::particles::Particles::load(gl, pd.as_deref(), self.r.atlas_size));
         }
-        if has("atlas.bin") || has("gui.bin") {
+        if has("atlas.bin") || has("gui.bin") || has("items.bin") {
             if let Some(d) = sys::read_file(&path("gui.bin")) {
                 match Gui::load(gl, &d, self.r.atlas, self.r.atlas_size) {
                     Ok(mut new) => {
+                        new.overlays = crate::itemmodels::read();
                         if let Some(old) = self.gui.take() {
                             new.fixed_scale = old.fixed_scale;
                             unsafe { (gl.DeleteTextures)(1, &old.texture()) };

@@ -45,8 +45,9 @@ pub struct Entity {
     pub swing_old: f32,
     pub swing_off: bool,
     pub hurt: i32,
-    /// A dropped item's stack.
+    /// A dropped item's stack, and its component patch (itemmodels.rs).
     pub item: Option<(i32, i32)>,
+    pub item_patch: Vec<u8>,
     /// Its byte, VarInt and VarLong entity data values, by index (a sheep's wool is 18 in 26.3).
     pub data: BTreeMap<u8, i64>,
     pub age: u32,
@@ -105,6 +106,7 @@ impl Entity {
             swing_off: false,
             hurt: 0,
             item: None,
+            item_patch: Vec::new(),
             data: BTreeMap::new(),
             age: 0,
             equipment: [None; 8],
@@ -1153,6 +1155,7 @@ pub fn draw_items(
     ents: &BTreeMap<i32, Entity>,
     partial: f32,
     icons: &[crate::gui::Icon],
+    overlays: &[crate::itemmodels::Entry],
     blocks: &crate::blocks::Blocks,
     atlas: u32,
     atlas_size: (f32, f32),
@@ -1174,7 +1177,8 @@ pub fn draw_items(
         let spin = t / 20.0;
         let (s, c) = (math::sin(spin), math::cos(spin));
         let place = |x: f64, y: f64, z: f64| -> [f32; 3] { [(p[0] + x * c + z * s) as f32, (p[1] + y + bob) as f32, (p[2] - x * s + z * c) as f32] };
-        match icons.get(item as usize) {
+        let shown = crate::itemmodels::icon_for(overlays, icons, blocks, item, &e.item_patch);
+        match shown.as_ref() {
             Some(crate::gui::Icon::Flat(layers)) => {
                 for &(tile, tint) in layers.iter() {
                     let (tx, ty) = ((tile as u32 % tiles_row) as f32 * 16.0, (tile as u32 / tiles_row) as f32 * 16.0);

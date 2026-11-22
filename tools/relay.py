@@ -320,7 +320,7 @@ class Relay:
 
 PACK_LIMIT = 262144000          # vanilla's limit for a server pack
 PACK_FILES = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin",
-              "effects.bin", "packsounds.bin")
+              "effects.bin", "packsounds.bin", "items.bin")
 PACK_JOBS = {}                  # key -> {"state": "working" | "done" | "failed", "result": text}
 PACK_LOCK = threading.Lock()
 

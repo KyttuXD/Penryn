@@ -9,7 +9,8 @@ outline shapes and tags. Block models, block states and textures are read from C
 (the 26.3 client the launcher downloaded for the signed-in account) when given, else from
 PREPARED_DIR/assets.
 
-Writes OUT_DIR/blocks.bin and OUT_DIR/atlas.bin. Nothing from Mojang is kept in this
+Writes OUT_DIR/blocks.bin, OUT_DIR/atlas.bin and OUT_DIR/items.bin (the packs' item
+definitions, "PNI1": see below). Nothing from Mojang is kept in this
 repository: these files are made on the player's machine and stay with their copy of the game.
 
 blocks.bin (little-endian), "PNBA":
@@ -37,6 +38,7 @@ blocks.bin (little-endian), "PNBA":
 kind: 0 air, 1 solid, 2 cutout, 3 plant (no collision), 4 water, 5 lava, 6 invisible solid
 
 atlas.bin: "PNA2", u16 width, u16 height, then width x height RGBA (16x16 tiles).
+items.bin: see the writer in main (the packs' item definitions, keyed by ns:path).
 """
 import json
 import math
@@ -812,6 +814,7 @@ def applied_models(bs, props):
 # ------------------------------------------------------------------ particles
 
 PARTICLES_MAGIC = b"PNP1"
+ITEMS_MAGIC = b"PNI1"
 
 
 def block_particle_tiles(names, states, assets, models, texture):
@@ -1625,6 +1628,76 @@ def main():
         item_icons.append(icon)
         item_hands.append(hand_display(ref) if ref else ([0, 45, 0], [0, 0, 0], [0.4, 0.4, 0.4]))
 
+    # ---- the item definitions of the packs (items.bin, "PNI1"). An item_model component names
+    # one: items/<path>.json of its namespace (ns:path). A definition that selects on
+    # custom_model_data (minecraft:select, property minecraft:custom_model_data, the stack's
+    # first string) gives one icon per case too, keyed "ns:path|string". The icons are gui.bin's
+    # (flat layers, or a block model's quads, appended to blocks.bin's quads).
+    overlay_icons = []
+    if packs:
+        import re
+        found = set()
+        for n in assets.names():
+            m = re.match(r"^assets/([a-z0-9_.-]+)/items/(.+)\.json$", n)
+            if m:
+                found.add((m.group(1), m.group(2)))
+
+        def icon_of_model(model):
+            ref, tints = find_model(model)
+            if not ref:
+                return (0,)
+            chain = parents(ref)
+            tex, elements = models.load(ref)
+            if "builtin/generated" in chain:
+                layers = []
+                for i in range(5):
+                    path = resolve_tex(tex, tex.get("layer%d" % i))
+                    if not path:
+                        break
+                    ti, _ = texture(path)
+                    layers.append((ti, tint_value(tints[i]) if i < len(tints) else 0))
+                return (1, layers) if layers else (0,)
+            if elements:
+                ql = bake_model({"model": ref})
+                if not ql:
+                    return (0,)
+                qk = tuple(ql)
+                if qk not in quad_lists:
+                    quad_lists[qk] = len(quads)
+                    quads.extend(ql)
+                tint = tint_value(tints[0]) if tints else 0
+                return (2, quad_lists[qk], len(ql), gui_display(ref), tint)
+            path = resolve_tex(tex, tex.get("particle"))
+            if path:
+                ti, _ = texture(path)
+                return (1, [(ti, 0)])
+            return (0,)
+
+        for ns, path in sorted(found):
+            key = "%s:%s" % (ns, path)
+            d = assets.json("%s:items/%s.json" % (ns, path))
+            if not isinstance(d, dict):
+                continue
+            model = d.get("model")
+            if ns != "minecraft" and isinstance(model, dict) and model.get("type") != "minecraft:select":
+                icon = icon_of_model(model)
+                if icon[0]:
+                    overlay_icons.append((key, icon))
+            if isinstance(model, dict) and model.get("type") == "minecraft:select" \
+                    and model.get("property") == "minecraft:custom_model_data":
+                for case in model.get("cases", []) or []:
+                    when = case.get("when")
+                    for w in (when if isinstance(when, list) else [when]):
+                        if isinstance(w, str) and isinstance(case.get("model"), dict):
+                            icon = icon_of_model(case["model"])
+                            if icon[0]:
+                                overlay_icons.append(("%s|%s" % (key, w), icon))
+                if ns != "minecraft" and isinstance(model.get("fallback"), dict):
+                    icon = icon_of_model(model["fallback"])
+                    if icon[0]:
+                        overlay_icons.append((key, icon))
+        print("items.bin: %d definitions of the packs" % len(overlay_icons))
+
     # ---- biome colours
     def colormap(path):
         img = assets.image(("textures/colormap/%s.png" % path))
@@ -1964,6 +2037,24 @@ def main():
     print("gui.bin: %d sprites, %d glyphs, %d translations, atlas %dx%d; %d items (%d flat, %d 3D)"
           % (len(sprites) - len(font_pages), len(glyphs), len(lang), gw, gh, len(item_icons),
              sum(1 for i in item_icons if i[0] == 1), sum(1 for i in item_icons if i[0] == 2)))
+    # items.bin, "PNI1": u32 count, then per icon a u8 key length and key ("ns:path" or
+    # "ns:path|string"), then u8 kind and u8 n: kind 1 is flat (n layers, each u16 atlas tile and
+    # u32 tint); kind 2 is a model (n is 0, then u32 first quad, u16 quads, u32 tint and nine
+    # f32 display transforms: rotation, translation, scale). Quad indices refer to blocks.bin.
+    with open(os.path.join(out_dir, "items.bin"), "wb") as f:
+        f.write(ITEMS_MAGIC + struct.pack("<I", len(overlay_icons)))
+        for key, icon in overlay_icons:
+            kb = key.encode()[:255]
+            f.write(bytes([len(kb)]) + kb)
+            if icon[0] == 1:
+                f.write(bytes([1, len(icon[1])]))
+                for ti, tint in icon[1]:
+                    f.write(struct.pack("<HI", ti, tint))
+            else:
+                _, fq, nq, (rot, tr, sc), tint = icon
+                f.write(bytes([2, 0]) + struct.pack("<IHI", fq, nq, tint))
+                f.write(struct.pack("<9f", *(list(rot) + list(tr) + list(sc))))
+    print("items.bin: %d icons" % len(overlay_icons))
     make_signs(assets, names, out_dir)
     make_effects(assets, out_dir, reg, facts)
     if packs:

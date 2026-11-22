@@ -1442,8 +1442,9 @@ pub(crate) fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option
             }
             7 => {
                 let start = r.pos;
-                let (item, ok) = slot(r)?;
+                let (item, ok, patch) = crate::creative::read_stack(r)?;
                 e.item = item;
+                e.item_patch = patch;
                 // A framed map: its id, for the frame to draw it.
                 match crate::maps::map_id_in_stack(&r.b[start..r.pos]) {
                     Some(m) if crate::maps::is_frame(e.kind) => {

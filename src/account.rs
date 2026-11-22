@@ -151,6 +151,7 @@ pub const SOUNDS_MAGIC: &[u8; 4] = b"PNS1";
 pub const WEATHER_MAGIC: &[u8; 4] = b"PNW1";
 pub const EFFECTS_MAGIC: &[u8; 4] = b"PNF1";
 pub const PARTICLES_MAGIC: &[u8; 4] = b"PNP1";
+pub const ITEMS_MAGIC: &[u8; 4] = b"PNI1";
 
 /// Fetches the game files from the relay when they are missing or from another version.
 pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
@@ -158,7 +159,7 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
     const FILES: [(&str, &[u8; 4]); 4] =
         [("blocks.bin", BLOCKS_MAGIC), ("atlas.bin", ATLAS_MAGIC), ("gui.bin", GUI_MAGIC), ("entities.bin", ENTITIES_MAGIC)];
     // Small optional files: the game runs without them (no weather...).
-    const OPTIONAL: &[(&str, &[u8; 4])] = &[("weather.bin", WEATHER_MAGIC), ("signs.bin", crate::signs::SIGNS_MAGIC), ("effects.bin", EFFECTS_MAGIC), ("particles.bin", PARTICLES_MAGIC), ("menu.bin", crate::title::MENU_MAGIC), ("serverui.bin", crate::serverhud::SERVERUI_MAGIC), ("containers.bin", crate::menus::MAGIC)];
+    const OPTIONAL: &[(&str, &[u8; 4])] = &[("weather.bin", WEATHER_MAGIC), ("signs.bin", crate::signs::SIGNS_MAGIC), ("effects.bin", EFFECTS_MAGIC), ("particles.bin", PARTICLES_MAGIC), ("items.bin", ITEMS_MAGIC), ("menu.bin", crate::title::MENU_MAGIC), ("serverui.bin", crate::serverhud::SERVERUI_MAGIC), ("containers.bin", crate::menus::MAGIC)];
     let have = |n: &str, magic: &[u8; 4]| sys::read_head(&format!("{}/{}", dir, n), 4).map_or(false, |d| d == magic);
     let optional = OPTIONAL.iter().all(|(n, m)| have(n, m));
     if FILES.iter().all(|(n, m)| have(n, m)) && ((have("sounds.bin", SOUNDS_MAGIC) && optional) || relay.is_none()) {

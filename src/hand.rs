@@ -70,6 +70,8 @@ type Q = ([[f64; 3]; 4], [[f32; 2]; 4], f32, [u8; 3]);
 
 pub struct Hand {
     flat: BTreeMap<i32, Vec<Q>>,
+    /// The pack generation the cache was made for (packs::generation).
+    gen: u32,
 }
 
 /// ItemModelGenerator for one 16x16 tile at (tx, ty) in the atlas: 1/16 thick at z 7.5..8.5.
@@ -113,7 +115,7 @@ fn extrude(alpha: &[u8], aw: usize, ah: usize, tx: usize, ty: usize, tint: [u8; 
 
 impl Hand {
     pub fn new() -> Hand {
-        Hand { flat: BTreeMap::new() }
+        Hand { flat: BTreeMap::new(), gen: crate::packs::generation() }
     }
 
     /// Draws the hand over the world. `swing` 0..1 (0: none), `equip` 0 raised .. 1 lowered,
@@ -124,6 +126,7 @@ impl Hand {
         w: i32,
         h: i32,
         held: Option<i32>,
+        held_patch: &[u8],
         gui: &Gui,
         blocks: &Blocks,
         atlas: u32,
@@ -136,6 +139,10 @@ impl Hand {
         bob: (f32, f32),
     ) {
         // GameRenderer.bobView, on the hand's own pose.
+        if self.gen != crate::packs::generation() {
+            self.flat.clear();
+            self.gen = crate::packs::generation();
+        }
         let (walk, amount) = (bob.0 as f64, bob.1 as f64);
         let base = M::id()
             .t(math::sin(walk * math::PI) * amount * 0.5, -(math::cos(walk * math::PI) * amount).abs(), 0.0)
@@ -146,8 +153,18 @@ impl Hand {
         let mut quads: Vec<(M, Q)> = Vec::new();
         let mut tex = atlas;
         let mut tex_size = atlas_size;
-        match held.and_then(|i| gui.icons.get(i as usize).map(|ic| (i, ic))) {
-            Some((item, icon)) => {
+        // A held stack whose item_model (or custom_model_data case) the packs define shows that
+        // icon; its extruded layers are cached under a negative key (the overlay's index).
+        let overlay = held.and_then(|i| {
+            let reg = alloc::format!("minecraft:{}", blocks.items.get(i as usize)?);
+            crate::itemmodels::pick(&gui.overlays, &reg, held_patch)
+        });
+        let shown = match (held, overlay) {
+            (Some(item), Some(k)) => Some((item, &gui.overlays[k].1, -2 - k as i32)),
+            _ => held.and_then(|i| gui.icons.get(i as usize).map(|ic| (i, ic, i))),
+        };
+        match shown {
+            Some((item, icon, key)) => {
                 // renderArmWithItem: swing translation, applyItemArmTransform, applyItemArmAttackTransform.
                 let mut m = base.t(-0.4 * math::sin(sq * math::PI), 0.2 * math::sin(sq * math::PI * 2.0), -0.2 * math::sin(sw * math::PI));
                 m = m.t(0.56, -0.52 - equip as f64 * 0.6, -0.72);
@@ -165,7 +182,7 @@ impl Hand {
                     .t(-0.5, -0.5, -0.5);
                 match icon {
                     Icon::Flat(layers) => {
-                        let list = self.flat.entry(item).or_insert_with(|| {
+                        let list = self.flat.entry(key).or_insert_with(|| {
                             let mut out = Vec::new();
                             let tr = (atlas_size.0 / 16.0) as u32;
                             for &(tile, tint) in layers.iter() {

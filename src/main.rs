@@ -23,6 +23,7 @@ mod effects;
 mod entities;
 mod http;
 mod ids;
+mod itemmodels;
 mod keybinds;
 mod json;
 mod lang;
@@ -329,7 +330,7 @@ fn selftest() -> Result<(), String> {
     for (what, got, want) in weather::checks(wdata.as_deref(), wblocks.as_ref()) {
         check(what, got, want);
     }
-    for (what, got, want) in packs::selftest().into_iter().chain(gui::selftest()) {
+    for (what, got, want) in packs::selftest().into_iter().chain(gui::selftest()).chain(itemmodels::selftest()) {
         check(what, got, want);
     }
     for (what, got, want) in audio::overlay_selftest() {

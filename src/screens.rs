@@ -185,6 +185,16 @@ fn slot_item(g: &Game, win: &Window, idx: i16) -> Option<(i32, i32)> {
     }
 }
 
+/// The component patch of a slot's stack (its item_model, custom_model_data; empty when unknown).
+pub fn slot_patch<'a>(g: &'a Game, win: &Window, idx: i16) -> &'a [u8] {
+    let p = if win.container_id == 0 {
+        g.creative.patches.get(idx as usize)
+    } else {
+        g.container.as_ref().and_then(|c| c.patches.get(idx as usize))
+    };
+    p.map_or(&[], |v| &v[..])
+}
+
 pub fn window_origin(gui: &Gui, win: &Window) -> (f32, f32) {
     (((gui.width - win.w) / 2.0).floor(), ((gui.height - win.h) / 2.0).floor())
 }
@@ -241,7 +251,7 @@ pub fn draw_window(gui: &mut Gui, g: &Game, win: &Window, mx: f32, my: f32) {
     let hover = slot_at(gui, win, mx, my);
     for &(idx, x, y) in win.slots.iter() {
         if let Some((item, count)) = slot_item(g, win, idx) {
-            gui.item(&g.blocks, item, count, left + x, top + y);
+            gui.item_patch(&g.blocks, item, slot_patch(g, win, idx), count, left + x, top + y);
         }
         if hover == Some(idx) {
             gui.fill(left + x, top + y, left + x + 16.0, top + y + 16.0, 0x80FF_FFFF);
@@ -371,13 +381,13 @@ pub fn hud(gui: &mut Gui, g: &Game, crosshair: bool, held_name: Option<(String, 
     let y = h - 22.0;
     if let Some((item, count)) = g.inventory[45] {
         gui.blit("hud/hotbar_offhand_left", x - 29.0, h - 23.0);
-        gui.item(&g.blocks, item, count, x - 26.0, h - 19.0);
+        gui.item_patch(&g.blocks, item, &g.creative.patches[45], count, x - 26.0, h - 19.0);
     }
     gui.blit("hud/hotbar", x, y);
     gui.blit("hud/hotbar_selection", x - 1.0 + g.selected as f32 * 20.0, y - 1.0);
     for i in 0..9 {
         if let Some((item, count)) = g.inventory[36 + i] {
-            gui.item(&g.blocks, item, count, cx - 90.0 + i as f32 * 20.0 + 2.0, h - 16.0 - 3.0);
+            gui.item_patch(&g.blocks, item, &g.creative.patches[36 + i], count, cx - 90.0 + i as f32 * 20.0 + 2.0, h - 16.0 - 3.0);
         }
     }
     let survival = g.game_mode == 0 || g.game_mode == 2;
