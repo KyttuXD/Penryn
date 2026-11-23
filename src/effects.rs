@@ -275,6 +275,14 @@ impl Effects {
         }
     }
 
+    /// LocalPlayer.getEffectBlendFactor(DARKNESS): 0 without the effect.
+    pub fn darkness_blend(&self, partial: f32) -> f32 {
+        match self.get(DARKNESS) {
+            Some(e) => e.blend_o + (e.blend - e.blend_o) * partial,
+            None => 0.0,
+        }
+    }
+
     /// BlindnessFogEnvironment, then DarknessFogEnvironment (vanilla's order): the fog for a view
     /// that reaches `far` blocks.
     pub fn fog(&self, far: f32, partial: f32) -> Option<Fog> {

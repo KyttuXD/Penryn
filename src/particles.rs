@@ -1556,7 +1556,7 @@ impl Particles {
 
     /// Draws the particles as quads facing the camera (SingleQuadParticle, LOOKAT_XYZ), from
     /// the eye; `view` is the camera's rotation.
-    pub fn draw(&mut self, gl: &Gl, view: &[f32; 16], eye: [f64; 3], partial: f32, atlas: u32) {
+    pub fn draw(&mut self, gl: &Gl, view: &[f32; 16], eye: [f64; 3], partial: f32, atlas: u32, lit: &crate::lightmap::Lit) {
         if self.list.is_empty() {
             return;
         }
@@ -1568,6 +1568,8 @@ impl Particles {
         let up = [view[1], view[5], view[9]];
         let fwd = [-view[2], -view[6], -view[10]];
         let pt = partial as f64;
+        // Most particles sit in the same block as the one drawn before: its light is kept.
+        let mut last: ([i32; 3], u8, [f32; 3]) = ([i32::MIN; 3], 0, [1.0; 3]);
         for p in self.list.iter() {
             if p.kind == K::ExplosionSeed {
                 continue;
@@ -1605,6 +1607,25 @@ impl Particles {
                 (col[2].clamp(0.0, 1.0) * 255.0) as u8,
                 (col[3].clamp(0.0, 1.0) * 255.0) as u8,
             ];
+            // SingleQuadParticle.getLightCoords: the light of the block it is in. Flames
+            // brighten their block light as they age, lava and explosions are fully lit.
+            let life = ((p.age as f32 + partial) / p.life.max(1) as f32).clamp(0.0, 1.0);
+            let cell = [math::ifloor(c[0] as f64 + eye[0]), math::ifloor(c[1] as f64 + eye[1]), math::ifloor(c[2] as f64 + eye[2])];
+            let boost = match p.kind {
+                K::Flame | K::SmallFlame => (life * 15.0) as u8,
+                K::Lava | K::Explosion => 15,
+                _ => 0,
+            };
+            let lc = if last.0 == cell && last.1 == boost {
+                last.2
+            } else {
+                let (sky, blk) = lit.world.light_at(cell[0], cell[1], cell[2]);
+                let (sky, blk) = if p.kind == K::Lava || p.kind == K::Explosion { (15, 15) } else { (sky, (blk + boost).min(15)) };
+                let l = lit.colour(sky, blk);
+                last = (cell, boost, l);
+                l
+            };
+            let cc = crate::lightmap::tint(cc, lc);
             let uv = p.uv;
             let out = &mut self.verts[p.layer as usize];
             for (sx, sy, u, v) in [(1.0f32, -1.0f32, uv[2], uv[3]), (1.0, 1.0, uv[2], uv[1]), (-1.0, 1.0, uv[0], uv[1]), (-1.0, -1.0, uv[0], uv[3])] {

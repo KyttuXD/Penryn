@@ -23,8 +23,9 @@ pub struct V {
 const STRIDE: i32 = 24;
 
 /// A chunk vertex: position in 1/1024 block from the section's corner, uv in 1/32767 of the
-/// atlas (the modelview and texture matrices scale them back), colour. 16 bytes, two thirds of
-/// a float vertex: less to upload and to fetch on old cards.
+/// atlas (the modelview and texture matrices scale them back), colour, and the light (block,
+/// sky) in 1/16 steps of a level, 0 to 240: texture unit 1's coordinates into the light map.
+/// 20 bytes, under the 24 of a float vertex.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CV {
@@ -32,8 +33,11 @@ pub struct CV {
     pub _pad: i16,
     pub uv: [i16; 2],
     pub c: [u8; 4],
+    pub light: [i16; 2],
 }
 
+/// A vertex's light: full sky light, no block light (until the mesher reads the world's).
+pub const FULL_SKY: [i16; 2] = [0, 240];
 
 pub fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
     CV {
@@ -41,6 +45,7 @@ pub fn cv(p: [f32; 3], uv: [f32; 2], c: [u8; 4]) -> CV {
         _pad: 0,
         uv: [(uv[0] * 32767.0) as i16, (uv[1] * 32767.0) as i16],
         c,
+        light: FULL_SKY,
     }
 }
 
@@ -51,6 +56,8 @@ pub struct Renderer {
     pub terrain: Terrain,
     epoch: u32,
     cache: Vec<u16>,
+    /// The same 18 x 18 x 18 cells' light, sky << 4 | block (World::copy_light).
+    lcache: Vec<u8>,
     /// A section's quads by run while it is meshed: facing down, up, north, south, west, east,
     /// any (solid and cut-out together), then translucent.
     runs: [Vec<CV>; RUNS],
@@ -78,6 +85,8 @@ pub struct Renderer {
     pub rain_fog: f32,
     /// The vertical field of view, degrees (the FOV option with its effects).
     pub fov: f32,
+    /// The light map (lightmap.rs): unit 1 during the terrain passes.
+    pub lightmap: crate::lightmap::Lightmap,
 }
 
 /// Faces: normal, the four corners (0 min, 1 max per axis, counter-clockwise from outside),
@@ -108,6 +117,7 @@ impl Renderer {
             terrain: Terrain::new(),
             epoch: 0,
             cache: alloc::vec![0; (P * P * P) as usize],
+            lcache: alloc::vec![0; (P * P * P) as usize],
             runs: Default::default(),
             inflight: BTreeMap::new(),
             gen: 0,
@@ -126,6 +136,7 @@ impl Renderer {
             atlas_alpha: Vec::new(),
             rain_fog: 0.0,
             fov: 70.0,
+            lightmap: crate::lightmap::Lightmap::new(),
         }
     }
 
@@ -328,7 +339,7 @@ impl Renderer {
             }
         }
         self.gen += 1;
-        Some(crate::mesher::Job { key: k, gen: self.gen, cache: self.cache.clone(), ids, colours: world.biome_colours.clone(), blocks: b as *const Blocks, cutout_leaves: self.meshed_leaves })
+        Some(crate::mesher::Job { key: k, gen: self.gen, cache: self.cache.clone(), light: self.lcache.clone(), ids, colours: world.biome_colours.clone(), blocks: b as *const Blocks, cutout_leaves: self.meshed_leaves })
     }
 
     fn fill_cache(&mut self, world: &World, (cx, sy, cz): (i32, i32, i32)) -> bool {
@@ -375,6 +386,32 @@ impl Renderer {
                         None => 0,
                     };
                     self.cache[ci(x, y, z)] = v;
+                }
+            }
+        }
+        let out: &mut [u8; (P * P * P) as usize] = (&mut self.lcache[..]).try_into().unwrap();
+        world.copy_light(cx, sy, cz, out);
+        // Border cells of columns that are not loaded take the light of the nearest cell of
+        // this section, so a section at the edge of the loaded area is not dark along its edge.
+        let mut missing = false;
+        for dz in -1..=1i32 {
+            for dx in -1..=1i32 {
+                missing |= !world.columns.contains_key(&(cx + dx, cz + dz));
+            }
+        }
+        if missing {
+            for y in -1..17i32 {
+                for z in -1..17i32 {
+                    for x in -1..17i32 {
+                        if x >= 0 && x < 16 && z >= 0 && z < 16 {
+                            continue;
+                        }
+                        let dx = if x < 0 { -1 } else if x > 15 { 1 } else { 0 };
+                        let dz = if z < 0 { -1 } else if z > 15 { 1 } else { 0 };
+                        if !world.columns.contains_key(&(cx + dx, cz + dz)) {
+                            self.lcache[ci(x, y, z)] = self.lcache[ci(x.clamp(0, 15), y.clamp(0, 15), z.clamp(0, 15))];
+                        }
+                    }
                 }
             }
         }
@@ -470,7 +507,9 @@ impl Renderer {
         // Solid and cut-out quads together, with the alpha test, near to far: on the cards
         // measured one pass beats two (solid without the test, then cut-out with it).
         unsafe { (gl.Enable)(ALPHA_TEST) };
+        self.lightmap.enable(gl);
         self.terrain.draw_opaque(gl, &view, eye, world.min_y);
+        self.lightmap.disable(gl);
         crate::perf::lap(crate::perf::S::World);
         // Entities, between the opaque world and the water (vanilla's order).
         unsafe {
@@ -502,7 +541,9 @@ impl Renderer {
             (gl.DepthMask)(0);
             (gl.AlphaFunc)(GREATER, 0.004);
         }
+        self.lightmap.enable(gl);
         self.terrain.draw_translucent(gl, &view, eye, world.min_y);
+        self.lightmap.disable(gl);
         self.vertices_drawn = self.terrain.quads_drawn * 4;
         crate::perf::lap(crate::perf::S::Water);
         unsafe {

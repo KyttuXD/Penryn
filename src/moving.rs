@@ -894,7 +894,7 @@ struct V {
 
 /// The moving blocks (PistonHeadRenderer), in the world pass with the entities: `view` the
 /// camera's rotation, positions relative to `eye`.
-pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], world: &World, b: &Blocks, atlas: u32, partial: f32) {
+pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], world: &World, b: &Blocks, atlas: u32, partial: f32, lit: &crate::lightmap::Lit) {
     let m = &world.moving;
     let Some(ids) = m.ids.as_ref() else { return };
     if m.pistons.is_empty() {
@@ -912,10 +912,12 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], world: &World, b: &Blocks,
             0 => [255, 255, 255],
             n => blocks::tint_colour(n),
         };
+        // Lit by the block it is in now.
+        let lc = lit.at([at[0] + 0.5, at[1] + 0.5, at[2] + 0.5]);
         for q in b.model(s) {
             let base = if q.flags & blocks::Q_TINTED != 0 { tint } else { [255, 255, 255] };
             let l = q.light as f32 / 255.0;
-            let c = [(base[0] as f32 * l) as u8, (base[1] as f32 * l) as u8, (base[2] as f32 * l) as u8, 255];
+            let c = crate::lightmap::tint([(base[0] as f32 * l) as u8, (base[1] as f32 * l) as u8, (base[2] as f32 * l) as u8, 255], lc);
             let out = if q.flags & blocks::Q_TRANSLUCENT != 0 { &mut clear } else { &mut solid };
             for i in 0..4 {
                 let p = q.pos[i];

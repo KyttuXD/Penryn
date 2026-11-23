@@ -471,11 +471,22 @@ pub struct TextMesh {
     version: u32,
     shape: u64,
     anchor: [i32; 3],
+    /// Each side's text in the buffer, to light them one by one.
+    ranges: Vec<Piece>,
+}
+
+/// One side of a sign in the text buffer: its block, whether the text glows (full light), the
+/// vertices in the `under` part and (from the start of the `over` part) in the `over` part.
+struct Piece {
+    pos: [i32; 3],
+    glow: bool,
+    under: (i32, i32),
+    over: (i32, i32),
 }
 
 /// Draws every sign's text near the eye. `view` is the view matrix (column-major); called
 /// between the opaque world and the water.
-pub fn draw_world(gl: &Gl, view: &[f32; 16], eye: [f64; 3], be: &BlockEntities, world: &World, blocks: &Blocks, gui: &Gui) {
+pub fn draw_world(gl: &Gl, view: &[f32; 16], eye: [f64; 3], be: &BlockEntities, world: &World, blocks: &Blocks, gui: &Gui, lit: &crate::lightmap::Lit) {
     if be.signs.is_empty() {
         return;
     }
@@ -491,6 +502,7 @@ pub fn draw_world(gl: &Gl, view: &[f32; 16], eye: [f64; 3], be: &BlockEntities, 
     if mesh.vbo == 0 || mesh.version != be.version || mesh.shape != shape {
         let anchor = [crate::math::ifloor(eye[0]), crate::math::ifloor(eye[1]), crate::math::ifloor(eye[2])];
         let (mut under, mut over) = (Vec::new(), Vec::new());
+        mesh.ranges.clear();
         for (&(x, y, z), sign) in be.signs.iter() {
             let c = [x as f64 + 0.5 - eye[0], y as f64 + 0.5 - eye[1], z as f64 + 0.5 - eye[2]];
             let d2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
@@ -502,7 +514,9 @@ pub fn draw_world(gl: &Gl, view: &[f32; 16], eye: [f64; 3], be: &BlockEntities, 
             for (t, front) in [(&sign.front, true), (&sign.back, false)] {
                 if !t.is_empty() {
                     let m = text_transform(&k, front, at);
+                    let (u0, o0) = (under.len() as i32, over.len() as i32);
                     side_quads(&mut under, &mut over, gui, &m, t, k.hanging, d2 < OUTLINE_DIST2);
+                    mesh.ranges.push(Piece { pos: [x, y, z], glow: t.glow, under: (u0, under.len() as i32 - u0), over: (o0, over.len() as i32 - o0) });
                 }
             }
         }
@@ -555,14 +569,21 @@ pub fn draw_world(gl: &Gl, view: &[f32; 16], eye: [f64; 3], be: &BlockEntities, 
         (gl.VertexPointer)(3, FLOAT, 24, core::ptr::null());
         (gl.TexCoordPointer)(2, FLOAT, 24, 12 as *const c_void);
         (gl.ColorPointer)(4, UNSIGNED_BYTE, 24, 20 as *const c_void);
-        if mesh.under > 0 {
-            (gl.LoadMatrixf)(matrix(1.0 - 0.0010).as_ptr());
-            (gl.DrawArrays)(QUADS, 0, mesh.under);
+    }
+    // Each side is lit by its sign's block (glowing text: fully).
+    lit.tint_begin(gl);
+    for pass in 0..2 {
+        unsafe { (gl.LoadMatrixf)(matrix(if pass == 0 { 1.0 - 0.0010 } else { 1.0 - 0.0015 }).as_ptr()) };
+        for r in mesh.ranges.iter() {
+            let (start, n) = if pass == 0 { (r.under.0, r.under.1) } else { (mesh.under + r.over.0, r.over.1) };
+            if n > 0 {
+                lit.tint_set(gl, if r.glow { [1.0; 3] } else { lit.cell(r.pos[0], r.pos[1], r.pos[2]) });
+                unsafe { (gl.DrawArrays)(QUADS, start, n) };
+            }
         }
-        if mesh.over > 0 {
-            (gl.LoadMatrixf)(matrix(1.0 - 0.0015).as_ptr());
-            (gl.DrawArrays)(QUADS, mesh.under, mesh.over);
-        }
+    }
+    lit.tint_end(gl);
+    unsafe {
         (gl.BindBuffer)(ARRAY_BUFFER, 0);
         (gl.Enable)(CULL_FACE);
         (gl.Disable)(ALPHA_TEST);

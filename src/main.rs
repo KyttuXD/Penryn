@@ -25,6 +25,7 @@ mod http;
 mod ids;
 mod itemmodels;
 mod keybinds;
+mod lightmap;
 mod json;
 mod lang;
 mod maps;
@@ -293,7 +294,7 @@ fn scene(args: &[String]) -> Result<(), String> {
     let n = (w.height / 16) as usize;
     for cx in 0..3 {
         for cz in 0..3 {
-            w.columns.insert((cx, cz), world::Column { sections: (0..n).map(|_| None).collect(), biomes: alloc::vec![[0u16; 64]; n], version: 0 });
+            w.columns.insert((cx, cz), world::Column::dark((0..n).map(|_| None).collect(), alloc::vec![[0u16; 64]; n], 0));
         }
     }
     let air = |s: u16| s == 0;
@@ -345,6 +346,8 @@ fn scene(args: &[String]) -> Result<(), String> {
         (v.gl.ClearColor)(0.6, 0.75, 1.0, 1.0);
         (v.gl.Clear)(sdl::COLOR_BUFFER_BIT | sdl::DEPTH_BUFFER_BIT);
     }
+    // Noon's light map, as in the game (without it unit 1 has no texture).
+    r.lightmap.update(&v.gl, &lightmap::Params { dimension: lightmap::OVERWORLD, day_time: 6000.0, rain: 0.0, thunder: 0.0, flicker: 0.0, gamma: 0.5, darkness_blend: 0.0, darkness_option: 1.0, tick: 0.0, night_vision: 0.0, boss: 0.0 }.input());
     r.draw_world(&v.gl, &w, eye, yaw, pitch, 1280, 720, 3, [0.6, 0.75, 1.0], &mut |_| {}, &mut |_| {});
     let png = sdl::screenshot_png(&v.gl, 1280, 720);
     if !sys::write_file_private(&out, &png) {
@@ -397,7 +400,7 @@ fn selftest() -> Result<(), String> {
     for (what, got, want) in skins::selftest().into_iter().chain(entities::selftest()).chain(mobanim::selftest()) {
         check(what, got, want);
     }
-    for (what, got, want) in occlusion::selftest().into_iter().chain(render::selftest()).chain(terrain::selftest()).chain(sky::selftest()).chain(json::selftest()).chain(servers::selftest()).chain(title::selftest()).chain(multiplayer::selftest()) {
+    for (what, got, want) in occlusion::selftest().into_iter().chain(render::selftest()).chain(terrain::selftest()).chain(world::selftest()).chain(mesher::selftest()).chain(lightmap::selftest()).chain(sky::selftest()).chain(json::selftest()).chain(servers::selftest()).chain(title::selftest()).chain(multiplayer::selftest()) {
         check(what, got, want);
     }
     // Movement against vanilla's collision, in a made-up world (needs blocks.bin).
@@ -476,7 +479,7 @@ fn test_world(b: &blocks::Blocks, extra: &[(i32, i32, i32, u16)]) -> world::Worl
     for _ in 0..n {
         sections.push(None);
     }
-    w.columns.insert((0, 0), world::Column { sections, biomes: alloc::vec![[0u16; 64]; n], version: 0 });
+    w.columns.insert((0, 0), world::Column::dark(sections, alloc::vec![[0u16; 64]; n], 0));
     let stone = first_state(b, "stone", |_| true).unwrap_or(1);
     let air = |s: u16| s == 0;
     for x in 0..16 {

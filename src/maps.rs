@@ -167,16 +167,19 @@ struct V {
 /// Quads to draw, each run with its texture.
 struct Batch {
     runs: Vec<(u32, Vec<V>)>,
+    /// The light colour the quads added from now on are multiplied by.
+    tint: [f32; 3],
 }
 
 impl Batch {
     fn new() -> Batch {
-        Batch { runs: Vec::new() }
+        Batch { runs: Vec::new(), tint: [1.0; 3] }
     }
     fn quad(&mut self, tex: u32, m: &M, p: [[f64; 3]; 4], uv: [[f32; 2]; 4], c: [u8; 4]) {
         if self.runs.last().map_or(true, |r| r.0 != tex) {
             self.runs.push((tex, Vec::new()));
         }
+        let c = crate::lightmap::tint(c, self.tint);
         let v = &mut self.runs.last_mut().unwrap().1;
         for i in 0..4 {
             v.push(V { p: m.apply(p[i]), uv: uv[i], c });
@@ -245,7 +248,7 @@ fn hand_map(b: &mut Batch, m: &M, data: Option<&MapData>) {
 /// The held map(s) in first person. `main`/`off`: the map ids (Some(None): a map without
 /// data yet) in each hand; `pitch` the view's; `swing` 0..1, `equip` 1 lowered .. 0.
 /// Returns false when the main hand holds no map (hand.rs draws it).
-pub fn draw_hand(gl: &Gl, w: i32, h: i32, maps: &Maps, main: Option<Option<i32>>, off_empty: bool, pitch: f32, swing: f32, equip: f32, bob: (f32, f32)) -> bool {
+pub fn draw_hand(gl: &Gl, w: i32, h: i32, maps: &Maps, main: Option<Option<i32>>, off_empty: bool, pitch: f32, swing: f32, equip: f32, bob: (f32, f32), lc: [f32; 3]) -> bool {
     let Some(main) = main else { return false };
     if crate::menus::assets().is_none() {
         return false;
@@ -260,6 +263,7 @@ pub fn draw_hand(gl: &Gl, w: i32, h: i32, maps: &Maps, main: Option<Option<i32>>
     let sq = crate::math::sqrt(sw);
     let pi = crate::math::PI;
     let mut b = Batch::new();
+    b.tint = lc;
     if off_empty {
         // renderTwoHandedMap.
         let g = -0.2 * crate::math::sin(sw * pi);
@@ -325,6 +329,7 @@ pub fn draw_frames(
     blocks: &crate::blocks::Blocks,
     atlas: u32,
     atlas_size: (f32, f32),
+    lit: &crate::lightmap::Lit,
 ) {
     let Some(a) = crate::menus::assets() else { return };
     let mut b = Batch::new();
@@ -348,9 +353,15 @@ pub fn draw_frames(
             (-90.0 * st[1], 180.0)
         };
         let m = M::id().t(p[0], p[1], p[2]).r(0, xr).r(1, yr);
+        // The frame's light is the block's it hangs in; a glow frame has at least block light 5
+        // and lights what it holds as block 13, sky 15 (GlowItemFrameRenderer).
+        let glow = e.kind == GLOW_ITEM_FRAME;
+        let lc = if glow { lit.at_min_block(c, 5) } else { lit.at(c) };
+        b.tint = lc;
+        let item_lc = if glow { lit.colour(15, 13) } else { lc };
+        flat.tint = item_lc;
         let invisible = e.data.get(&0).map_or(false, |f| f & 0x20 != 0);
         let map = e.data.get(&FRAMED_MAP).map(|v| *v as i32).filter(|_| e.item.is_some());
-        let glow = e.kind == GLOW_ITEM_FRAME;
         if !invisible {
             let model = &a.frames[(if glow { 2 } else { 0 } + map.is_some() as usize).min(a.frames.len().saturating_sub(1))];
             let fm = m.t(-0.5, -0.5, -0.5);
@@ -366,6 +377,7 @@ pub fn draw_frames(
         if let Some(id) = map {
             let mm = im.r(2, (rot as i64 % 4 * 2) as f64 * 45.0).r(2, 180.0).s(0.0078125, 0.0078125, 0.0078125).t(-64.0, -64.0, 0.0).t(0.0, 0.0, -1.0);
             if let Some(d) = maps.get(id) {
+                b.tint = item_lc;
                 map_quads(&mut b, &mm, d, true, 0.1, 255);
             }
             continue;

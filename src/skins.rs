@@ -709,7 +709,7 @@ fn submit(gl: &Gl, tex: u32, v: &[V], alpha: bool) {
 
 /// Draws the players EntityTable::draw left out: their own skin, and their cape
 /// (`Avatar.isModelPartShown(CAPE)`, entity data 16 bit 0). One draw call per texture.
-pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, crate::entities::Entity>, partial: f32, skip: i32, table: &crate::entities::EntityTable, items: &[String]) {
+pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, crate::entities::Entity>, partial: f32, skip: i32, table: &crate::entities::EntityTable, items: &[String], lit: &crate::lightmap::Lit) {
     let s = st();
     if s.profiles.is_empty() {
         return;
@@ -737,12 +737,13 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, crate
                 (gl.BindBuffer)(ARRAY_BUFFER, 0);
             }
         }
+        let lc = table.light(e, [at[0] + eye[0], at[1] + eye[1], at[2] + eye[2]], lit);
         // The body: its own skin, or the default one (with a cape over it).
         v.clear();
         match skin_of(&e.uuid) {
             Some((tex, slim)) => {
                 for q in table.player_quads(e, at, partial, slim, items) {
-                    v.push(V { p: q.0, uv: q.1, c: q.2 });
+                    v.push(V { p: q.0, uv: q.1, c: crate::lightmap::tint(q.2, lc) });
                 }
                 submit(gl, tex, &v, true);
             }
@@ -751,7 +752,7 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, crate
                 let (aw, ah) = table.atlas_size();
                 if let Some(r) = table.skins.get(i) {
                     for q in table.player_quads(e, at, partial, i < 9, items) {
-                        v.push(V { p: q.0, uv: [(r[0] as f32 + q.1[0] * r[2] as f32) / aw, (r[1] as f32 + q.1[1] * r[3] as f32) / ah], c: q.2 });
+                        v.push(V { p: q.0, uv: [(r[0] as f32 + q.1[0] * r[2] as f32) / aw, (r[1] as f32 + q.1[1] * r[3] as f32) / ah], c: crate::lightmap::tint(q.2, lc) });
                     }
                     submit(gl, table.texture(), &v, true);
                 }
@@ -762,6 +763,9 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, crate
             let c = s.cloaks.get(&id).copied().unwrap_or(Cloak { at: e.pos, prev: e.prev, ..Cloak::default() });
             v.clear();
             cape_quads(&mut v, e.body_rot(partial), at, cape_angles(e, &c, partial));
+            for q in v.iter_mut() {
+                q.c = crate::lightmap::tint(q.c, lc);
+            }
             submit(gl, tex, &v, false); // RenderTypes.entitySolid
         }
     }

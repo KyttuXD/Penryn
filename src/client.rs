@@ -239,6 +239,31 @@ impl From<String> for Join {
 }
 
 impl Game {
+    /// PENRYN_DEBUG: what light a chunk's packet brought (the first few, and the player's).
+    fn debug_light(&self, x: i32, z: i32) {
+        if crate::sys::env("PENRYN_DEBUG").is_none() {
+            return;
+        }
+        let pl = &self.player;
+        let (px, py, pz) = (crate::math::ifloor(pl.x), crate::math::ifloor(pl.y), crate::math::ifloor(pl.z));
+        let here = px >> 4 == x && pz >> 4 == z;
+        if self.chunks_received > 3 && !here {
+            return;
+        }
+        if let Some([sl, sn, bl, bn]) = self.world.light_stats(x, z) {
+            crate::say!("light chunk {} {}: sky in {} sections ({} varying), block in {} ({} varying)", x, z, sl, sn, bl, bn);
+        }
+        if here {
+            // A column through the player: sky and block light from 3 above to 6 below.
+            let mut s = alloc::string::String::new();
+            for dy in (-6..=3).rev() {
+                let (sk, bk) = self.world.light_at(px, py + dy, pz);
+                s += &alloc::format!(" y{}:{}/{}", py + dy, sk, bk);
+            }
+            crate::say!("light at player column (sky/block):{}", s);
+        }
+    }
+
     /// Connects and logs in (the connect screen's stages). Runs on the join's thread. `common` is
     /// what a transfer keeps (the cookies); `transferred` says so in the handshake (ClientIntent.TRANSFER).
     pub fn login(host: &str, port: u16, name: &str, account: Option<&Account>, common: crate::serverui::Common, transferred: bool) -> Result<Login, String> {
@@ -561,6 +586,17 @@ impl Game {
                 // Then the chunk's block entities: signs' text.
                 if self.block_entities.read_chunk(x, z, &mut r).is_none() {
                     crate::warn!("chunk {} {}: could not read its block entities", x, z);
+                } else if self.world.read_light(x, z, &mut r).is_none() {
+                    crate::warn!("chunk {} {}: could not read its light", x, z);
+                } else {
+                    self.debug_light(x, z);
+                }
+            }
+            play::C_LIGHT_UPDATE => {
+                let x = r.varint().unwrap_or(0);
+                let z = r.varint().unwrap_or(0);
+                if self.world.read_light(x, z, &mut r).is_none() {
+                    crate::warn!("light update {} {}: could not read it", x, z);
                 }
             }
             play::C_FORGET_LEVEL_CHUNK => {

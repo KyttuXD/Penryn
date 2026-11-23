@@ -160,6 +160,28 @@ pub const TRIANGLES: u32 = 4;
 pub const UNSIGNED_SHORT: u32 = 0x1403;
 pub const UNSIGNED_INT: u32 = 0x1405;
 pub const ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
+pub const TEXTURE0: u32 = 0x84C0;
+pub const TEXTURE1: u32 = 0x84C1;
+pub const TEXTURE_ENV: u32 = 0x2300;
+pub const TEXTURE_ENV_MODE: u32 = 0x2200;
+pub const MODULATE: i32 = 0x2100;
+pub const TEXTURE_ENV_COLOR: u32 = 0x2201;
+pub const COMBINE: i32 = 0x8570;
+pub const COMBINE_RGB: u32 = 0x8571;
+pub const COMBINE_ALPHA: u32 = 0x8572;
+pub const SOURCE0_RGB: u32 = 0x8580;
+pub const SOURCE1_RGB: u32 = 0x8581;
+pub const SOURCE0_ALPHA: u32 = 0x8588;
+pub const OPERAND0_RGB: u32 = 0x8590;
+pub const OPERAND1_RGB: u32 = 0x8591;
+pub const OPERAND0_ALPHA: u32 = 0x8598;
+pub const CONSTANT: i32 = 0x8576;
+pub const PREVIOUS: i32 = 0x8578;
+pub const REPLACE: i32 = 0x1E01;
+pub const LINEAR: i32 = 0x2601;
+pub const CLAMP_TO_EDGE: i32 = 0x812F;
+pub const TEXTURE_WRAP_S: u32 = 0x2802;
+pub const TEXTURE_WRAP_T: u32 = 0x2803;
 
 api! { Gl, "gl", "system",
     Clear(u32);
@@ -202,6 +224,10 @@ api! { Gl, "gl", "system",
     Color4ub(u8, u8, u8, u8);
     DrawElements(u32, i32, u32, *const c_void);
     MultiDrawElements(u32, *const i32, u32, *const *const c_void, i32);
+    ActiveTexture(u32);
+    ClientActiveTexture(u32);
+    TexEnvi(u32, u32, i32);
+    TexEnvfv(u32, u32, *const f32);
 }
 
 pub struct Video {

@@ -63,6 +63,7 @@ pub mod play {
     pub const C_LEVEL_CHUNK_WITH_LIGHT: i32 = 46;
     pub const C_LEVEL_EVENT: i32 = 47;
     pub const C_LEVEL_PARTICLES: i32 = 48;
+    pub const C_LIGHT_UPDATE: i32 = 49;
     pub const C_LOGIN: i32 = 50;
     pub const C_MOVE_ENTITY_POS: i32 = 54;
     pub const C_MOVE_ENTITY_POS_ROT: i32 = 55;

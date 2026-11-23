@@ -43,6 +43,17 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   multipart, rotations, per-face UVs, cull faces, tints), your game's textures with mipmaps, ambient
   occlusion, water and lava, fog, day and night from the 26.3 world clocks. Chests are vanilla's
   chest model.
+- **Vanilla's lighting**: the server's sky and block light (the light half of chunk packets and
+  light updates) is stored per section (a section of one level costs one byte), the mesher gives
+  every vertex the smooth average of the light around it as vanilla's lighter does, and the
+  terrain is drawn with a second texture unit that multiplies in the light map: a 16 x 16 texture
+  worked out on the CPU from the 26.x light map shader's arithmetic (the sun's height and the
+  weather, the nether's and the end's ambient light, night vision, darkness, the boss bar's
+  darkening, the brightness option, the torch light's flicker). Entities, dropped items, item
+  frames and maps, the held item and hand, particles, sign text and moving pistons are lit by the
+  light at their block (the entity's eye, or the particle's cell) with the same table, so a
+  zombie in a dark cave is dark and one beside a torch is warm. There is no separate night
+  overlay and no global daylight scalar on the world: the sky, stars and clouds keep their own.
 - **Fast on old cards, the same picture**: vanilla's cave culling (each section's visibility set
   and the walk from the camera through them), whole sections of faces turned away from the camera
   never sent, sections packed into shared vertex buffers and drawn near to far with one call per
@@ -133,7 +144,7 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   trident's throw, and other players drawn sitting, crouching, swimming, gliding and sleeping.
 - **Status effects**: their icons at the top right and beside the inventory (names, times,
   blinking as they run out), jump boost, levitation, slow falling and dolphin's grace on
-  movement, blindness and darkness closing the fog in, night vision lifting the night.
+  movement, blindness and darkness closing the fog in, night vision lifting the light map.
 - **Pistons and shulker boxes move**: pistons push and pull (slime and honey included) as
   vanilla's client runs them, the moving blocks drawn sliding, carrying and launching the
   player; an opening shulker box lifts what stands on it.
@@ -193,7 +204,12 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   the enchantment glint, and has no drag-splitting of stacks.
 - No ambient cave sounds or biome music (music.game everywhere).
 - Options screens without anything behind them yet: language,
-  telemetry, credits; brightness only lifts the night (Penryn has no light levels yet).
+  telemetry, credits.
+- Light: the End's flash and the conduit's water vision are not in the light map, servers' custom
+  dimension light attributes are not read (only the three vanilla dimensions), light-emitting
+  models are not drawn at full light (a torch's flame, glowstone) and light is not smoothed per
+  face the way vanilla's `ambientocclusion: false` models are, block faces next to light
+  sources are lit by the server's light only.
 - Block entities other than chests and signs (banners, heads, shulker boxes, bells) are drawn
   without their entity model. Signs show their text (front and back, colours, glow ink) and
   placing one opens vanilla's sign editor; its sign pictures come from `signs.bin` (optional).
@@ -339,6 +355,7 @@ has on the relay's computer (and signs in with another Microsoft account or sign
 | `src/conn.rs`, `net.rs`, `wire.rs`, `zlib.rs`, `crypto.rs`, `md5.rs`, `nbt.rs` | the protocol underneath |
 | `src/world.rs`, `blocks.rs` | chunks and the block table |
 | `src/render.rs` | drawing the world (OpenGL 1.5 fixed function): fog, sky, passes, outline |
+| `src/lightmap.rs` | the light map: the 26.x shader's arithmetic on the CPU, its texture, and how entities, particles and the hand are lit from it |
 | `src/mesher.rs`, `terrain.rs`, `occlusion.rs` | meshing sections on worker threads, their vertex buffers and draw calls, cave culling |
 | `src/perf.rs` | the per-stage frame timer behind `PENRYN_PERF` |
 | `src/opus/` | the Opus codec (a port of libopus: range coder, SILK, CELT, the packet layer, a CELT encoder) |

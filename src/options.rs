@@ -341,17 +341,6 @@ impl Settings {
         }
     }
 
-    /// How dark the night overlay is, with the brightness option on top of it: Penryn has no
-    /// light levels yet, so brightness lifts (or deepens) the overlay as vanilla's lightmap curve
-    /// lifts dark light levels; at the default (50%) it is the overlay as it was.
-    pub fn night_alpha(&self, alpha: f32) -> f32 {
-        let lit = 1.0 - (alpha / 255.0).clamp(0.0, 1.0);
-        let g = self.get(O::Gamma).clamp(0.0, 1.0) as f32;
-        let bright = 1.0 - (1.0 - lit) * (1.0 - lit) * (1.0 - lit) * (1.0 - lit);
-        let out = if g >= 0.5 { lit + (bright - lit) * (g - 0.5) * 2.0 } else { lit + (lit * lit - lit) * (0.5 - g) * 2.0 };
-        ((1.0 - out) * 255.0).clamp(0.0, 255.0)
-    }
-
     fn publish(&self) {
         let mut parts = 0u32;
         for (i, o) in SKIN.iter().enumerate() {
@@ -1228,7 +1217,6 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     m.set(O::RenderDistance, 12.0);
     check("slider handle for a step", format!("{:.4}", m.slider_pos(O::RenderDistance)), "0.3387");
     check("turn per pixel", format!("{:.3}", Settings::default().turn_per_pixel().0), "0.150");
-    check("night overlay at default brightness", format!("{:.1}", Settings::default().night_alpha(140.0)), "140.0");
     let fov = fov_modifier(false, 0.1, true, 1.0);
     check("sprint fov", format!("{:.3}", fov), "1.150");
     // OptionsScreen at a 480 x 270 GUI: the FOV slider, the grid and Done where vanilla puts them.

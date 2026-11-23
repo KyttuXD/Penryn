@@ -945,7 +945,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         match t {
             sdl::EV_QUIT => return Ok(true),
             sdl::EV_WINDOW => {
-                if e.0[12] == sdl::WINEV_FOCUS_LOST && self.screen == Screen::Play {
+                if e.0[12] == sdl::WINEV_FOCUS_LOST && self.screen == Screen::Play && self.test_shot.is_none() {
                     self.set_screen(Screen::Pause);
                 }
             }
@@ -1474,6 +1474,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         g.ui.refresh_tags(&own);
         let eye = [self.mover.pos[0], self.mover.pos[1] + self.eye_height(), self.mover.pos[2]];
         self.weather.tick(g, eye);
+        self.r.lightmap.tick();
         crate::menus::tick(g)?;
         // A written book the server opened (ClientboundOpenBook).
         if let Some(hand) = g.menus.open_book.take() {
@@ -2258,6 +2259,27 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let rain_light = self.weather.daylight(day, rain, thunder);
         (self.sky.rain, self.sky.thunder) = (rain, thunder);
         self.r.rain_fog = if dim { 0.0 } else { self.weather.fog };
+        // The light map: the dimension's light attributes at the day clock, the weather, the
+        // brightness option and the effects.
+        {
+            use crate::options::O;
+            let pf = partial as f32;
+            let nv = if g.effects.get(crate::effects::NIGHT_VISION).is_some() { g.effects.night_vision(pf) } else { 0.0 };
+            let params = crate::lightmap::Params {
+                dimension: g.world.light_env,
+                day_time: g.day_time as f64 + g.clock_rate as f64 * partial,
+                rain,
+                thunder,
+                flicker: self.r.lightmap.flicker(),
+                gamma: self.menu.o.get(O::Gamma) as f32,
+                darkness_blend: g.effects.darkness_blend(pf),
+                darkness_option: self.menu.o.get(O::DarknessEffect) as f32,
+                tick: g.game_time as f64 - partial,
+                night_vision: nv,
+                boss: g.ui.darken_at(pf),
+            };
+            self.r.lightmap.update(&self.v.gl, &params.input());
+        }
         let mut world_view = [0f32; 16];
         let world_view_ref = &mut world_view;
         // Blindness and darkness: a near, dark fog and no sky.
@@ -2281,6 +2303,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let blocks_ref = &g.blocks;
         let block_entities = &g.block_entities;
         let world_ref = &g.world;
+        // How things are lit: the world's light through a copy of the light map's table.
+        let lm_table = self.r.lightmap.cpu;
+        let lit = crate::lightmap::Lit { world: world_ref, table: &lm_table, tex: self.r.lightmap.tex };
+        let lit = &lit;
         let gui_ref = self.gui.as_ref();
         let sky_ref = &self.sky;
         let ent_cx = crate::entities::DrawCx {
@@ -2304,6 +2330,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 let (vw, vh) = self.v.size();
                 vw as f32 / vh as f32
             },
+            lit,
         };
         let (day_time, game_time) = (g.day_time, g.game_time as f64 + partial);
         // Clouds reach further than the terrain (vanilla: the cloud range option, 128 by default).
@@ -2330,27 +2357,27 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if let Some(t) = ents {
                     t.draw(gl, view, eye, entities, pf, own, &ent_cx);
                     crate::perf::lap(crate::perf::S::Entities);
-                    crate::skins::draw(gl, view, eye, entities, pf, own, t, &ent_cx.blocks.items);
+                    crate::skins::draw(gl, view, eye, entities, pf, own, t, &ent_cx.blocks.items, lit);
                     crate::perf::lap(crate::perf::S::EntSkins);
                     if !mine.is_empty() {
                         t.draw(gl, view, eye, &mine, pf, -1, &ent_cx);
-                        crate::skins::draw(gl, view, eye, &mine, pf, -1, t, &ent_cx.blocks.items);
+                        crate::skins::draw(gl, view, eye, &mine, pf, -1, t, &ent_cx.blocks.items, lit);
                     }
                 }
-                crate::entities::draw_items(gl, view, eye, entities, pf, icons, overlays, blocks_ref, atlas, atlas_size);
-                crate::maps::draw_frames(gl, view, eye, entities, maps_ref, icons, overlays, blocks_ref, atlas, atlas_size);
+                crate::entities::draw_items(gl, view, eye, entities, pf, icons, overlays, blocks_ref, atlas, atlas_size, lit);
+                crate::maps::draw_frames(gl, view, eye, entities, maps_ref, icons, overlays, blocks_ref, atlas, atlas_size, lit);
                 crate::perf::lap(crate::perf::S::EntItems);
                 if let Some(gui) = gui_ref {
-                    crate::signs::draw_world(gl, view, eye, block_entities, world_ref, blocks_ref, gui);
+                    crate::signs::draw_world(gl, view, eye, block_entities, world_ref, blocks_ref, gui, lit);
                 }
-                crate::moving::draw(gl, view, eye, world_ref, blocks_ref, atlas, pf);
+                crate::moving::draw(gl, view, eye, world_ref, blocks_ref, atlas, pf, lit);
                 crate::perf::lap(crate::perf::S::BlockEntities);
                 if let (Some(gui), false, true, None) = (gui_ref, dim, clouds_on, fog) {
                     sky_ref.draw_clouds(gl, view, gui, eye, game_time, day, radius);
                 }
                 crate::perf::lap(crate::perf::S::Clouds);
                 if let Some(pt) = parts.as_deref_mut() {
-                    pt.draw(gl, view, eye, pf, atlas);
+                    pt.draw(gl, view, eye, pf, atlas, lit);
                 }
                 crate::perf::lap(crate::perf::S::Particles);
             },
@@ -2389,8 +2416,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             let skin = crate::entities::EntityTable::skin_index(&g.uuid);
             // A held map (ItemInHandRenderer.renderTwoHandedMap / renderOneHandedMap).
             let map = g.held().filter(|h| crate::menus::item_name(g, h.0) == "filled_map").map(|_| crate::maps::map_id(&g.creative.patches[36 + g.selected as usize]));
+            // ItemInHandRenderer: lit by the light at the player's eye.
+            let hand_light = lit.at(eye);
             let bob_v = if self.menu.o.on(crate::options::O::BobView) { (-walk, bob) } else { (0.0, 0.0) };
-            if !crate::maps::draw_hand(&self.v.gl, w, h, &g.maps, map, g.inventory[45].is_none(), g.player.pitch, swing, equip, bob_v) {
+            if !crate::maps::draw_hand(&self.v.gl, w, h, &g.maps, map, g.inventory[45].is_none(), g.player.pitch, swing, equip, bob_v, hand_light) {
             self.hand.draw(
                 &self.v.gl,
                 w,
@@ -2407,6 +2436,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 swing,
                 equip,
                 bob_v,
+                hand_light,
             );
             }
         }
@@ -2420,12 +2450,6 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         crate::serverhud::vignette(&self.v.gl, w, h, &g.ui, eye[0], eye[2]);
         gui.begin(w, h);
         let (gw, gh) = (gui.width, gui.height);
-        // Night darkens the view, unless night vision; brightness lifts it.
-        let night = (1.0 - day) * (1.0 - g.effects.night_vision(partial as f32));
-        if !dim && night > 0.0 {
-            let a = self.menu.o.night_alpha(night * 140.0);
-            gui.fill(0.0, 0.0, gw, gh, ((a as u32) << 24) | 0x00_0014);
-        }
         let eye_block = g.blocks.kind(g.world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2])));
         if eye_block == blocks::WATER {
             gui.fill(0.0, 0.0, gw, gh, 0x6E14_32A0);

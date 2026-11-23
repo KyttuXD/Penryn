@@ -432,6 +432,8 @@ pub struct DrawCx<'a> {
     /// sides of the frustum are not posed or drawn.
     pub tan_y: f32,
     pub aspect: f32,
+    /// The world's light at a place, for lighting each entity.
+    pub lit: &'a crate::lightmap::Lit<'a>,
 }
 
 type M = [[f64; 4]; 3];
@@ -769,7 +771,15 @@ impl EntityTable {
         }
     }
 
-    fn emit(&self, out: &mut Vec<V>, m: &Model, mats: &[M], rect: [u16; 4], tint: [u8; 3], red: bool) {
+    /// The light colour an entity is drawn with (EntityRenderer.getPackedLightCoords): the light of
+    /// the block at its eye, full block light while it burns. `at` is its place in the world.
+    pub fn light(&self, e: &Entity, at: [f64; 3], lit: &crate::lightmap::Lit) -> [f32; 3] {
+        let eye = if e.kind == self.player_type { 1.62 } else { self.dims(e).1 as f64 * 0.85 };
+        let fire = e.d(0) & 1 != 0;
+        lit.at_min_block([at[0], at[1] + eye, at[2]], if fire { 15 } else { 0 })
+    }
+
+    fn emit(&self, out: &mut Vec<V>, m: &Model, mats: &[M], rect: [u16; 4], tint: [u8; 3], red: bool, lc: [f32; 3]) {
         let (aw, ah) = (self.aw, self.ah);
         for (pi, part) in m.parts.iter().enumerate() {
             let t = &mats[pi];
@@ -785,6 +795,8 @@ impl EntityTable {
                 } else {
                     [tl(0), tl(1), tl(2), 255]
                 };
+                // The light colour comes last, over the hurt overlay (entity.fsh).
+                let col = crate::lightmap::tint(col, lc);
                 for k in 0..4 {
                     let v = c[k];
                     out.push(V {
@@ -859,6 +871,7 @@ impl EntityTable {
             }
             let invisible = e.d(0) & 0x20 != 0;
             let red = e.hurt > 0 || e.death_time > 0;
+            let lc = self.light(e, [p[0] + eye[0], p[1] + eye[1], p[2] + eye[2]], cx.lit);
             let held = [e.equipment[0].is_some(), e.equipment[1].is_some()];
             let looks = self.looks(&mut cache, id, e, cx);
             // A player with a downloaded skin: skins.rs draws the body (and cape); armour,
@@ -879,7 +892,7 @@ impl EntityTable {
                 }
                 // EquipmentLayerRenderer draws with NO_OVERLAY: armour never turns red.
                 if !(own_skin && !dr.worn) {
-                    self.emit(v, m, &mats, dr.rect, rgb(dr.tint), red && !dr.worn);
+                    self.emit(v, m, &mats, dr.rect, rgb(dr.tint), red && !dr.worn, lc);
                 }
                 if first.is_none() {
                     first = Some(dr.model as usize);
@@ -907,7 +920,7 @@ impl EntityTable {
                         let Some((item, _)) = e.equipment[slot] else { continue };
                         let arm = if left_handed { if arm == "right_arm" { "left_arm" } else { "right_arm" } } else { arm };
                         let Some(ai) = m.parts.iter().position(|q| q.name == arm) else { continue };
-                        self.held_item(items, &mats[ai], item, arm == "left_arm", cx);
+                        self.held_item(items, &mats[ai], item, arm == "left_arm", cx, lc);
                     }
                 }
             }
@@ -968,7 +981,7 @@ impl EntityTable {
 
     /// ItemInHandLayer.submitArmWithItem: the item at the end of the arm, with its model's
     /// third-person transform (mirrored in the left hand).
-    fn held_item(&self, out: &mut Vec<V>, arm: &M, item: i32, left: bool, cx: &DrawCx) {
+    fn held_item(&self, out: &mut Vec<V>, arm: &M, item: i32, left: bool, cx: &DrawCx, lc: [f32; 3]) {
         let d = self.item_third.get(item as usize).copied().unwrap_or([0.0, 0.0, 0.0, 0.0, 3.0, 1.0, 0.55, 0.55, 0.55]);
         if d[6] == 0.0 {
             return; // a special renderer's item (shield, banner, head...): not drawn here
@@ -996,7 +1009,7 @@ impl EntityTable {
                     // ItemModelGenerator's front and back, 1/16 apart.
                     for (z, l, order) in [(8.5 / 16.0, 1.0, [0usize, 1, 2, 3]), (7.5 / 16.0, 0.8, [3, 2, 1, 0])] {
                         let corners = [(0.0, 1.0, u0, v0), (0.0, 0.0, u0, v1), (1.0, 0.0, u1, v1), (1.0, 1.0, u1, v0)];
-                        let col = [(c[0] as f32 * l) as u8, (c[1] as f32 * l) as u8, (c[2] as f32 * l) as u8, 255];
+                        let col = crate::lightmap::tint([(c[0] as f32 * l) as u8, (c[1] as f32 * l) as u8, (c[2] as f32 * l) as u8, 255], lc);
                         for i in order {
                             let (x, y, u, vv) = corners[i];
                             out.push(V { p: apply(&m, [x, y, z]), uv: [u, vv], c: col });
@@ -1010,7 +1023,7 @@ impl EntityTable {
                 for q in qs {
                     let l = q.light as f32 / 255.0;
                     let base = if q.flags & crate::blocks::Q_TINTED != 0 { tc } else { [255; 3] };
-                    let col = [(base[0] as f32 * l) as u8, (base[1] as f32 * l) as u8, (base[2] as f32 * l) as u8, 255];
+                    let col = crate::lightmap::tint([(base[0] as f32 * l) as u8, (base[1] as f32 * l) as u8, (base[2] as f32 * l) as u8, 255], lc);
                     for i in 0..4 {
                         let pp = [q.pos[i][0] as f64 / 1024.0, q.pos[i][1] as f64 / 1024.0, q.pos[i][2] as f64 / 1024.0];
                         out.push(V { p: apply(&m, pp), uv: [q.uv[i][0] as f32 / 65535.0, q.uv[i][1] as f32 / 65535.0], c: col });
@@ -1123,7 +1136,7 @@ impl EntityTable {
             let m = &self.models[mi as usize];
             let mut mats: Vec<M> = Vec::new();
             self.pose(m, e, partial, at, items, &mut mats);
-            self.emit(&mut v, m, &mats, [0, 0, self.aw as u16, self.ah as u16], [255; 3], e.hurt > 0 || e.death_time > 0);
+            self.emit(&mut v, m, &mats, [0, 0, self.aw as u16, self.ah as u16], [255; 3], e.hurt > 0 || e.death_time > 0, [1.0; 3]);
         }
         v.iter().map(|q| (q.p, q.uv, q.c)).collect()
     }
@@ -1183,6 +1196,7 @@ pub fn draw_items(
     blocks: &crate::blocks::Blocks,
     atlas: u32,
     atlas_size: (f32, f32),
+    lit: &crate::lightmap::Lit,
 ) {
     let mut v: Vec<V> = Vec::new();
     let tiles_row = (atlas_size.0 / 16.0) as u32;
@@ -1201,13 +1215,15 @@ pub fn draw_items(
         let spin = t / 20.0;
         let (s, c) = (math::sin(spin), math::cos(spin));
         let place = |x: f64, y: f64, z: f64| -> [f32; 3] { [(p[0] + x * c + z * s) as f32, (p[1] + y + bob) as f32, (p[2] - x * s + z * c) as f32] };
+        // The item's light: the block at its (low) eye.
+        let lc = lit.at([p[0] + eye[0], p[1] + eye[1] + 0.2, p[2] + eye[2]]);
         let shown = crate::itemmodels::icon_for(overlays, icons, blocks, item, &e.item_patch);
         match shown.as_ref() {
             Some(crate::gui::Icon::Flat(layers)) => {
                 for &(tile, tint) in layers.iter() {
                     let (tx, ty) = ((tile as u32 % tiles_row) as f32 * 16.0, (tile as u32 / tiles_row) as f32 * 16.0);
                     let (u0, v0, u1, v1) = (tx / atlas_size.0, ty / atlas_size.1, (tx + 16.0) / atlas_size.0, (ty + 16.0) / atlas_size.1);
-                    let col = if tint != 0 { [(tint >> 16) as u8, (tint >> 8) as u8, tint as u8, 255] } else { [255; 4] };
+                    let col = crate::lightmap::tint(if tint != 0 { [(tint >> 16) as u8, (tint >> 8) as u8, tint as u8, 255] } else { [255; 4] }, lc);
                     let (h, y0) = (0.25, 0.125);
                     let corners = [(-h, y0 + 2.0 * h, u0, v0), (-h, y0, u0, v1), (h, y0, u1, v1), (h, y0 + 2.0 * h, u1, v0)];
                     for order in [[0, 1, 2, 3], [3, 2, 1, 0]] {
@@ -1224,7 +1240,7 @@ pub fn draw_items(
                 for q in qs {
                     let l = q.light as f32 / 255.0;
                     let base = if q.flags & crate::blocks::Q_TINTED != 0 { tc } else { [255; 3] };
-                    let col = [(base[0] as f32 * l) as u8, (base[1] as f32 * l) as u8, (base[2] as f32 * l) as u8, 255];
+                    let col = crate::lightmap::tint([(base[0] as f32 * l) as u8, (base[1] as f32 * l) as u8, (base[2] as f32 * l) as u8, 255], lc);
                     for i in 0..4 {
                         let m = |a: usize| (q.pos[i][a] as f64 / 1024.0 - 0.5) * 0.25;
                         v.push(V {

@@ -137,6 +137,7 @@ impl Hand {
         swing: f32,
         equip: f32,
         bob: (f32, f32),
+        lc: [f32; 3],
     ) {
         // GameRenderer.bobView, on the hand's own pose.
         if self.gen != crate::packs::generation() {
@@ -268,7 +269,7 @@ impl Hand {
         let _ = tex_size;
         let mut v: Vec<V> = Vec::with_capacity(quads.len() * 4);
         for (m, (pos, uv, l, t)) in quads.iter() {
-            let c = [(t[0] as f32 * l) as u8, (t[1] as f32 * l) as u8, (t[2] as f32 * l) as u8, 255];
+            let c = crate::lightmap::tint([(t[0] as f32 * l) as u8, (t[1] as f32 * l) as u8, (t[2] as f32 * l) as u8, 255], lc);
             for i in 0..4 {
                 v.push(V { p: m.apply(pos[i]), uv: uv[i], c });
             }

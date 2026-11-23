@@ -30,7 +30,7 @@ pub const OPAQUE: usize = 7;
 pub const TRANSLUCENT: usize = 8;
 /// The run of quads facing any way (always drawn).
 pub const ANY: usize = 6;
-const CSTRIDE: i32 = 16;
+const CSTRIDE: i32 = 20;
 
 /// Region size in sections.
 const RX: i32 = 8;
@@ -449,6 +449,10 @@ impl Terrain {
                 (gl.VertexPointer)(3, SHORT, CSTRIDE, core::ptr::null());
                 (gl.TexCoordPointer)(2, SHORT, CSTRIDE, 8 as *const c_void);
                 (gl.ColorPointer)(4, UNSIGNED_BYTE, CSTRIDE, 12 as *const c_void);
+                // The light: texture unit 1's coordinates.
+                (gl.ClientActiveTexture)(TEXTURE1);
+                (gl.TexCoordPointer)(2, SHORT, CSTRIDE, 16 as *const c_void);
+                (gl.ClientActiveTexture)(TEXTURE0);
                 if self.counts.len() == 1 {
                     (gl.DrawElements)(TRIANGLES, self.counts[0], ty, self.offsets[0]);
                 } else {

@@ -852,7 +852,7 @@ pub fn checks(data: Option<&[u8]>, blocks: Option<&Blocks>) -> Vec<(&'static str
         for _ in 0..n {
             sections.push(None);
         }
-        world.columns.insert((0, 0), crate::world::Column { sections, biomes: alloc::vec![[0u16; 64]; n], version: 0 });
+        world.columns.insert((0, 0), crate::world::Column::dark(sections, alloc::vec![[0u16; 64]; n], 0));
         let stone = (1..b.states.len() as u16).find(|&s| b.of_state(s).name == "stone").unwrap_or(1);
         for x in 0..16 {
             for z in 0..16 {
