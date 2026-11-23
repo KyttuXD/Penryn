@@ -157,7 +157,9 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   water, weather, hand, GUI, swap), the stage behind the slowest frame, and what blocks the
   player when they walk into something; `PENRYN_PERF=2` finishes the GL queue after each
   stage to charge it its GPU time, `PENRYN_PERF=gpu` measures each stage on the card with timer
-  queries, and `PENRYN_MESH_THREADS=0` meshes on the main thread. `penryn selftest` also checks movement against gates, ladders, walls, low
+  queries, and `PENRYN_MESH_THREADS=0` meshes on the main thread. `penryn scene OUT.png [BLOCK... | id:N]`
+  draws blocks offline with the game's renderer (a fixed camera; `PENRYN_SCENE="x,y,z,yaw,pitch"`
+  moves it), for checking block textures without a server. `penryn selftest` also checks movement against gates, ladders, walls, low
   ceilings, ice, soul sand, cobwebs, honey, slime and bamboo.
 
 - **Resource packs, the server's and your own**, as vanilla's pack stack: the server's pack
@@ -338,7 +340,7 @@ Options > Controls. Third person draws no model for the player (the server sends
 | `src/mobanim.rs` | the limbs of mobs and players beyond the walk: bows, crossbows, shields, zombies' and skeletons' arms, piglins, spiders, chickens, elytra wings |
 | `src/serverui.rs`, `serverhud.rs` | tab list, scoreboard, teams, boss bars, titles, world border, links, cookies, transfers |
 | `src/tooltip.rs`, `gamemode.rs` | item components and tooltips; spectator and adventure mode |
-| `src/main.rs` | the command line, and the commands that run without a window (`status`, `join`, `selftest`) |
+| `src/main.rs` | the command line, and the commands that run without a window (`status`, `join`, `selftest`, `scene`) |
 | `src/sys.rs`, `sdl.rs`, `math.rs` | the C library, SDL2 and OpenGL, float maths (no libm) |
 | `src/account.rs`, `http.rs`, `tools/relay.py` | sign-in and the relay |
 | `tools/make_assets.py` | the game files, from your copy of Minecraft |

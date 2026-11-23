@@ -197,6 +197,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let relay = http::host_port(args.get(2).ok_or(USAGE)?, 25580);
             account::login_terminal(relay, args.get(3).map(|s| s.as_str()))
         }
+        Some("scene") => scene(&args),
         Some("logout") => {
             account::logout();
             Ok(())
@@ -268,6 +269,91 @@ fn hex(b: &[u8]) -> String {
         s.push_str(&alloc::format!("{:02x}", x));
     }
     s
+}
+
+/// `penryn scene OUT.png [BLOCK...]`: draws a row of blocks on a flat floor, offline, with the
+/// game's own renderer, and writes the picture (for checking block textures without a server).
+fn scene(args: &[String]) -> Result<(), String> {
+    let out = args.get(2).ok_or("usage: penryn scene OUT.png [BLOCK...]")?.clone();
+    let names: Vec<String> = if args.len() > 3 {
+        args[3..].to_vec()
+    } else {
+        ["crafting_table", "brown_mushroom_block", "red_mushroom_block", "mushroom_stem", "furnace", "oak_planks",
+         "jukebox", "bookshelf", "note_block", "grass_block", "mossy_cobblestone", "oak_log", "chest", "stone_bricks"]
+            .iter().map(|s| alloc::string::String::from(*s)).collect()
+    };
+    let b = load_blocks()?;
+    let v = sdl::Video::open("Penryn scene", 1280, 720, false)?;
+    let mut r = render::Renderer::new();
+    let atlas = sys::read_file(&alloc::format!("{}/atlas.bin", data_dir())).ok_or("cannot read atlas.bin")?;
+    r.load_atlas(&v.gl, &atlas)?;
+    let mut w = world::World::new(b.global_bits(), 6);
+    let n = (w.height / 16) as usize;
+    for cx in 0..3 {
+        for cz in 0..3 {
+            w.columns.insert((cx, cz), world::Column { sections: (0..n).map(|_| None).collect(), biomes: alloc::vec![[0u16; 64]; n], version: 0 });
+        }
+    }
+    let air = |s: u16| s == 0;
+    let stone = first_state(&b, "stone", |_| true).unwrap_or(1);
+    for x in 0..48 {
+        for z in 0..48 {
+            w.set(x, 60, z, stone, &air);
+        }
+    }
+    // The row is centred on x = 24, four blocks apart, 9 blocks in front of the camera.
+    let cx = 24;
+    for (i, name) in names.iter().enumerate() {
+        let short = name.strip_prefix("minecraft:").unwrap_or(name);
+        // "id:N" is a state id (the generator's numbering: a block's states in its file's order).
+        let found = match short.strip_prefix("id:") {
+            Some(n) => n.parse::<u16>().ok(),
+            None => first_state(&b, short, |_| true),
+        };
+        let Some(st) = found else {
+            warn!("no block named {}", name);
+            continue;
+        };
+        let x = cx - (names.len() as i32 - 1) * 2 + i as i32 * 4;
+        w.set(x, 61, 20, st, &air);
+    }
+    for i in 0..names.len() as i32 {
+        let x = cx - (names.len() as i32 - 1) * 2 + i * 4;
+        say!("scene: block at {} = state {} ({})", x, w.get(x, 61, 20), b.of_state(w.get(x, 61, 20)).name);
+    }
+    let mut eye = [cx as f64 + 0.5, 66.0, 11.0];
+    let (mut yaw, mut pitch) = (0.0f32, -22.0f32);
+    // PENRYN_SCENE="x,y,z,yaw,pitch" moves the camera (for checking the picture).
+    if let Some(v) = sys::env("PENRYN_SCENE") {
+        let f: Vec<f64> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        if f.len() == 5 {
+            eye = [f[0], f[1], f[2]];
+            yaw = f[3] as f32;
+            pitch = f[4] as f32;
+        }
+    }
+    // The meshing threads finish in the background: keep handing the renderer its time until
+    // nothing is dirty and the threads have had a moment to finish (a few seconds at most).
+    for _ in 0..600 {
+        r.update(&v.gl, &mut w, &b, eye, 50);
+        sys::sleep_ms(10);
+    }
+    unsafe {
+        (v.gl.Viewport)(0, 0, 1280, 720);
+        (v.gl.ClearColor)(0.6, 0.75, 1.0, 1.0);
+        (v.gl.Clear)(sdl::COLOR_BUFFER_BIT | sdl::DEPTH_BUFFER_BIT);
+    }
+    r.draw_world(&v.gl, &w, eye, yaw, pitch, 1280, 720, 3, [0.6, 0.75, 1.0], &mut |_| {}, &mut |_| {});
+    let png = sdl::screenshot_png(&v.gl, 1280, 720);
+    if !sys::write_file_private(&out, &png) {
+        return Err(alloc::format!("cannot write {}", out));
+    }
+    say!("scene: {} blocks, {}", names.len(), out);
+    Ok(())
+}
+
+fn first_state(b: &blocks::Blocks, name: &str, pick: impl Fn(u16) -> bool) -> Option<u16> {
+    (0..b.states.len() as u16).find(|&s| b.of_state(s).name == name && pick(s))
 }
 
 fn selftest() -> Result<(), String> {
@@ -397,10 +483,6 @@ fn test_world(b: &blocks::Blocks, extra: &[(i32, i32, i32, u16)]) -> world::Worl
         w.set(x, y, z, s, &air);
     }
     w
-}
-
-fn first_state(b: &blocks::Blocks, name: &str, pick: impl Fn(u16) -> bool) -> Option<u16> {
-    (0..b.states.len() as u16).find(|&s| b.of_state(s).name == name && pick(s))
 }
 
 /// Walks forward (+z) for `ticks` from `pos`; the end position.

@@ -13,7 +13,7 @@ Writes OUT_DIR/blocks.bin, OUT_DIR/atlas.bin and OUT_DIR/items.bin (the packs' i
 definitions, "PNI1": see below). Nothing from Mojang is kept in this
 repository: these files are made on the player's machine and stay with their copy of the game.
 
-blocks.bin (little-endian), "PNBA":
+blocks.bin (little-endian), "PNBB":
     u32 states, u32 blocks, u32 boxes, u32 quads, u32 items, u32 collision boxes
     per state: u16 block, u16 hardness x100 (65535: unbreakable), u8 flags (1 needs the right
                tool, 2 full collision, 4 replaceable, 8 opaque full cube, 16 a bubble column
@@ -1216,6 +1216,36 @@ def creative_section(res, reg, items):
 
 # ------------------------------------------------------------------ main
 
+def uv_locked(verts, n):
+    """uvlock (a blockstate part's "uvlock": true): the face's texture stays as the unrotated
+    model has it on the world, not turned with the model. Its up direction is world up on the
+    sides and north on the top and bottom: the quarter turn of the texture that brings the
+    rotated face's up there is found by testing the four turns against the face's geometry.
+    verts: [(point, u, v)] with u, v in texture pixels; n: the rotated face normal."""
+    horizontal = abs(n[1]) < 0.5
+    want = (0.0, 1.0, 0.0) if horizontal else (0.0, 0.0, -1.0)
+    pts = [v[0] for v in verts]
+    pm = [sum(p[a] for p in pts) / len(pts) for a in range(3)]
+    best = None
+    for k in range(4):
+        uv = [(v[1], v[2]) for v in verts]
+        for _ in range(k):
+            uv = [(16 - vv, uu) for uu, vv in uv]
+        vm = sum(t for _, t in uv) / len(uv)
+        den = sum((t - vm) ** 2 for _, t in uv)
+        if den < 1e-9:
+            return verts
+        g = [0.0, 0.0, 0.0]
+        for p, (_, t) in zip(pts, uv):
+            for a in range(3):
+                g[a] += (t - vm) * (p[a] - pm[a])
+        g = [c / den for c in g]
+        score = -sum(g[a] * want[a] for a in range(3))  # texture up is the way v decreases
+        if best is None or score > best[0] + 1e-9:
+            best = (score, uv)
+    return [(verts[i][0], best[1][i][0], best[1][i][1]) for i in range(len(verts))]
+
+
 def main():
     args = sys.argv[1:]
     jar = None
@@ -1429,6 +1459,8 @@ def main():
                     nd = dir_rotate(d, xr, yr)
                     # A face lying flat on the block boundary in its own direction.
                     n = NORMAL[nd]
+                    if ap.get("uvlock"):
+                        verts = uv_locked(verts, n)
                     axis = 0 if n[0] else (1 if n[1] else 2)
                     plane = 16 if sum(n) > 0 else 0
                     on_edge = all(abs(vv[0][axis] - plane) < 1e-4 for vv in verts) and not rot
@@ -1810,7 +1842,7 @@ def main():
         return struct.pack("<ffff", cx / width, cy / height, (cx + TILE) / width, (cy + TILE) / height)
 
     with open(os.path.join(out_dir, "blocks.bin"), "wb") as f:
-        f.write(b"PNBA" + struct.pack("<IIIIII", len(state_rows), len(blocks_out), len(boxes), len(quads), len(items),
+        f.write(b"PNBB" + struct.pack("<IIIIII", len(state_rows), len(blocks_out), len(boxes), len(quads), len(items),
                                       len(coll_boxes)))
         for blk, hard, flags, nbx, fbx, fq, nq, fc, nc, special, facing in state_rows:
             f.write(struct.pack("<HHBBHIHHIBBH", blk, hard, flags, nbx, fbx, fq, nq, facing, fc, nc, special, 0))
