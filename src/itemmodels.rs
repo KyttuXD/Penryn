@@ -48,8 +48,14 @@ pub fn parse(d: &[u8]) -> Vec<Entry> {
             2 => {
                 let (Some(first), Some(count), Some(tint)) = (rd32(p), rd16(p + 4), rd32(p + 6)) else { break };
                 let f = |i: usize| rd32(p + 10 + 4 * i).map(f32::from_bits).unwrap_or(0.0);
-                let icon = Icon::Model { first, count, tint, rot: [f(0), f(1), f(2)], tr: [f(3), f(4), f(5)], sc: [f(6), f(7), f(8)] };
-                p += 46;
+                let mut ctx = crate::gui::NO_CTX;
+                for (c, row) in ctx.iter_mut().enumerate() {
+                    for (i, v) in row.iter_mut().enumerate() {
+                        *v = f(9 + c * 9 + i);
+                    }
+                }
+                let icon = Icon::Model { first, count, tint, rot: [f(0), f(1), f(2)], tr: [f(3), f(4), f(5)], sc: [f(6), f(7), f(8)], ctx };
+                p += 46 + 108;
                 icon
             }
             _ => break,
@@ -159,7 +165,7 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     d.extend_from_slice(&3u32.to_le_bytes());
     d.extend_from_slice(&2u16.to_le_bytes());
     d.extend_from_slice(&0xFF00_FF00u32.to_le_bytes());
-    for _ in 0..9 {
+    for _ in 0..36 {
         d.extend_from_slice(&0f32.to_bits().to_le_bytes());
     }
     let list = parse(&d);

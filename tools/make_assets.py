@@ -857,7 +857,7 @@ def applied_models(bs, props):
 # ------------------------------------------------------------------ particles
 
 PARTICLES_MAGIC = b"PNP1"
-ITEMS_MAGIC = b"PNI1"
+ITEMS_MAGIC = b"PNI2"
 
 
 def block_particle_tiles(names, states, assets, models, texture):
@@ -1746,7 +1746,10 @@ def main():
                     quad_lists[qk] = len(quads)
                     quads.extend(ql)
                 tint = tint_value(tints[0]) if tints else 0
-                return (2, quad_lists[qk], len(ql), gui_display(ref), tint)
+                # Also the head, fixed and ground transforms (item displays draw with those: ModelEngine's bones).
+                ident = ([0, 0, 0], [0, 0, 0], [1, 1, 1])
+                ctxs = [display(ref, c, ident) for c in ("head", "fixed", "ground")]
+                return (2, quad_lists[qk], len(ql), gui_display(ref), tint, ctxs)
             path = resolve_tex(tex, tex.get("particle"))
             if path:
                 ti, _ = texture(path)
@@ -2220,10 +2223,11 @@ def main():
     print("gui.bin: %d sprites, %d glyphs, %d translations, atlas %dx%d; %d items (%d flat, %d 3D)"
           % (len(sprites) - len(font_pages), len(glyphs), len(lang), gw, gh, len(item_icons),
              sum(1 for i in item_icons if i[0] == 1), sum(1 for i in item_icons if i[0] == 2)))
-    # items.bin, "PNI1": u32 count, then per icon a u8 key length and key ("ns:path" or
+    # items.bin, "PNI2": u32 count, then per icon a u8 key length and key ("ns:path" or
     # "ns:path|string"), then u8 kind and u8 n: kind 1 is flat (n layers, each u16 atlas tile and
     # u32 tint); kind 2 is a model (n is 0, then u32 first quad, u16 quads, u32 tint and nine
-    # f32 display transforms: rotation, translation, scale). Quad indices refer to blocks.bin.
+    # f32 display transforms: rotation, translation, scale; then 27 more: the same for the head, fixed and ground
+    # contexts). Quad indices refer to blocks.bin.
     with open(os.path.join(out_dir, "items.bin"), "wb") as f:
         f.write(ITEMS_MAGIC + struct.pack("<I", len(overlay_icons)))
         for key, icon in overlay_icons:
@@ -2234,9 +2238,12 @@ def main():
                 for ti, tint in icon[1]:
                     f.write(struct.pack("<HI", ti, tint))
             else:
-                _, fq, nq, (rot, tr, sc), tint = icon
+                _, fq, nq, (rot, tr, sc), tint = icon[:5]
+                ctxs = icon[5] if len(icon) > 5 else [([0, 0, 0], [0, 0, 0], [1, 1, 1])] * 3
                 f.write(bytes([2, 0]) + struct.pack("<IHI", fq, nq, tint))
                 f.write(struct.pack("<9f", *(list(rot) + list(tr) + list(sc))))
+                for crot, ctr, csc in ctxs:
+                    f.write(struct.pack("<9f", *(list(crot) + list(ctr) + list(csc))))
     print("items.bin: %d icons" % len(overlay_icons))
     make_signs(assets, names, out_dir)
     make_effects(assets, out_dir, reg, facts)

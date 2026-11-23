@@ -207,6 +207,15 @@ fn skull_context(ctx: i64) -> A {
         .then(&A::scale([sc, sc, sc]))
 }
 
+/// An ItemTransform (rotation in degrees, translation in sixteenths, scale), applied as translate, rotate XYZ, scale.
+fn item_transform(t: [f32; 9]) -> A {
+    A::translate([t[3] / 16.0, t[4] / 16.0, t[5] / 16.0])
+        .then(&A::rot_x(rad(t[0])))
+        .then(&A::rot_y(rad(t[1])))
+        .then(&A::rot_z(rad(t[2])))
+        .then(&A::scale([t[6], t[7], t[8]]))
+}
+
 /// The skin URL of a player head's profile (the `minecraft:profile` component, id 72, in the stack's patch).
 pub fn head_skin(patch: &[u8]) -> Option<String> {
     use crate::wire::In;
@@ -385,9 +394,24 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entit
             continue;
         }
         let shown = crate::itemmodels::icon_for(overlays, cx.icons, blocks, item, &e.item_patch);
-        // Fixed (8): flat items and block models are drawn half size (their display transforms).
+        // Flat items at the fixed context (8) are drawn half size (generated models' display transform); a model's
+        // own head (5), fixed (8) and ground (7) transforms come from items.bin.
         let k = if ctx == 8 { 0.5 } else { 1.0 };
-        let place = place.then(&A::scale([k, k, k]));
+        let place = match shown.as_ref() {
+            Some(crate::gui::Icon::Model { ctx: ctxs, .. }) => {
+                let t = match ctx {
+                    5 => Some(ctxs[0]),
+                    8 => Some(ctxs[1]),
+                    7 => Some(ctxs[2]),
+                    _ => None,
+                };
+                match t {
+                    Some(t) => place.then(&item_transform(t)),
+                    None => place,
+                }
+            }
+            _ => place.then(&A::scale([k, k, k])),
+        };
         match shown.as_ref() {
             Some(crate::gui::Icon::Flat(layers)) => {
                 for &(tile, tint) in layers.iter() {

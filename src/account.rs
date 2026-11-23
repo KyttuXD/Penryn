@@ -169,7 +169,7 @@ pub const SOUNDS_MAGIC: &[u8; 4] = b"PNS1";
 pub const WEATHER_MAGIC: &[u8; 4] = b"PNW1";
 pub const EFFECTS_MAGIC: &[u8; 4] = b"PNF1";
 pub const PARTICLES_MAGIC: &[u8; 4] = b"PNP1";
-pub const ITEMS_MAGIC: &[u8; 4] = b"PNI1";
+pub const ITEMS_MAGIC: &[u8; 4] = b"PNI2";
 
 /// Fetches the game files from the relay when they are missing or from another version.
 pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {

@@ -76,11 +76,16 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     out
 }
 
+/// No context transforms: the identity (rotation 0, translation 0, scale 1) for head, fixed and ground.
+pub const NO_CTX: [[f32; 9]; 3] = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]; 3];
+
 #[derive(Clone)]
 pub enum Icon {
     None,
     Flat(Vec<(u16, u32)>),
-    Model { first: u32, count: u16, tint: u32, rot: [f32; 3], tr: [f32; 3], sc: [f32; 3] },
+    /// `ctx`: the display transforms (rotation, translation in sixteenths, scale) of the head, fixed and ground
+    /// contexts (items.bin only; the identity elsewhere).
+    Model { first: u32, count: u16, tint: u32, rot: [f32; 3], tr: [f32; 3], sc: [f32; 3], ctx: [[f32; 9]; 3] },
 }
 
 #[repr(C)]
@@ -359,6 +364,7 @@ impl Gui {
                         rot: [f(0), f(1), f(2)],
                         tr: [f(3), f(4), f(5)],
                         sc: [f(6), f(7), f(8)],
+                        ctx: NO_CTX,
                     });
                     p += 36;
                 }
@@ -775,7 +781,7 @@ impl Gui {
                     self.quad(Tex::Blocks, x, y, x + 16.0, y + 16.0, tx / self.bw, ty / self.bh, (tx + 16.0) / self.bw, (ty + 16.0) / self.bh, c);
                 }
             }
-            Icon::Model { first, count: n, tint, rot, tr, sc } => {
+            Icon::Model { first, count: n, tint, rot, tr, sc, .. } => {
                 self.model_icon(b, *first, *n, *tint, *rot, *tr, *sc, x, y);
             }
             _ => {}
