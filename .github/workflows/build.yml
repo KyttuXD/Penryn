@@ -58,12 +58,17 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
-      # The SDL2.framework (2.0.4, the SDL that runs on Mac OS X 10.6) bundled in the app: it lives in VoxelRust.
-      - uses: actions/checkout@v6
-        with:
-          repository: KyttuXD/VoxelRust
-          path: vendor-voxelrust
-          sparse-checkout: vendor/sdl2
+      # The SDL2.framework (2.0.4, the last SDL that runs on Mac OS X 10.6) is bundled in the app: fetched from the SDL
+      # project (zlib licence), sha256 checked, into a folder that is not committed.
+      - name: Fetch SDL2 2.0.4 (sha256 checked)
+        shell: bash
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/SDL2-2.0.4.dmg" https://www.libsdl.org/release/SDL2-2.0.4.dmg
+          echo "36e46bf696d782fc8cc1ad428c888f8231a3091d1e1bfaba08f7e33fa7d63253  $RUNNER_TEMP/SDL2-2.0.4.dmg" | shasum -a 256 -c -
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/sdl2-dmg" "$RUNNER_TEMP/SDL2-2.0.4.dmg"
+          mkdir -p vendor/sdl2
+          cp -R "$RUNNER_TEMP/sdl2-dmg/SDL2.framework" vendor/sdl2/
+          hdiutil detach "$RUNNER_TEMP/sdl2-dmg"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -80,7 +85,7 @@ jobs:
         shell: bash
         env:
           CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
-          SDL2_FRAMEWORK: vendor-voxelrust/vendor/sdl2/SDL2.framework
+          SDL2_FRAMEWORK: vendor/sdl2/SDL2.framework
         run: |
           t0=$(date +%s); date -u +"start %FT%TZ"
           trap 'echo "| Build the Intel app | macOS Intel | cache-hit: ${CACHE_HIT:-n/a} | $(( $(date +%s) - t0 ))s |" >> "$GITHUB_STEP_SUMMARY"; date -u +"end   %FT%TZ"' EXIT
