@@ -854,14 +854,21 @@ impl EntityTable {
         let right = [view[0] as f64, view[4] as f64, view[8] as f64];
         let up = [view[1] as f64, view[5] as f64, view[9] as f64];
         let (ty, tx) = (cx.tan_y as f64, cx.tan_y as f64 * cx.aspect as f64);
+        // PENRYN_DEBUG: what became of each player within 40 blocks, said every few seconds.
+        let debug = crate::sys::env("PENRYN_DEBUG").is_some();
+        let mut said: Vec<String> = Vec::new();
         for (&id, e) in ents.iter() {
             if id == skip || e.item.is_some() {
                 continue;
             }
+            let is_player = debug && e.kind == self.player_type;
             let lerp = |a: f64, b: f64| a + (b - a) * partial as f64;
             let p = [lerp(e.prev[0], e.pos[0]) - eye[0], lerp(e.prev[1], e.pos[1]) - eye[1], lerp(e.prev[2], e.pos[2]) - eye[2]];
             let dist2 = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
             if p[0] * p[0] + p[2] * p[2] > 96.0 * 96.0 {
+                if is_player {
+                    said.push(alloc::format!("player {}: {:.1} blocks, too far", id, math::sqrt(dist2)));
+                }
                 continue;
             }
             // Behind the camera (with room for its size and name tag): nothing of it shows.
@@ -869,6 +876,9 @@ impl EntityTable {
             let radius = w as f64 + h as f64 + 2.0;
             let z = p[0] * fwd[0] + p[1] * fwd[1] + p[2] * fwd[2];
             if z < -radius {
+                if is_player {
+                    said.push(alloc::format!("player {}: {:.1} blocks, behind the camera", id, math::sqrt(dist2)));
+                }
                 continue;
             }
             // Outside a side of the view's pyramid by more than the model's size (with slack for
@@ -877,10 +887,19 @@ impl EntityTable {
                 let (xs, ys) = (p[0] * right[0] + p[1] * right[1] + p[2] * right[2], p[0] * up[0] + p[1] * up[1] + p[2] * up[2]);
                 let rs = radius * 1.5;
                 if xs.abs() > z.max(0.0) * tx + rs * (1.0 + tx) || ys.abs() > z.max(0.0) * ty + rs * (1.0 + ty) {
+                    if is_player {
+                        said.push(alloc::format!("player {}: {:.1} blocks, outside the view", id, math::sqrt(dist2)));
+                    }
                     continue;
                 }
             }
             let invisible = e.d(0) & 0x20 != 0;
+            if is_player {
+                said.push(alloc::format!(
+                    "player {}: {:.1} blocks, flags {:#x}, invisible {}, own skin {}, parts {}, pos {:.1} {:.1} {:.1}",
+                    id, math::sqrt(dist2), e.d(0), invisible, crate::skins::custom(&e.uuid), self.looks(&mut cache, id, e, cx).len(), e.pos[0], e.pos[1], e.pos[2]
+                ));
+            }
             let red = e.hurt > 0 || e.death_time > 0;
             let lc = self.light(e, [p[0] + eye[0], p[1] + eye[1], p[2] + eye[2]], cx.lit);
             let held = [e.equipment[0].is_some(), e.equipment[1].is_some()];
@@ -954,6 +973,14 @@ impl EntityTable {
                         h += 9.0 * 1.15 * 0.025;
                     }
                     tags.push(([p[0], p[1] + h, p[2]], n, discrete));
+                }
+            }
+        }
+        if debug {
+            static CALLS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            if CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 200 == 0 {
+                for l in said.iter().take(12) {
+                    crate::say!("{}", l);
                 }
             }
         }
