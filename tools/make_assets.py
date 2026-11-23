@@ -13,7 +13,7 @@ Writes OUT_DIR/blocks.bin, OUT_DIR/atlas.bin and OUT_DIR/items.bin (the packs' i
 definitions, "PNI1": see below). Nothing from Mojang is kept in this
 repository: these files are made on the player's machine and stay with their copy of the game.
 
-blocks.bin (little-endian), "PNBC":
+blocks.bin (little-endian), "PNBD":
     u32 states, u32 blocks, u32 boxes, u32 quads, u32 items, u32 collision boxes
     per state: u16 block, u16 hardness x100 (65535: unbreakable), u8 flags (1 needs the right
                tool, 2 full collision, 4 replaceable, 8 opaque full cube, 16 a bubble column
@@ -767,8 +767,9 @@ def rot_point(p, axis, deg, origin, rescale):
 def variant_rotate(p, xr, yr):
     """Blockstate x then y rotation (multiples of 90) about the block's centre, in sixteenths."""
     x, y, z = p
-    for _ in range((xr // 90) % 4):  # x=90: up -> north, north -> down
-        y, z = 16 - z, y
+    # x=90: up -> north, north -> down (the observer facing down is x=90, facing up x=270)
+    for _ in range((xr // 90) % 4):
+        y, z = z, 16 - y
     for _ in range((yr // 90) % 4):  # y=90: north -> east
         x, z = 16 - z, x
     return (x, y, z)
@@ -777,8 +778,8 @@ def variant_rotate(p, xr, yr):
 def dir_rotate(d, xr, yr):
     n = NORMAL[d]
     x, y, z = n
-    for _ in range((xr // 90) % 4):
-        y, z = -z, y
+    for _ in range((xr // 90) % 4):  # x=90: up -> north, north -> down
+        y, z = z, -y
     for _ in range((yr // 90) % 4):
         x, z = -z, x
     for k, v in NORMAL.items():
@@ -1862,7 +1863,7 @@ def main():
         return struct.pack("<ffff", cx / width, cy / height, (cx + TILE) / width, (cy + TILE) / height)
 
     with open(os.path.join(out_dir, "blocks.bin"), "wb") as f:
-        f.write(b"PNBC" + struct.pack("<IIIIII", len(state_rows), len(blocks_out), len(boxes), len(quads), len(items),
+        f.write(b"PNBD" + struct.pack("<IIIIII", len(state_rows), len(blocks_out), len(boxes), len(quads), len(items),
                                       len(coll_boxes)))
         for blk, hard, flags, nbx, fbx, fq, nq, fc, nc, special, facing in state_rows:
             f.write(struct.pack("<HHBBHIHHIBBH", blk, hard, flags, nbx, fbx, fq, nq, facing, fc, nc, special, 0))
