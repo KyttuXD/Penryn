@@ -38,8 +38,8 @@ pub const FAILED_RELOAD: i32 = 6;
 pub const DISCARDED: i32 = 7;
 
 /// The game files a pack stack can change (relay.py's PACK_FILES).
-pub const FILES: [&str; 10] =
-    ["blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin", "effects.bin", "packsounds.bin", "items.bin"];
+pub const FILES: [&str; 13] =
+    ["blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin", "effects.bin", "packsounds.bin", "items.bin", "containers.bin", "menu.bin", "serverui.bin"];
 
 // ------------------------------------------------------------------ the files in use
 

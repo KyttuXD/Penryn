@@ -111,6 +111,47 @@ extern "C" {
     fn sysconf(name: c_int) -> i64;
 }
 
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn readlink(path: *const c_char, buf: *mut u8, n: SizeT) -> SsizeT;
+    fn symlink(target: *const c_char, link: *const c_char) -> c_int;
+    fn unlink(path: *const c_char) -> c_int;
+}
+
+/// Where a symbolic link points (None: not a link, or too long).
+#[cfg(target_os = "linux")]
+fn read_link(path: &str) -> Option<String> {
+    let p = cstr(path);
+    let mut buf = [0u8; 4096];
+    let n = unsafe { readlink(p.as_ptr() as *const c_char, buf.as_mut_ptr(), buf.len()) };
+    if n <= 0 || n as usize >= buf.len() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+/// Linux: keeps ~/.local/bin/penryn a link to the program that is running, every run, so `penryn`
+/// works from a terminal wherever it was built or put. Nothing is done when it already is, or when
+/// the program runs from that path itself. Elsewhere (Mac) it does nothing.
+pub fn install_local_bin() {
+    #[cfg(target_os = "linux")]
+    {
+        let (Some(home), Some(exe)) = (env("HOME"), read_link("/proc/self/exe")) else { return };
+        let dir = alloc::format!("{}/.local/bin", home);
+        let link = alloc::format!("{}/penryn", dir);
+        if exe == link || read_link(&link).as_deref() == Some(exe.as_str()) {
+            return;
+        }
+        make_dir(&alloc::format!("{}/.local", home));
+        make_dir(&dir);
+        let (l, e) = (cstr(&link), cstr(&exe));
+        unsafe {
+            unlink(l.as_ptr() as *const c_char);
+            symlink(e.as_ptr() as *const c_char, l.as_ptr() as *const c_char);
+        }
+    }
+}
+
 /// Processors online (sysconf _SC_NPROCESSORS_ONLN: 58 on Mac OS X, 84 on Linux), at least 1.
 pub fn processors() -> u32 {
     let name = if cfg!(target_os = "macos") { 58 } else { 84 };

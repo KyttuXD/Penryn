@@ -54,6 +54,15 @@ pub struct Game {
     pub flying: bool,
     pub health: f32,
     pub food: i32,
+    /// The server's address (the voice chat's UDP target when the server names none).
+    pub server_host: String,
+    /// Voice chat payloads that came in (channel, bytes), kept only while voice chat is on.
+    pub voice_in: Vec<(String, Vec<u8>)>,
+    pub voice_wanted: bool,
+    /// The armor and max_health attributes, and the air supply (entity data 1; 300 is full).
+    pub armor: f64,
+    pub max_health: f64,
+    pub air: i32,
     pub day_time: i64,
     /// Chat lines and when they arrived (ms).
     pub chat: Vec<(String, u64)>,
@@ -326,10 +335,11 @@ impl Game {
         let Login { conn: mut c, host, port, name, uuid: final_uuid, mut common, .. } = login;
         // ---- configuration
         let mut biomes: Vec<String> = Vec::new();
+        let mut dims: Vec<(String, i32, i32)> = Vec::new();
         let mut creative = crate::creative::Sync::new();
         let mut variants = crate::mobs::Variants::default();
         let mut packs = crate::packs::Packs::new(&host, port, &name, &final_uuid, local_packs);
-        let configured = configure(&mut c, view, &mut biomes, &mut creative.registries, &mut variants, &mut packs, ui, None, &mut blocks, &mut common);
+        let configured = configure(&mut c, view, &mut biomes, &mut dims, &mut creative.registries, &mut variants, &mut packs, ui, None, &mut blocks, &mut common);
         if let Err(e) = configured {
             // A transfer in the configuration: the packs go back to the player's own, and the
             // server to connect to comes back for the next join (serverui's join_with).
@@ -344,6 +354,7 @@ impl Game {
         let block_bits = blocks.global_bits();
         let mut world = World::new(block_bits, crate::blocks::ceil_log2(biomes.len().max(1)));
         world.set_biomes(&biomes, &blocks);
+        world.dim_types = dims;
         Ok(Game {
             conn: c,
             world,
@@ -357,6 +368,12 @@ impl Game {
             flying: false,
             health: 20.0,
             food: 20,
+            armor: 0.0,
+            max_health: 20.0,
+            air: 300,
+            server_host: host.clone(),
+            voice_in: Vec::new(),
+            voice_wanted: false,
             day_time: 6000,
             chat: Vec::new(),
             positioned: false,
@@ -412,7 +429,9 @@ impl Game {
     pub fn reconfigure_now(&mut self, ui: &mut dyn crate::packs::Host) -> Result<(), String> {
         self.reconfigure = false;
         let mut b: Vec<String> = Vec::new();
-        configure(&mut self.conn, 8, &mut b, &mut self.creative.registries, &mut self.variants, &mut self.packs, ui, Some(&mut self.world), &mut self.blocks, &mut self.ui.common)?;
+        let mut dims: Vec<(String, i32, i32)> = Vec::new();
+        configure(&mut self.conn, 8, &mut b, &mut dims, &mut self.creative.registries, &mut self.variants, &mut self.packs, ui, Some(&mut self.world), &mut self.blocks, &mut self.ui.common)?;
+        self.world.dim_types = dims;
         if !b.is_empty() {
             self.world.biome_bits = crate::blocks::ceil_log2(b.len());
             self.world.set_biomes(&b, &self.blocks);
@@ -641,6 +660,8 @@ impl Game {
                         match attr {
                             26 => self.move_speed = v.clamp(0.0, 1024.0),
                             19 => self.jump_strength = v.clamp(0.0, 32.0),
+                            1 => self.armor = v.clamp(0.0, 30.0),
+                            23 => self.max_health = v.clamp(1.0, 1024.0),
                             _ => {}
                         }
                     } else {
@@ -967,6 +988,21 @@ impl Game {
                     }
                 }
             }
+            // A plugin message: the voice chat mod's channels (voicechat:*) go to voicechat/.
+            play::C_CUSTOM_PAYLOAD => {
+                let channel = r.string().unwrap_or_default();
+                if self.voice_wanted && channel.starts_with("voicechat:") && self.voice_in.len() < 256 {
+                    self.voice_in.push((channel, r.rest().to_vec()));
+                }
+            }
+            // 26.3: the arm swing has a packet of its own (the entity, the hand: 0 main, 1 off).
+            play::C_SWING_ANIMATION => {
+                let id = r.varint().unwrap_or(0);
+                let hand = r.varint().unwrap_or(0);
+                if let Some(e) = self.entities.get_mut(&id) {
+                    e.swing_arm(hand != 0);
+                }
+            }
             play::C_DAMAGE_EVENT | play::C_HURT_ANIMATION => {
                 let id = r.varint().unwrap_or(0);
                 if crate::sys::env("PENRYN_DEBUG").is_some() {
@@ -984,6 +1020,9 @@ impl Game {
                     entity_data(&mut r, &mut me);
                     if let Some(&f) = me.data.get(&0) {
                         self.riding.own_flags = Some(f as u8);
+                    }
+                    if let Some(&a) = me.data.get(&1) {
+                        self.air = a as i32;
                     }
                 }
                 if let Some(e) = self.entities.get_mut(&id) {
@@ -1095,11 +1134,11 @@ impl Game {
 
     fn spawn_info(&mut self, r: &mut In) {
         self.effects.clear();
-        let _dim_type = r.varint();
+        let dim_type = r.varint().unwrap_or(0);
         let dim = r.string().unwrap_or_default();
         let _seed = r.i64();
         self.game_mode = r.varint().unwrap_or(0);
-        self.world.set_dimension(&dim);
+        self.world.set_dimension(&dim, dim_type);
         // A new level starts dry; the server sends its weather again.
         self.rain_level = 0.0;
         self.thunder_level = 0.0;
@@ -1154,6 +1193,13 @@ impl Game {
         let mut o = Out::new();
         o.varint(0);
         self.conn.send(play::S_CLIENT_COMMAND, &o)
+    }
+
+    /// A plugin message to the server (ServerboundCustomPayloadPacket: the channel, then the bytes).
+    pub fn send_payload(&mut self, channel: &str, data: &[u8]) -> Result<(), String> {
+        let mut o = Out::new();
+        o.string(channel).bytes(data);
+        self.conn.send(play::S_CUSTOM_PAYLOAD, &o)
     }
 
     /// A line from the chat box: a command (signed if it has message arguments) or chat.
@@ -1268,6 +1314,7 @@ fn configure(
     c: &mut Conn,
     view: i8,
     biomes: &mut Vec<String>,
+    dims: &mut Vec<(String, i32, i32)>,
     regs: &mut Vec<(String, Vec<String>)>,
     variants: &mut crate::mobs::Variants,
     packs: &mut crate::packs::Packs,
@@ -1329,6 +1376,20 @@ fn configure(
                     let mut r2 = p.reader();
                     let _ = r2.string();
                     crate::mobs::registry_data(&id, &mut r2, variants);
+                } else if id == "minecraft:dimension_type" {
+                    // Each dimension type's min_y and height, in the server's order (a type's id).
+                    dims.clear();
+                    for _ in 0..n {
+                        let Some(name) = r.string() else { break };
+                        let (mut min_y, mut height) = (-64, 384);
+                        if r.bool() == Some(true) {
+                            match nbt::dimension_height(&mut r) {
+                                Some((a, b)) => (min_y, height) = (a, b),
+                                None => {}
+                            }
+                        }
+                        dims.push((name, min_y, height));
+                    }
                 } else if id == "minecraft:worldgen/biome" {
                     // The biome ids in the order the server numbers them.
                     biomes.clear();

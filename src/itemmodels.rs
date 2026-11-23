@@ -56,6 +56,10 @@ pub fn parse(d: &[u8]) -> Vec<Entry> {
         };
         out.push((key, icon));
     }
+    // Sorted by key (a stable sort: the first of equal keys stays first), for find()'s binary
+    // search: a pack makes this list tens of thousands long, and every dropped item looks in it
+    // every frame.
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
@@ -99,7 +103,9 @@ fn first_string(v: &[u8]) -> Option<String> {
 }
 
 fn find(list: &[Entry], key: &str) -> Option<usize> {
-    list.iter().position(|(k, _)| k == key)
+    // The list is sorted by key (parse): the first entry that is not before `key`.
+    let i = list.partition_point(|(k, _)| k.as_str() < key);
+    list.get(i).filter(|(k, _)| k == key).map(|_| i)
 }
 
 /// The overlay a stack of registry item `registry` (minecraft:x) with `patch` shows: the

@@ -292,7 +292,7 @@ class Relay:
     def build_assets(self, token=None):
         out = os.path.join(self.data_dir, "assets")
         names = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin", "menu.bin", "serverui.bin",
-                 "containers.bin")
+                 "containers.bin", "items.bin")
         tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_assets.py")
         # Made again when the tool is newer (another format) than the files.
         if all(os.path.isfile(os.path.join(out, n)) and os.path.getmtime(os.path.join(out, n)) >= os.path.getmtime(tool)
@@ -320,7 +320,7 @@ class Relay:
 
 PACK_LIMIT = 262144000          # vanilla's limit for a server pack
 PACK_FILES = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin",
-              "effects.bin", "packsounds.bin", "items.bin")
+              "effects.bin", "packsounds.bin", "items.bin", "containers.bin", "menu.bin", "serverui.bin")
 PACK_JOBS = {}                  # key -> {"state": "working" | "done" | "failed", "result": text}
 PACK_LOCK = threading.Lock()
 
@@ -560,7 +560,7 @@ def make_handler(relay):
                 except Exception as e:  # noqa: BLE001 - reported to the client
                     return self.reply(500, str(e))
             if self.path in ("/assets/blocks.bin", "/assets/atlas.bin", "/assets/gui.bin", "/assets/entities.bin",
-                             "/assets/weather.bin", "/assets/signs.bin", "/assets/particles.bin", "/assets/menu.bin", "/assets/serverui.bin", "/assets/containers.bin"):
+                             "/assets/weather.bin", "/assets/signs.bin", "/assets/particles.bin", "/assets/menu.bin", "/assets/serverui.bin", "/assets/containers.bin", "/assets/items.bin"):
                 try:
                     d = relay.build_assets()
                     with open(os.path.join(d, self.path.rsplit("/", 1)[1]), "rb") as f:

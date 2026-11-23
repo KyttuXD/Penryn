@@ -91,9 +91,29 @@ struct Decoder {
     t: f64,
 }
 
+/// One speaker of the voice chat: decoded mono samples at RATE waiting to be played, with a
+/// short pre-buffer so that network jitter does not stutter, and a cap on the delay.
+struct Speech {
+    id: u64,
+    buf: Vec<i16>,
+    read: usize,
+    gain: [f32; 2],
+    playing: bool,
+    /// Mixer calls spent with nothing to play (the stream goes after about five seconds).
+    idle: u32,
+    /// Resampler state (48 kHz in): the position in the next input chunk, the last input sample.
+    t: f64,
+    last: f32,
+}
+
+/// Samples queued before a speaker's playing starts (40 ms), and the most kept (500 ms).
+const SPEECH_START: usize = RATE as usize * 40 / 1000;
+const SPEECH_MAX: usize = RATE as usize / 2;
+
 struct Mix {
     voices: Vec<Voice>,
     music: Option<Music>,
+    speech: Vec<Speech>,
     volumes: [f32; 11],
 }
 
@@ -142,6 +162,36 @@ unsafe extern "C" fn callback(_ud: *mut c_void, stream: *mut u8, len: c_int) {
             m.read += 1;
         }
     }
+    // The voice chat's speakers (positioned and scaled by the caller when it pushes).
+    mix.speech.retain_mut(|s| {
+        let queued = s.buf.len() - s.read;
+        if !s.playing {
+            if queued >= SPEECH_START {
+                s.playing = true;
+            } else {
+                s.idle += 1;
+                return s.idle < 100;
+            }
+        }
+        if queued == 0 {
+            s.playing = false;
+            s.idle += 1;
+            return s.idle < 100;
+        }
+        s.idle = 0;
+        let g = [s.gain[0] * master, s.gain[1] * master];
+        for f in 0..frames.min(queued) {
+            let v = s.buf[s.read] as f32;
+            acc[2 * f] += v * g[0];
+            acc[2 * f + 1] += v * g[1];
+            s.read += 1;
+        }
+        if s.read > RATE as usize {
+            s.buf.drain(..s.read);
+            s.read = 0;
+        }
+        true
+    });
     for (o, a) in out.iter_mut().zip(acc.iter()) {
         *o = a.clamp(-32768.0, 32767.0) as i16;
     }
@@ -271,7 +321,7 @@ impl Audio {
             if dev == 0 {
                 return None;
             }
-            let mix = Box::new(Mix { voices: Vec::new(), music: None, volumes: [1.0; 11] });
+            let mix = Box::new(Mix { voices: Vec::new(), music: None, speech: Vec::new(), volumes: [1.0; 11] });
             MIX.store(Box::into_raw(mix), Ordering::Release);
             (sdl.SDL_PauseAudioDevice)(dev, 0);
             Some(Audio {
@@ -551,6 +601,43 @@ impl Audio {
             if m.done && m.read >= m.buf.len() {
                 mix.music = None;
             }
+        }
+        unsafe { (self.unlock)(self.device) };
+    }
+
+    /// Voice chat: more decoded audio (mono, 48 kHz, f32 in -1..1) from speaker `id`, to play with
+    /// the left and right `gain` (distance, pan and the voice volume are the caller's). Returns
+    /// without effect when the audio device is gone.
+    pub fn voice_push(&mut self, id: u64, pcm48: &[f32], gain: [f32; 2]) {
+        if pcm48.is_empty() {
+            return;
+        }
+        unsafe { (self.lock)(self.device) };
+        let mix = unsafe { &mut *MIX.load(Ordering::Acquire) };
+        let k = match mix.speech.iter().position(|s| s.id == id) {
+            Some(k) => k,
+            None => {
+                mix.speech.push(Speech { id, buf: Vec::new(), read: 0, gain, playing: false, idle: 0, t: 0.0, last: 0.0 });
+                mix.speech.len() - 1
+            }
+        };
+        let s = &mut mix.speech[k];
+        s.gain = gain;
+        let ratio = 48000.0 / RATE as f64;
+        let n = pcm48.len();
+        while s.t < (n - 1) as f64 {
+            let i = crate::math::floor(s.t);
+            let (a, b, frac) = if i < 0.0 { (s.last, pcm48[0], (s.t + 1.0) as f32) } else { (pcm48[i as usize], pcm48[i as usize + 1], (s.t - i) as f32) };
+            let v = a + (b - a) * frac;
+            s.buf.push((v.clamp(-1.0, 1.0) * 32767.0) as i16);
+            s.t += ratio;
+        }
+        s.t -= n as f64;
+        s.last = pcm48[n - 1];
+        // A speaker that falls behind (a burst after a stall) keeps the newest half second.
+        let queued = s.buf.len() - s.read;
+        if queued > SPEECH_MAX {
+            s.read = s.buf.len() - SPEECH_MAX;
         }
         unsafe { (self.unlock)(self.device) };
     }

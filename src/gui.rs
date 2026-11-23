@@ -34,13 +34,17 @@ struct Glyph {
     adv: i16,
     height: u8,
     yoff: i8,
+    /// In the unihex sheet (alpha only, its own texture), not the GUI atlas: bit 31 of the code point.
+    sheet: bool,
 }
 
 impl Glyph {
     /// The record at `p` of gui.bin (`d` is the file), with its code point.
     fn at(d: &[u8], p: usize) -> (u32, Glyph) {
-        let cp = rd32(d, p);
+        let raw = rd32(d, p);
+        let cp = raw & 0x7FFF_FFFF;
         (cp, Glyph {
+            sheet: raw >> 31 != 0,
             x: rd16(d, p + 4),
             y: rd16(d, p + 6),
             cw: d[p + 8],
@@ -169,6 +173,11 @@ pub struct Gui {
     bh: f32,
     pub sprites: BTreeMap<String, Sprite>,
     glyphs: BTreeMap<u32, Glyph>,
+    /// The packs' other fonts (a text's "font"): name and glyphs, font id 1 and up in order.
+    fonts: Vec<(String, BTreeMap<u32, Glyph>)>,
+    /// The unihex sheet's texture and size (0: none).
+    hex_tex: u32,
+    hex_size: (f32, f32),
     pub icons: Vec<Icon>,
     /// The packs' item definitions (items.bin, itemmodels.rs), by item_model key.
     pub overlays: Vec<crate::itemmodels::Entry>,
@@ -261,6 +270,41 @@ impl Gui {
             glyphs.insert(cp, g);
             p += 14;
         }
+        // The packs' other fonts: name, then their glyph records.
+        let mut fonts: Vec<(String, BTreeMap<u32, Glyph>)> = Vec::new();
+        let nf = rd32(d, p) as usize;
+        p += 4;
+        for _ in 0..nf {
+            let nl = d.get(p).copied().unwrap_or(0) as usize;
+            let name = core::str::from_utf8(d.get(p + 1..p + 1 + nl).unwrap_or(&[])).unwrap_or("");
+            p += 1 + nl;
+            let n = rd32(d, p) as usize;
+            p += 4;
+            let mut t = BTreeMap::new();
+            for _ in 0..n {
+                let (cp, g) = Glyph::at(d, p);
+                t.insert(cp, g);
+                p += 14;
+            }
+            fonts.push((String::from(name), t));
+        }
+        crate::text::set_fonts(fonts.iter().map(|f| f.0.clone()).collect());
+        // The unihex sheet: width, height, one alpha byte a pixel.
+        let (hw, hh) = (rd16(d, p) as usize, rd16(d, p + 2) as usize);
+        p += 4;
+        let mut hex_tex = 0u32;
+        if hw * hh > 0 && d.len() >= p + hw * hh {
+            unsafe {
+                (gl.GenTextures)(1, &mut hex_tex);
+                (gl.BindTexture)(TEXTURE_2D, hex_tex);
+                (gl.PixelStorei)(UNPACK_ALIGNMENT, 1);
+                (gl.TexParameteri)(TEXTURE_2D, TEXTURE_MAG_FILTER, NEAREST);
+                (gl.TexParameteri)(TEXTURE_2D, TEXTURE_MIN_FILTER, NEAREST);
+                (gl.TexParameteri)(TEXTURE_2D, TEXTURE_MAX_LEVEL, 0);
+                (gl.TexImage2D)(TEXTURE_2D, 0, ALPHA as i32, hw as i32, hh as i32, 0, ALPHA, UNSIGNED_BYTE, d[p..].as_ptr() as *const c_void);
+            }
+            p += hw * hh;
+        }
         let models = parse_models(d, &mut p);
         let n = rd32(d, p) as usize;
         p += 4;
@@ -330,6 +374,9 @@ impl Gui {
             bh: blocks_size.1,
             sprites,
             glyphs,
+            fonts,
+            hex_tex,
+            hex_size: (hw.max(1) as f32, hh.max(1) as f32),
             icons,
             overlays: Vec::new(),
             models,
@@ -495,9 +542,21 @@ impl Gui {
 
     // ---------------------------------------------------------------- text
 
+    /// A glyph of font `f` (0: the default; else a pack's font), the default font's when the
+    /// font has none.
+    fn glyph_in(&self, f: usize, cp: u32) -> Option<Glyph> {
+        if f > 0 {
+            if let Some(g) = self.fonts.get(f - 1).and_then(|t| t.1.get(&cp)) {
+                return Some(*g);
+            }
+        }
+        self.glyphs.get(&cp).copied()
+    }
+
     pub fn text_width(&self, s: &str) -> f32 {
         let mut w = 0.0;
         let mut bold = false;
+        let mut font = 0usize;
         let mut it = s.chars().peekable();
         while let Some(c) = it.next() {
             if c == '\u{a7}' {
@@ -509,25 +568,29 @@ impl Gui {
                         bold = false;
                     }
                     Some('l') | Some('L') => bold = true,
-                    Some(d) if d.is_ascii_hexdigit() || d == 'r' || d == 'R' => bold = false,
+                    Some(d) if (0xF800..0xF900).contains(&(d as u32)) => font = (d as u32 - 0xF800) as usize,
+                    Some(d) if d.is_ascii_hexdigit() || d == 'r' || d == 'R' => {
+                        bold = false;
+                        font = 0;
+                    }
                     _ => {}
                 }
                 continue;
             }
-            w += self.glyphs.get(&(c as u32)).map_or(6, |g| g.adv) as f32 + bold as i32 as f32;
+            w += self.glyph_in(font, c as u32).map_or(6, |g| g.adv) as f32 + bold as i32 as f32;
         }
         w
     }
 
     /// A glyph's quad, slanted for italics (vanilla moves the top right and the bottom left).
     fn glyph_quad_at(&mut self, g: Glyph, x: f32, y: f32, italic: bool, c: [u8; 4]) {
-        let (aw, ah, k) = (self.aw, self.ah, self.text_scale);
+        let (aw, ah, k) = if g.sheet { (self.hex_size.0, self.hex_size.1, self.text_scale) } else { (self.aw, self.ah, self.text_scale) };
         let scale = g.height as f32 / g.ch as f32;
         let (w, h) = (g.cw as f32 * scale * k, g.height as f32 * k);
         let gy = y + g.yoff as f32 * k;
         let (u0, v0, u1, v1) = (g.x as f32 / aw, g.y as f32 / ah, (g.x as f32 + g.cw as f32) / aw, (g.y as f32 + g.ch as f32) / ah);
         let (st, sb) = if italic { ((1.0 - 0.25 * g.yoff as f32) * k, (1.0 - 0.25 * (g.yoff as f32 + g.height as f32)) * k) } else { (0.0, 0.0) };
-        let s = self.seg(Tex::Gui);
+        let s = self.seg(if g.sheet { Tex::Ext(self.hex_tex) } else { Tex::Gui });
         s.push(V { p: [x + st, gy, 0.0], uv: [u0, v0], c });
         s.push(V { p: [x + sb, gy + h, 0.0], uv: [u0, v1], c });
         s.push(V { p: [x + w + sb, gy + h, 0.0], uv: [u1, v1], c });
@@ -552,12 +615,14 @@ impl Gui {
         let k = self.text_scale;
         // bold, italic, underlined, strikethrough, obfuscated
         let (mut bold, mut italic, mut under, mut strike, mut obf) = (false, false, false, false, false);
+        let mut font = 0usize;
         let mut it = s.chars().peekable();
         while let Some(ch) = it.next() {
             if ch == '\u{a7}' {
                 let mut colour = |v: [u8; 4]| {
                     c = v;
                     (bold, italic, under, strike, obf) = (false, false, false, false, false);
+                    font = 0;
                 };
                 match it.next() {
                     Some('#') => {
@@ -573,11 +638,12 @@ impl Gui {
                     Some('m') | Some('M') => strike = true,
                     Some('n') | Some('N') => under = true,
                     Some('o') | Some('O') => italic = true,
+                    Some(d) if (0xF800..0xF900).contains(&(d as u32)) => font = (d as u32 - 0xF800) as usize,
                     _ => {}
                 }
                 continue;
             }
-            let mut g = match self.glyphs.get(&(ch as u32)).copied() {
+            let mut g = match self.glyph_in(font, ch as u32) {
                 Some(g) => g,
                 None => match self.glyphs.get(&('?' as u32)).copied() {
                     Some(g) => g,
@@ -621,17 +687,23 @@ impl Gui {
     /// rightwards and down, each with its uv in the GUI atlas: text drawn in the world (name tags).
     pub fn glyph_quads(&self, s: &str, mut f: impl FnMut(f32, f32, f32, f32, [f32; 4])) {
         let mut cx = 0.0;
+        let mut font = 0usize;
         let mut it = s.chars();
         while let Some(ch) = it.next() {
             if ch == '\u{a7}' {
-                if it.next() == Some('#') {
-                    for _ in 0..6 {
-                        it.next();
+                match it.next() {
+                    Some('#') => {
+                        for _ in 0..6 {
+                            it.next();
+                        }
                     }
+                    Some(d) if (0xF800..0xF900).contains(&(d as u32)) => font = (d as u32 - 0xF800) as usize,
+                    Some('r') | Some('R') => font = 0,
+                    _ => {}
                 }
                 continue;
             }
-            let Some(g) = self.glyphs.get(&(ch as u32)).or_else(|| self.glyphs.get(&('?' as u32))).copied() else { continue };
+            let Some(g) = self.glyph_in(font, ch as u32).filter(|g| !g.sheet).or_else(|| self.glyphs.get(&('?' as u32)).copied()) else { continue };
             if g.cw > 0 {
                 let w = g.cw as f32 * g.height as f32 / g.ch as f32;
                 let (u0, v0) = (g.x as f32 / self.aw, g.y as f32 / self.ah);
@@ -857,7 +929,7 @@ impl Gui {
     /// v1), its quad from the pen (x, y, w, h, in font pixels) and its advance; '?' for
     /// characters the font lacks.
     pub fn glyph_quad(&self, ch: char) -> Option<([f32; 4], [f32; 4], f32)> {
-        let g = self.glyphs.get(&(ch as u32)).or_else(|| self.glyphs.get(&('?' as u32)))?;
+        let g = self.glyphs.get(&(ch as u32)).filter(|g| !g.sheet).or_else(|| self.glyphs.get(&('?' as u32)))?;
         let uv = [g.x as f32 / self.aw, g.y as f32 / self.ah, (g.x as f32 + g.cw as f32) / self.aw, (g.y as f32 + g.ch as f32) / self.ah];
         let w = if g.ch > 0 { g.cw as f32 * g.height as f32 / g.ch as f32 } else { 0.0 };
         Some((uv, [0.0, g.yoff as f32, w, g.height as f32], g.adv as f32))

@@ -100,6 +100,7 @@ binds! {
     ToggleGui: "key.toggleGui", Ui, Key::Kb(58);
     QuickActions: "key.quickActions", Ui, Key::Unbound;
     Screenshot: "key.screenshot", Misc, Key::Kb(59);
+    VoiceTalk: "Push to Talk (Voice Chat)", Misc, Key::Kb(25);
     Perspective: "key.togglePerspective", Misc, Key::Kb(62);
     Fullscreen: "key.fullscreen", Misc, Key::Kb(68);
     SmoothCamera: "key.smoothCamera", Misc, Key::Unbound;

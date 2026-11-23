@@ -31,8 +31,12 @@ pub enum S {
     Sky,
     /// The opaque and cut-out terrain.
     World,
-    /// Mobs, players and their skins, dropped items.
+    /// Mobs and players with the game's skins.
     Entities,
+    /// Players with a downloaded skin, and their capes.
+    EntSkins,
+    /// Dropped items, item frames and their maps.
+    EntItems,
     /// Signs, moving blocks and other block entities.
     BlockEntities,
     Clouds,
@@ -51,8 +55,8 @@ pub enum S {
     Sleep,
 }
 
-const N: usize = 17;
-const NAMES: [&str; N] = ["events", "net", "sound", "logic", "mesh", "sky", "world", "entities", "blockent", "clouds", "particles", "water", "weather", "hand", "gui", "swap", "sleep"];
+const N: usize = 19;
+const NAMES: [&str; N] = ["events", "net", "sound", "logic", "mesh", "sky", "world", "entities", "ent-skins", "ent-items", "blockent", "clouds", "particles", "water", "weather", "hand", "gui", "swap", "sleep"];
 
 static mut MODE: u8 = 0;
 static mut LAST: f64 = 0.0;

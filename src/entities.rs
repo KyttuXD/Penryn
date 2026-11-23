@@ -329,7 +329,7 @@ fn attack_part(name: &str, a: f32, off: bool, head_x: f64, at: &mut [f64; 3], tu
     }
 }
 
-fn wrap_deg(a: f32) -> f32 {
+pub fn wrap_deg(a: f32) -> f32 {
     // Mth.wrapDegrees, without a float remainder (no libm on Mac OS X 10.6 builds).
     (math::wrap(a as f64 + 180.0, 360.0) - 180.0) as f32
 }
@@ -428,6 +428,10 @@ pub struct DrawCx<'a> {
     pub yaw: f32,
     pub pitch: f32,
     pub reach: f64,
+    /// The view's vertical half-angle's tangent and the window's aspect: entities outside the
+    /// sides of the frustum are not posed or drawn.
+    pub tan_y: f32,
+    pub aspect: f32,
 }
 
 type M = [[f64; 4]; 3];
@@ -741,11 +745,26 @@ impl EntityTable {
             crate::poses::part(name, e, partial, &p.name, &mut at_part, &mut turn);
             crate::mobanim::post(&f, &p.name, &mut turn);
             let [xr, yr, zr] = turn;
-            let mut t = mul(&parent, &tr(at_part[0], at_part[1], at_part[2]));
-            t = mul(&t, &rot(2, zr));
-            t = mul(&t, &rot(1, yr));
-            t = mul(&t, &rot(0, xr));
-            t = mul(&t, &sc(q[6] as f64, q[7] as f64, q[8] as f64));
+            // parent * translation * rotations * scale, leaving out the identity ones: most
+            // parts turn about one axis or none, and every rot() costs two software sines.
+            let mut t = parent;
+            let (px, py, pz) = (at_part[0], at_part[1], at_part[2]);
+            for i in 0..3 {
+                t[i][3] += parent[i][0] * px + parent[i][1] * py + parent[i][2] * pz;
+            }
+            if zr != 0.0 {
+                t = mul(&t, &rot(2, zr));
+            }
+            if yr != 0.0 {
+                t = mul(&t, &rot(1, yr));
+            }
+            if xr != 0.0 {
+                t = mul(&t, &rot(0, xr));
+            }
+            let (sx, sy, sz) = (q[6] as f64, q[7] as f64, q[8] as f64);
+            if sx != 1.0 || sy != 1.0 || sz != 1.0 {
+                t = mul(&t, &sc(sx, sy, sz));
+            }
             mats.push(t);
         }
     }
@@ -809,6 +828,9 @@ impl EntityTable {
         let (mut mats, mut body): (Vec<M>, Vec<M>) = (Vec::new(), Vec::new());
         // The view's forward axis (its third row, negated).
         let fwd = [-view[2] as f64, -view[6] as f64, -view[10] as f64];
+        let right = [view[0] as f64, view[4] as f64, view[8] as f64];
+        let up = [view[1] as f64, view[5] as f64, view[9] as f64];
+        let (ty, tx) = (cx.tan_y as f64, cx.tan_y as f64 * cx.aspect as f64);
         for (&id, e) in ents.iter() {
             if id == skip || e.item.is_some() {
                 continue;
@@ -821,8 +843,19 @@ impl EntityTable {
             }
             // Behind the camera (with room for its size and name tag): nothing of it shows.
             let (w, h) = self.dims(e);
-            if p[0] * fwd[0] + p[1] * fwd[1] + p[2] * fwd[2] < -(w as f64 + h as f64 + 2.0) {
+            let radius = w as f64 + h as f64 + 2.0;
+            let z = p[0] * fwd[0] + p[1] * fwd[1] + p[2] * fwd[2];
+            if z < -radius {
                 continue;
+            }
+            // Outside a side of the view's pyramid by more than the model's size (with slack for
+            // the plane normals not being unit length): nothing of it shows.
+            if ty > 0.0 {
+                let (xs, ys) = (p[0] * right[0] + p[1] * right[1] + p[2] * right[2], p[0] * up[0] + p[1] * up[1] + p[2] * up[2]);
+                let rs = radius * 1.5;
+                if xs.abs() > z.max(0.0) * tx + rs * (1.0 + tx) || ys.abs() > z.max(0.0) * ty + rs * (1.0 + ty) {
+                    continue;
+                }
             }
             let invisible = e.d(0) & 0x20 != 0;
             let red = e.hurt > 0 || e.death_time > 0;
@@ -832,20 +865,28 @@ impl EntityTable {
             // held items and the name tag are still drawn here.
             let own_skin = e.kind == self.player_type && crate::skins::custom(&e.uuid);
             let mut first: Option<usize> = None;
+            let mut posed = -1i32;
             for dr in looks.iter() {
                 if invisible && !dr.worn {
                     continue;
                 }
                 let Some(m) = self.models.get(dr.model as usize) else { continue };
-                self.pose(m, e, partial, p, &cx.blocks.items, &mut mats);
+                // The layers of one model (a villager's type, profession and level, a sheep's
+                // wool) share its pose.
+                if posed != dr.model as i32 {
+                    self.pose(m, e, partial, p, &cx.blocks.items, &mut mats);
+                    posed = dr.model as i32;
+                }
                 // EquipmentLayerRenderer draws with NO_OVERLAY: armour never turns red.
                 if !(own_skin && !dr.worn) {
                     self.emit(v, m, &mats, dr.rect, rgb(dr.tint), red && !dr.worn);
                 }
                 if first.is_none() {
                     first = Some(dr.model as usize);
-                    body.clear();
-                    body.extend_from_slice(&mats);
+                    if held[0] || held[1] {
+                        body.clear();
+                        body.extend_from_slice(&mats);
+                    }
                 }
             }
             // ItemInHandLayer: the items in the arms of a humanoid model.

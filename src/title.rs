@@ -526,6 +526,24 @@ pub enum Next {
 /// device code to enter (session, code, where, poll seconds).
 type Asked = Result<Result<Account, (String, String, String, u32)>, String>;
 
+/// The account switch menu: the launcher's accounts, then a switch under way.
+enum AccMenu {
+    Loading(Task<Result<Vec<(String, String, bool)>, String>>),
+    /// (name, id, plays now)
+    List(Vec<(String, String, bool)>),
+    Switching(Task<Result<Option<Account>, String>>),
+    Failed(String),
+}
+
+/// What a button of the account menu does.
+#[derive(Clone, Copy)]
+enum AccAct {
+    Pick(usize),
+    Microsoft,
+    SignOut,
+    Back,
+}
+
 enum SignIn {
     Asking(Task<Asked>),
     /// The device code to enter, where, and the poll running now.
@@ -541,6 +559,8 @@ enum Scr {
     Connect { task: Task<Result<Sendable<Login>, String>>, address: String, back_to_list: bool },
     Disconnected { title: String, reason: String, to_list: bool },
     SignIn(SignIn),
+    /// The account switch menu.
+    Accounts(AccMenu),
 }
 
 /// The pieces of the window the menus use, lent by play.rs.
@@ -559,7 +579,6 @@ pub struct Front {
     name: String,
     mp: Option<Mp>,
     splash: Option<String>,
-    fade_from: Option<u64>,
     keys: [bool; 512],
     mouse: (f32, f32),
     music_delay: i32,
@@ -591,7 +610,6 @@ impl Front {
             name: String::from(name),
             mp: None,
             splash: None,
-            fade_from: None,
             keys: [false; 512],
             mouse: (0.0, 0.0),
             music_delay: 20,
@@ -662,12 +680,54 @@ impl Front {
         }
     }
 
+    /// "Sign in..." with no account, else "Switch account...".
     fn sign_in_button(&self, gw: f32) -> Option<Button> {
         let _ = gw;
-        if self.account.is_some() || self.relay.is_none() {
-            return None;
+        self.relay.as_ref()?;
+        Some(if self.account.is_some() {
+            Button::new(2.0, 12.0, 120.0, String::from("Switch account..."))
+        } else {
+            Button::new(2.0, 12.0, 98.0, String::from("Sign in..."))
+        })
+    }
+
+    /// Microsoft's device code, whatever the launcher has.
+    fn start_device_code(&mut self) {
+        let Some(relay) = self.relay.clone() else { return };
+        let task = task::spawn(move || crate::account::start(&relay).map(Err));
+        self.scr = Scr::SignIn(SignIn::Asking(task));
+    }
+
+    /// The account menu: asks the relay for the launcher's accounts.
+    fn start_accounts(&mut self) {
+        let Some(relay) = self.relay.clone() else { return };
+        self.scr = Scr::Accounts(AccMenu::Loading(task::spawn(move || crate::account::launcher_accounts(&relay))));
+    }
+
+    /// The account menu's buttons: an account each (the signed-in one marked), another Microsoft
+    /// sign-in, sign out, back.
+    fn accounts_layout(&self, gw: f32, gh: f32, m: &AccMenu) -> Vec<(Button, AccAct)> {
+        let _ = gh;
+        let cx = fl(gw / 2.0) - 100.0;
+        let mut out = Vec::new();
+        let mut y = 36.0;
+        if let AccMenu::List(items) = m {
+            let current = self.account.as_ref().map(|a| a.name.as_str());
+            for (i, (name, _, _)) in items.iter().enumerate() {
+                let label = if current == Some(name.as_str()) { format!("{} (signed in)", name) } else { name.clone() };
+                out.push((Button::new(cx, y, 200.0, label), AccAct::Pick(i)));
+                y += 24.0;
+            }
+            out.push((Button::new(cx, y, 200.0, String::from("Sign in with Microsoft...")), AccAct::Microsoft));
+            y += 24.0;
+            if self.account.is_some() {
+                out.push((Button::new(cx, y, 200.0, String::from("Sign out")), AccAct::SignOut));
+                y += 24.0;
+            }
         }
-        Some(Button::new(2.0, 12.0, 98.0, String::from("Sign in...")))
+        let back = if matches!(m, AccMenu::List(_) | AccMenu::Failed(_)) { lang::get("gui.back") } else { lang::get("gui.cancel") };
+        out.push((Button::new(cx, y + 8.0, 200.0, back), AccAct::Back));
+        out
     }
 
     fn start_sign_in(&mut self) {
@@ -688,7 +748,6 @@ impl Front {
         if self.splash.is_none() {
             let splashes: &[String] = a.map_or(&[][..], |a| &a.splashes[..]);
             self.splash = choose_splash(splashes, sys::local_date(), &self.player_name(), random_u32());
-            self.fade_from = Some(sys::now_ms());
             st().easter = random_u32() % 10000 == 0;
         }
         ui.v.grab_mouse(false);
@@ -808,6 +867,35 @@ impl Front {
                             self.join_failed(back, e);
                         }
                     }
+                }
+            }
+            Scr::Accounts(m) => {
+                let mut to = None;
+                let mut signed = false;
+                match m {
+                    AccMenu::Loading(t) => match t.take() {
+                        Some(Ok(list)) => to = Some(AccMenu::List(list)),
+                        Some(Err(e)) => to = Some(AccMenu::Failed(e)),
+                        None => {}
+                    },
+                    AccMenu::Switching(t) => match t.take() {
+                        Some(Ok(Some(acc))) => {
+                            self.account = Some(acc);
+                            signed = true;
+                        }
+                        Some(Ok(None)) => to = Some(AccMenu::Failed(String::from("The launcher has no such account."))),
+                        Some(Err(e)) => to = Some(AccMenu::Failed(e)),
+                        None => {}
+                    },
+                    AccMenu::List(_) | AccMenu::Failed(_) => {}
+                }
+                if let Some(t) = to {
+                    *m = t;
+                }
+                if signed {
+                    crate::skins::set_relay(self.relay.clone());
+                    self.splash = choose_splash(assets(&ui.v.gl).map_or(&[][..], |a| &a.splashes[..]), sys::local_date(), &self.player_name(), random_u32());
+                    self.scr = Scr::Title;
                 }
             }
             Scr::SignIn(s) => {
@@ -968,7 +1056,7 @@ impl Front {
             // ConnectScreen and DisconnectedScreen: shouldCloseOnEsc is false (only their
             // buttons leave them).
             Scr::Connect { .. } | Scr::Disconnected { .. } => {}
-            Scr::SignIn(_) => {
+            Scr::SignIn(_) | Scr::Accounts(_) => {
                 if sc == 41 {
                     self.scr = Scr::Title;
                 }
@@ -1039,7 +1127,11 @@ impl Front {
                     return Some(Next::Quit);
                 } else if self.sign_in_button(gw).map_or(false, |s| s.hit(mx, my)) {
                     Self::click_sound(ui);
-                    self.start_sign_in();
+                    if self.account.is_some() {
+                        self.start_accounts();
+                    } else {
+                        self.start_sign_in();
+                    }
                 }
             }
             Scr::Options => {
@@ -1087,6 +1179,34 @@ impl Front {
                     self.scr = Scr::Title;
                 }
             }
+            Scr::Accounts(_) => {
+                // The layout needs `self`: the menu steps out of it for a moment.
+                let Scr::Accounts(m) = core::mem::replace(&mut self.scr, Scr::Title) else { return None };
+                let hit = self.accounts_layout(gw, gh, &m).iter().find(|(b, _)| b.hit(mx, my)).map(|(_, a)| *a);
+                self.scr = Scr::Accounts(m);
+                if let Some(act) = hit {
+                    Self::click_sound(ui);
+                    match act {
+                        AccAct::Back => self.scr = Scr::Title,
+                        AccAct::Microsoft => self.start_device_code(),
+                        AccAct::SignOut => {
+                            crate::account::logout();
+                            self.account = None;
+                            self.scr = Scr::Title;
+                        }
+                        AccAct::Pick(i) => {
+                            let who = match &self.scr {
+                                Scr::Accounts(AccMenu::List(items)) => items.get(i).map(|x| x.1.clone()),
+                                _ => None,
+                            };
+                            if let (Some(who), Some(relay)) = (who, self.relay.clone()) {
+                                let t = task::spawn(move || crate::account::login_launcher(&relay, Some(&who)));
+                                self.scr = Scr::Accounts(AccMenu::Switching(t));
+                            }
+                        }
+                    }
+                }
+            }
         }
         None
     }
@@ -1113,17 +1233,8 @@ impl Front {
         match &self.scr {
             Scr::Title => {
                 panorama(gl, w, h, speed);
-                // The widgets fade in over the first two seconds (TitleScreen.fading).
-                let fade = match self.fade_from {
-                    Some(t) => {
-                        let f = (sys::now_ms().saturating_sub(t)) as f32 / 2000.0;
-                        if f >= 1.0 {
-                            self.fade_from = None;
-                        }
-                        ((f.clamp(0.0, 1.0) - 0.5) * 2.0).clamp(0.0, 1.0)
-                    }
-                    None => 1.0,
-                };
+                // No fade-in: the title is there at once.
+                let fade = 1.0;
                 let account = match &self.account {
                     Some(acc) => format!("Signed in as {}", acc.name),
                     None => format!("Offline as {}", self.name),
@@ -1156,6 +1267,23 @@ impl Front {
                     gui.text_centered(l, cx, top + 29.0 + i as f32 * 9.0, WHITE);
                 }
                 b.draw(gui, mx, my);
+            }
+            Scr::Accounts(m) => {
+                menu_background(gl, gui, w, h, speed, blur);
+                gui.text_centered("Switch account", cx, 16.0, WHITE);
+                let note = match m {
+                    AccMenu::Loading(_) => Some(String::from("Asking the relay for the launcher's accounts...")),
+                    AccMenu::Switching(_) => Some(String::from("Switching account...")),
+                    AccMenu::Failed(e) => Some(format!("\u{a7}c{}", e)),
+                    AccMenu::List(l) if l.is_empty() => Some(String::from("The launcher has no accounts here: sign in with Microsoft.")),
+                    AccMenu::List(_) => None,
+                };
+                if let Some(n) = note {
+                    gui.text_centered(&n, cx, 26.0, WHITE);
+                }
+                for (b, _) in self.accounts_layout(gw, gh, m).iter() {
+                    b.draw(gui, mx, my);
+                }
             }
             Scr::SignIn(s) => {
                 menu_background(gl, gui, w, h, speed, blur);

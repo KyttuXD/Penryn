@@ -94,6 +94,24 @@ pub fn poll(relay: &(String, u16), session: &str) -> Result<Option<Account>, Str
     }
 }
 
+/// The accounts Horizon's launcher has signed in on the relay's computer: (name, id, plays now).
+pub fn launcher_accounts(relay: &(String, u16)) -> Result<Vec<(String, String, bool)>, String> {
+    let r = http::post(&relay.0, relay.1, "/login/accounts", b"", 60000)?;
+    if r.status != 200 {
+        return Err(String::from(r.text().trim()));
+    }
+    Ok(r.text()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let l = l.trim();
+            let (id, rest) = l.split_once(' ').unwrap_or((l, ""));
+            let selected = rest.ends_with(" *");
+            (String::from(rest.trim_end_matches(" *").trim_end_matches('*').trim()), String::from(id), selected)
+        })
+        .collect())
+}
+
 /// The sign-in through Horizon's launcher on the relay's computer: the account (saved), or
 /// None when the launcher has none signed in (then Microsoft's device code is needed).
 pub fn login_launcher(relay: &(String, u16), who: Option<&str>) -> Result<Option<Account>, String> {
@@ -143,9 +161,9 @@ pub fn logout() {
 }
 
 /// The format each game file must have: a file from another version of Penryn is fetched again.
-pub const BLOCKS_MAGIC: &[u8; 4] = b"PNBB";
+pub const BLOCKS_MAGIC: &[u8; 4] = b"PNBC";
 pub const ATLAS_MAGIC: &[u8; 4] = b"PNA2";
-pub const GUI_MAGIC: &[u8; 4] = b"PNG4";
+pub const GUI_MAGIC: &[u8; 4] = b"PNG5";
 pub const ENTITIES_MAGIC: &[u8; 4] = b"PNE3";
 pub const SOUNDS_MAGIC: &[u8; 4] = b"PNS1";
 pub const WEATHER_MAGIC: &[u8; 4] = b"PNW1";

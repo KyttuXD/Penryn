@@ -282,7 +282,7 @@ impl Sky {
         // matrix moves it by the rest.
         let key = (ox, oz, n, base, radius.to_bits());
         let mut mesh = self.clouds.borrow_mut();
-        let moved = (cx0 - mesh.at[0]).abs() > 0.5 || (cz0 - mesh.at[1]).abs() > 0.5;
+        let moved = (cx0 - mesh.at[0]).abs() > 3.0 || (cz0 - mesh.at[1]).abs() > 3.0;
         if mesh.key != key || moved || mesh.vbo == 0 {
             mesh.key = key;
             mesh.at = [cx0, cz0];
@@ -345,7 +345,13 @@ impl Sky {
         unsafe {
             (gl.MatrixMode)(MODELVIEW);
             (gl.LoadMatrixf)(m.as_ptr());
-            (gl.Disable)(CULL_FACE);
+            // Back faces only matter from inside the layer (the boxes span 4 blocks of height).
+            if y0 < 0.0 && y0 > -4.0 {
+                (gl.Disable)(CULL_FACE);
+            } else {
+                (gl.Enable)(CULL_FACE);
+                (gl.CullFace)(BACK);
+            }
             (gl.Disable)(TEXTURE_2D);
             (gl.Disable)(FOG);
             (gl.Enable)(BLEND);

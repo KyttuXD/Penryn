@@ -411,16 +411,45 @@ pub fn hud(gui: &mut Gui, g: &Game, crosshair: bool, held_name: Option<(String, 
         // Hearts and food
         let top = h - 39.0;
         let health = libm_ceil(g.health);
-        for i in 0..10 {
-            let hx = x + i as f32 * 8.0;
-            gui.blit("hud/heart/container", hx, top);
+        // Gui.renderPlayerHealth: ten hearts a row, as many rows as max_health needs, the rows
+        // closer together the more there are; the armor bar sits above the top row.
+        let max_hearts = libm_ceil((g.max_health / 2.0) as f32).clamp(1, 100);
+        let rows = (max_hearts + 9) / 10;
+        let row_h = (10 - (rows - 2)).max(3) as f32;
+        for i in 0..max_hearts {
+            let (hx, hy) = (x + (i % 10) as f32 * 8.0, top - (i / 10) as f32 * row_h);
+            gui.blit("hud/heart/container", hx, hy);
             if health >= i * 2 + 2 {
-                gui.blit("hud/heart/full", hx, top);
+                gui.blit("hud/heart/full", hx, hy);
             } else if health == i * 2 + 1 {
-                gui.blit("hud/heart/half", hx, top);
+                gui.blit("hud/heart/half", hx, hy);
+            }
+        }
+        let armor = g.armor as i32;
+        if armor > 0 {
+            let ay = top - (rows - 1) as f32 * row_h - 10.0;
+            for i in 0..10 {
+                let ax = x + i as f32 * 8.0;
+                if i * 2 + 1 < armor {
+                    gui.blit("hud/armor_full", ax, ay);
+                } else if i * 2 + 1 == armor {
+                    gui.blit("hud/armor_half", ax, ay);
+                } else {
+                    gui.blit("hud/armor_empty", ax, ay);
+                }
             }
         }
         let right = cx + 91.0;
+        // The air supply: bubbles over the food while it is below full (a bursting one for the
+        // part of a bubble left).
+        if g.air < 300 && !vehicle_hearts {
+            let full = libm_ceil(((g.air - 2).max(0) * 10) as f32 / 300.0);
+            let shown = libm_ceil((g.air.max(0) * 10) as f32 / 300.0);
+            for i in 0..shown.min(10) {
+                let bx = right - i as f32 * 8.0 - 9.0;
+                gui.blit(if i < full { "hud/air" } else { "hud/air_bursting" }, bx, top - 10.0);
+            }
+        }
         for i in (0..10).filter(|_| !vehicle_hearts) {
             let fx = right - i as f32 * 8.0 - 9.0;
             gui.blit("hud/food_empty", fx, top);

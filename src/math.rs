@@ -40,16 +40,14 @@ pub fn sin(x: f64) -> f64 {
     } else if a < -PI / 2.0 {
         a = -PI - a;
     }
+    // The same series (to a^17), by Horner's rule: no division in it.
     let a2 = a * a;
-    let mut term = a;
-    let mut sum = a;
-    let mut n = 1.0;
-    for _ in 0..8 {
-        term *= -a2 / ((n + 1.0) * (n + 2.0));
-        sum += term;
-        n += 2.0;
-    }
-    sum
+    a * (1.0
+        + a2 * (-1.0 / 6.0
+            + a2 * (1.0 / 120.0
+                + a2 * (-1.0 / 5040.0
+                    + a2 * (1.0 / 362880.0
+                        + a2 * (-1.0 / 39916800.0 + a2 * (1.0 / 6227020800.0 + a2 * (-1.0 / 1307674368000.0 + a2 * (1.0 / 355687428096000.0)))))))))
 }
 
 pub fn cos(x: f64) -> f64 {

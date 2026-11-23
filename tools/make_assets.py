@@ -13,7 +13,7 @@ Writes OUT_DIR/blocks.bin, OUT_DIR/atlas.bin and OUT_DIR/items.bin (the packs' i
 definitions, "PNI1": see below). Nothing from Mojang is kept in this
 repository: these files are made on the player's machine and stay with their copy of the game.
 
-blocks.bin (little-endian), "PNBB":
+blocks.bin (little-endian), "PNBC":
     u32 states, u32 blocks, u32 boxes, u32 quads, u32 items, u32 collision boxes
     per state: u16 block, u16 hardness x100 (65535: unbreakable), u8 flags (1 needs the right
                tool, 2 full collision, 4 replaceable, 8 opaque full cube, 16 a bubble column
@@ -257,7 +257,10 @@ class Assets:
             try:
                 return self.zip.read(full)
             except KeyError:
-                return None
+                if not self.folder:
+                    return None
+        if not self.folder:
+            return None
         p = os.path.join(self.folder, *full.split("/"))
         try:
             with open(p, "rb") as f:
@@ -804,6 +807,9 @@ def resolve_tex(tex, v):
             v = v.get("sprite")
         if not isinstance(v, str):
             return None
+        # Some models (heavy_core) name a texture key without its "#".
+        if not v.startswith("#") and v in tex and ":" not in v and "/" not in v:
+            v = "#" + v
         if not v.startswith("#"):
             return nsref(v)
         v = tex.get(v[1:])
@@ -1216,6 +1222,11 @@ def creative_section(res, reg, items):
 
 # ------------------------------------------------------------------ main
 
+def norm_type(t):
+    """A 26.x item model's type: packs leave out "minecraft:" ("model", "select")."""
+    return t if isinstance(t, str) and ":" in t else "minecraft:" + str(t)
+
+
 def uv_locked(verts, n):
     """uvlock (a blockstate part's "uvlock": true): the face's texture stays as the unrotated
     model has it on the world, not turned with the model. Its up direction is world up on the
@@ -1569,7 +1580,7 @@ def main():
         special renderers fall back to a model they name)."""
         if not isinstance(m, dict) or depth > 12:
             return None, []
-        t = m.get("type", "minecraft:model")
+        t = norm_type(m.get("type", "minecraft:model"))
         if t == "minecraft:model":
             return m.get("model"), m.get("tints", [])
         if t == "minecraft:special":
@@ -1738,11 +1749,11 @@ def main():
             if not isinstance(d, dict):
                 continue
             model = d.get("model")
-            if ns != "minecraft" and isinstance(model, dict) and model.get("type") != "minecraft:select":
+            if ns != "minecraft" and isinstance(model, dict) and norm_type(model.get("type")) != "minecraft:select":
                 icon = icon_of_model(model)
                 if icon[0]:
                     overlay_icons.append((key, icon))
-            if isinstance(model, dict) and model.get("type") == "minecraft:select" \
+            if isinstance(model, dict) and norm_type(model.get("type")) == "minecraft:select" \
                     and model.get("property") == "minecraft:custom_model_data":
                 for case in model.get("cases", []) or []:
                     when = case.get("when")
@@ -1842,7 +1853,7 @@ def main():
         return struct.pack("<ffff", cx / width, cy / height, (cx + TILE) / width, (cy + TILE) / height)
 
     with open(os.path.join(out_dir, "blocks.bin"), "wb") as f:
-        f.write(b"PNBB" + struct.pack("<IIIIII", len(state_rows), len(blocks_out), len(boxes), len(quads), len(items),
+        f.write(b"PNBC" + struct.pack("<IIIIII", len(state_rows), len(blocks_out), len(boxes), len(quads), len(items),
                                       len(coll_boxes)))
         for blk, hard, flags, nbx, fbx, fq, nq, fc, nc, special, facing in state_rows:
             f.write(struct.pack("<HHBBHIHHIBBH", blk, hard, flags, nbx, fbx, fq, nq, facing, fc, nc, special, 0))
@@ -1963,43 +1974,122 @@ def main():
                 out.append(pr)
         return out
 
-    for pr in font_refs("minecraft:default", []):
-        if pr.get("type") == "space":
-            for ch, adv in pr.get("advances", {}).items():
-                # A negative advance moves the text back (CraftEngine's GUI titles do).
-                glyphs.setdefault(ord(ch), (None, 0, 0, 0, 0, max(-32768, min(32767, int(adv))), 0, 0))
-            continue
-        if pr.get("type") != "bitmap":
-            continue
-        rel = "textures/" + nsref(pr["file"])
-        img = assets.image((rel))
-        if img is None:
-            continue
-        w, h, px = img
-        rows = pr["chars"]
-        cw, chh = w // max(len(r) for r in rows), h // len(rows)
-        fh = pr.get("height", 8)
-        ascent = pr["ascent"]
-        scale = fh / chh
-        page = len(font_pages)
-        font_pages.append(("font/page%d" % page, rel))
-        sprites["font/page%d" % page] = (w, h, px, None)
-        for ry, row in enumerate(rows):
-            for rx, ch in enumerate(row):
-                cp = ord(ch)
-                if cp == 0 or cp in glyphs:
-                    continue
-                gwid = 0
-                for gx_ in range(cw - 1, -1, -1):
-                    if any(px[((ry * chh + gy_) * w + rx * cw + gx_) * 4 + 3] for gy_ in range(chh)):
-                        gwid = gx_ + 1
-                        break
-                adv = int(0.5 + gwid * scale) + 1
-                if cw > 255 or chh > 255 or fh > 255:
-                    print("%s: glyph U+%04X is too large for gui.bin (cell %dx%d, height %d): left out"
-                          % (rel, cp, cw, chh, fh))
-                    continue
-                glyphs[cp] = (page, rx * cw, ry * chh, cw, chh, adv, fh, 7 - ascent)
+    # Which code points of the unihex font (GNU Unifont) are drawn: the symbols servers use
+    # (punctuation, arrows, maths, boxes, shapes, dingbats) and the Latin, Greek and Cyrillic the
+    # bitmap font lacks. All 65 thousand would cost too much. They live in a sheet of their own
+    # (one byte a pixel, alpha only) beside the GUI atlas, not in it: the atlas is full at 2048 rows.
+    UNIHEX_RANGES = [(0x00A0, 0x024F), (0x0370, 0x04FF), (0x2000, 0x2BFF)]
+    hexcache = {}
+
+    def unihex_glyphs(pr, glyphs):
+        """UnihexProvider: Unifont's .hex lines (code point, 16 rows of 8 or 16 bits) as 16 x 16
+        cells of one sheet, drawn at half size (an 8-high font). Every font with the provider
+        shares the cells."""
+        if pr.get("filter", {}).get("jp"):
+            return
+        if "cells" not in hexcache:
+            hexcache["cells"] = {}
+            data = assets.read(nsref(pr["hex_file"]))
+            if data:
+                import io
+                zf = zipfile.ZipFile(io.BytesIO(data))
+                want = {}
+                for name in zf.namelist():
+                    if not name.endswith(".hex"):
+                        continue
+                    for line in zf.read(name).decode("utf-8", "replace").splitlines():
+                        cp_s, _, bits = line.partition(":")
+                        try:
+                            cp = int(cp_s, 16)
+                        except ValueError:
+                            continue
+                        if cp in glyphs or len(bits) not in (32, 64) or not any(a <= cp <= b for a, b in UNIHEX_RANGES):
+                            continue
+                        want[cp] = bits
+                cols = 64
+                rows = (len(want) + cols - 1) // cols
+                w, h = cols * 16, rows * 16
+                alpha = bytearray(w * h)
+                for i, (cp, bits) in enumerate(sorted(want.items())):
+                    gx, gy = (i % cols) * 16, (i // cols) * 16
+                    digits = len(bits) // 16          # hex digits a row: 2 (8 bits) or 4 (16 bits)
+                    width = digits * 4
+                    wid = 0
+                    for y in range(16):
+                        row = int(bits[y * digits:(y + 1) * digits], 16)
+                        for x in range(width):
+                            if row >> (width - 1 - x) & 1:
+                                alpha[(gy + y) * w + gx + x] = 255
+                                wid = max(wid, x + 1)
+                    # Half size: the advance is the drawn width halved, rounded, plus the gap.
+                    hexcache["cells"][cp] = ("HEX", gx, gy, width, 16, int(0.5 + wid * 0.5) + 1, 8, 0)
+                if want:
+                    hexcache["sheet"] = (w, h, bytes(alpha))
+        for cp, rec in hexcache["cells"].items():
+            glyphs.setdefault(cp, rec)
+
+    def build_font(ref):
+        """One font's glyphs (a table of code point -> record) from its providers; the pages
+        they use are added to the atlas."""
+        glyphs = {}
+        for pr in font_refs(ref, []):
+            if pr.get("type") == "space":
+                for ch, adv in pr.get("advances", {}).items():
+                    # A negative advance moves the text back (CraftEngine's GUI titles do).
+                    glyphs.setdefault(ord(ch), (None, 0, 0, 0, 0, max(-32768, min(32767, int(adv))), 0, 0))
+                continue
+            if pr.get("type") == "unihex":
+                unihex_glyphs(pr, glyphs)
+                continue
+            if pr.get("type") != "bitmap":
+                continue
+            rel = "textures/" + nsref(pr["file"])
+            img = assets.image((rel))
+            if img is None:
+                continue
+            w, h, px = img
+            rows = pr["chars"]
+            cw, chh = w // max(len(r) for r in rows), h // len(rows)
+            fh = pr.get("height", 8)
+            ascent = pr["ascent"]
+            scale = fh / chh
+            page = len(font_pages)
+            font_pages.append(("font/page%d" % page, rel))
+            sprites["font/page%d" % page] = (w, h, px, None)
+            for ry, row in enumerate(rows):
+                for rx, ch in enumerate(row):
+                    cp = ord(ch)
+                    if cp == 0 or cp in glyphs:
+                        continue
+                    gwid = 0
+                    for gx_ in range(cw - 1, -1, -1):
+                        if any(px[((ry * chh + gy_) * w + rx * cw + gx_) * 4 + 3] for gy_ in range(chh)):
+                            gwid = gx_ + 1
+                            break
+                    adv = int(0.5 + gwid * scale) + 1
+                    if cw > 255 or chh > 255 or fh > 255:
+                        print("%s: glyph U+%04X is too large for gui.bin (cell %dx%d, height %d): left out"
+                              % (rel, cp, cw, chh, fh))
+                        continue
+                    glyphs[cp] = (page, rx * cw, ry * chh, cw, chh, adv, fh, 7 - ascent)
+        return glyphs
+
+    glyphs = build_font("minecraft:default")
+    # The packs' other fonts (CraftEngine's and the plugins' GUI pictures are glyphs of fonts like
+    # minecraft:gui): a text's "font" picks one; the default font's glyphs stand in for a missing one.
+    extra_fonts = []
+    if packs:
+        import re as _re
+        names = set()
+        for n in assets.names():
+            m = _re.match(r"^assets/([a-z0-9_.-]+)/font/([a-z0-9_.-]+)\.json$", n)
+            if m:
+                names.add("%s:%s" % (m.group(1), m.group(2)))
+        for name in sorted(names - {"minecraft:default", "minecraft:alt", "minecraft:illageralt"}):
+            tbl = build_font(name)
+            if tbl:
+                extra_fonts.append((name, tbl))
+        print("fonts: %d extra: %s" % (len(extra_fonts), ", ".join("%s (%d glyphs)" % (n, len(t)) for n, t in extra_fonts)))
 
 
     SKINS = ["alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri"]
@@ -2022,6 +2112,7 @@ def main():
     gh = 1
     while gh < y + shelf:
         gh *= 2
+    print("gui atlas: %d rows used of %d" % (y + shelf, gh))
     gatlas = bytearray(gw * gh * 4)
     for k, (px0, py0) in placed.items():
         w, h, px, _ = sprites[k]
@@ -2030,7 +2121,7 @@ def main():
             gatlas[o:o + w * 4] = px[yy * w * 4:(yy + 1) * w * 4]
 
     with open(os.path.join(out_dir, "gui.bin"), "wb") as f:
-        f.write(b"PNG4" + struct.pack("<HH", gw, gh) + bytes(gatlas))
+        f.write(b"PNG5" + struct.pack("<HH", gw, gh) + bytes(gatlas))
         names_ = [k for k in sprites if not k.startswith("font/")]
         f.write(struct.pack("<I", len(names_)))
         for k in names_:
@@ -2039,15 +2130,38 @@ def main():
             px0, py0 = placed[k]
             f.write(bytes([len(nb)]) + nb + struct.pack("<HHHH", px0, py0, w, h))
             f.write(struct.pack("<BBHH", 1 if nine else 0, nine[0] if nine else 0, nine[1] if nine else w, nine[2] if nine else h))
-        f.write(struct.pack("<I", len(glyphs)))
-        # A glyph record (14 bytes, gui.rs's Glyph::at): cp, atlas x, y, cell w, h, rendered
-        # height, yoff, advance (signed, a space provider's may be negative).
-        for cp, (page, gx, gy, cw, chh, adv, fh, yoff) in sorted(glyphs.items()):
-            if page is None:
-                f.write(struct.pack("<IHHBBBbh", cp, 0, 0, 0, 0, 0, 0, adv))
-            else:
-                px0, py0 = placed["font/page%d" % page]
-                f.write(struct.pack("<IHHBBBbh", cp, px0 + gx, py0 + gy, cw, chh, fh, yoff, adv))
+        def write_glyphs(table):
+            f.write(struct.pack("<I", len(table)))
+            # A glyph record (14 bytes, gui.rs's Glyph::at): cp, atlas x, y, cell w, h, rendered
+            # height, yoff, advance (signed, a space provider's may be negative).
+            for cp, (page, gx, gy, cw, chh, adv, fh, yoff) in sorted(table.items()):
+                if page is None:
+                    f.write(struct.pack("<IHHBBBbh", cp, 0, 0, 0, 0, 0, 0, adv))
+                else:
+                    if page == "HEX":
+                        px0, py0, cp = 0, 0, cp | 0x80000000
+                    else:
+                        px0, py0 = placed["font/page%d" % page]
+                    if not (0 <= cw <= 255 and 0 <= chh <= 255 and 0 <= fh <= 255) or not -128 <= yoff <= 127:
+                        # A pack's glyph a byte cannot hold (a negative or huge size): drawn clamped.
+                        print("font: glyph %x is %dx%d (height %d): clamped to 0..255" % (cp, cw, chh, fh))
+                        cw, chh, fh = [max(0, min(255, v)) for v in (cw, chh, fh)]
+                        yoff = max(-128, min(127, yoff))
+                    f.write(struct.pack("<IHHBBBbh", cp, px0 + gx, py0 + gy, cw, chh, fh, yoff, adv))
+
+        write_glyphs(glyphs)
+        # The packs' other fonts: name, then their glyphs (the order is a font's id, from 1).
+        f.write(struct.pack("<I", len(extra_fonts)))
+        for fname, tbl in extra_fonts:
+            nb = fname.encode()
+            f.write(bytes([len(nb)]) + nb)
+            write_glyphs(tbl)
+        # The unihex sheet: width, height, then one alpha byte a pixel (0 0: none).
+        sheet = hexcache.get("sheet")
+        if sheet:
+            f.write(struct.pack("<HH", sheet[0], sheet[1]) + sheet[2])
+        else:
+            f.write(struct.pack("<HH", 0, 0))
         f.write(struct.pack("<I", len(model_out)))
         for key, parts in model_out:
             kb = key.encode()
@@ -2911,7 +3025,7 @@ def make_entities(res, assets, reg, out_dir):
     def find_model(m, depth=0):
         if not isinstance(m, dict) or depth > 12:
             return None
-        t = m.get("type", "minecraft:model")
+        t = norm_type(m.get("type", "minecraft:model"))
         if t == "minecraft:model":
             return m.get("model")
         if t == "minecraft:special":

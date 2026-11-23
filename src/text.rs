@@ -349,6 +349,24 @@ impl Rich {
     }
 }
 
+static mut FONT_NAMES: Vec<String> = Vec::new();
+
+/// The packs' fonts of gui.bin, by their names (a font's id is its place here, from 1): set
+/// when gui.bin is read, so a component's "font" finds its glyphs.
+pub fn set_fonts(names: Vec<String>) {
+    unsafe { *core::ptr::addr_of_mut!(FONT_NAMES) = names };
+}
+
+/// A "font" key's id: 0 the default font, 1.. a font of gui.bin, 255 one it has not got.
+pub fn font_index(name: &str) -> u8 {
+    let full = if name.contains(':') { String::from(name) } else { alloc::format!("minecraft:{}", name) };
+    if full == "minecraft:default" {
+        return 0;
+    }
+    let names = unsafe { &*core::ptr::addr_of!(FONT_NAMES) };
+    names.iter().position(|n| *n == full).map_or(255, |i| (i + 1).min(254) as u8)
+}
+
 pub fn push_codes(out: &mut String, st: &Style) {
     out.push_str("\u{a7}r");
     if let Some(c) = st.color {
@@ -364,6 +382,11 @@ pub fn push_codes(out: &mut String, st: &Style) {
             out.push('\u{a7}');
             out.push(ch);
         }
+    }
+    // A pack's font: a private code (U+F800 + id) the GUI font reads (vanilla keeps no such code).
+    if st.font != 0 && st.font != 255 {
+        out.push('\u{a7}');
+        out.push(char::from_u32(0xF800 + st.font as u32).unwrap_or('r'));
     }
 }
 
@@ -396,7 +419,7 @@ fn style_of(t: &Tag, events: &mut Vec<Events>, depth: u32) -> Style {
         };
     }
     if let Some(f) = t.get("font").and_then(|f| f.str()) {
-        st.font = if f == "minecraft:default" || f == "default" { 0 } else { 1 };
+        st.font = font_index(f);
     }
     let mut ev = Events::default();
     if let Some(c) = t.get("click_event").or_else(|| t.get("clickEvent")) {

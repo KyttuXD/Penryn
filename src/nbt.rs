@@ -65,6 +65,30 @@ fn skip(r: &mut In, t: u8, depth: u32) -> Option<()> {
 }
 
 /// Skips a network NBT value (type byte, then payload).
+/// A dimension type's NBT (the registry's entry): its min_y and height, the defaults when a
+/// field is missing. None on malformed data.
+pub fn dimension_height(r: &mut In) -> Option<(i32, i32)> {
+    let t = r.u8()?;
+    if t != 10 {
+        skip(r, t, 0)?;
+        return None;
+    }
+    let (mut min_y, mut height) = (-64, 384);
+    loop {
+        let tt = r.u8()?;
+        if tt == 0 {
+            break;
+        }
+        let name = mstr(r)?;
+        match (name.as_str(), tt) {
+            ("min_y", 3) => min_y = r.i32()?,
+            ("height", 3) => height = r.i32()?,
+            _ => skip(r, tt, 1)?,
+        }
+    }
+    Some((min_y, height))
+}
+
 pub fn skip_root(r: &mut In) -> Option<()> {
     let t = r.u8()?;
     skip(r, t, 0)

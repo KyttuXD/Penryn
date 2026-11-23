@@ -21,6 +21,8 @@ pub struct Column {
 }
 
 pub struct World {
+    /// The server's dimension types (registry order): name, min_y, height.
+    pub dim_types: Vec<(String, i32, i32)>,
     pub min_y: i32,
     pub height: i32,
     pub columns: BTreeMap<(i32, i32), Column>,
@@ -96,6 +98,7 @@ fn paletted(r: &mut In, s: Strategy, global_bits: u8, out: Option<&mut [u16]>) -
 impl World {
     pub fn new(block_bits: u8, biome_bits: u8) -> World {
         World {
+            dim_types: Vec::new(),
             min_y: -64,
             height: 384,
             columns: BTreeMap::new(),
@@ -109,13 +112,19 @@ impl World {
         }
     }
 
-    pub fn set_dimension(&mut self, name: &str) {
-        let (min_y, height) = match name {
-            "minecraft:the_nether" | "minecraft:the_end" => (0, 256),
-            _ => (-64, 384),
+    /// The dimension of the Join Game packet: its type (an id in the server's dimension_type
+    /// registry, with the height that type sets) else the vanilla height of its name.
+    pub fn set_dimension(&mut self, name: &str, type_id: i32) {
+        let (min_y, height) = match self.dim_types.get(type_id.max(0) as usize) {
+            Some((_, min_y, height)) => (*min_y, *height),
+            None => match name {
+                "minecraft:the_nether" | "minecraft:the_end" => (0, 256),
+                _ => (-64, 384),
+            },
         };
         self.min_y = min_y;
         self.height = height;
+        crate::say!("dimension {} (type {}): y {} to {}", name, type_id, min_y, min_y + height - 1);
         self.columns.clear();
         self.dirty.clear();
         self.epoch += 1;

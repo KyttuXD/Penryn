@@ -55,6 +55,8 @@ mod signs;
 mod sky;
 mod special;
 mod net;
+mod voicechat;
+mod opus;
 mod srv;
 mod options;
 mod packs;
@@ -389,6 +391,9 @@ fn selftest() -> Result<(), String> {
     for (what, got, want) in talk::selftest().into_iter().chain(text::selftest()).chain(commands::selftest()).chain(chatui::selftest()) {
         check(what, got, want);
     }
+    for (what, got, want) in opus::selftest() {
+        check(what, got, want);
+    }
     for (what, got, want) in skins::selftest().into_iter().chain(entities::selftest()).chain(mobanim::selftest()) {
         check(what, got, want);
     }
@@ -664,6 +669,7 @@ fn physics_checks(b: &blocks::Blocks) -> Vec<(&'static str, String, &'static str
 #[no_mangle]
 pub extern "C" fn main(argc: c_int, argv: *const *const c_char) -> c_int {
     let args: Vec<String> = (0..argc as usize).map(|i| unsafe { sys::from_cstr(*argv.add(i)) }).collect();
+    sys::install_local_bin();
     match run(&args) {
         Ok(()) => 0,
         Err(e) => {

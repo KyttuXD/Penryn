@@ -152,6 +152,13 @@ pub struct App {
     prev_pos: [f64; 3],
     last_input: u8,
     sprinting: bool,
+    /// The local player's pose (Entity.DATA_POSE): crouching, swimming, or standing.
+    own_pose: i64,
+    /// Simple Voice Chat (Options > Voice Chat): off until the player turns it on.
+    voice: crate::voicechat::client::Voice,
+    /// The client information (skin parts...) sent in play this session, once.
+    info_sent: bool,
+    own_in_water: bool,
     mining: Option<Mining>,
     destroy_delay: i32,
     use_delay: i32,
@@ -196,6 +203,8 @@ pub struct App {
     /// View bobbing: distance walked and bob amount (and last tick's).
     walk_dist: f32,
     prev_walk_dist: f32,
+    /// The local player's body yaw (previous, current): it lags the head (Mob.tickHeadTurn).
+    own_body: Option<(f32, f32)>,
     bob: f32,
     prev_bob: f32,
     held_item: Option<i32>,
@@ -281,7 +290,9 @@ impl App {
     fn own_model(&self, g: &Game, kind: i32) -> crate::entities::Entity {
         let mut e = crate::entities::Entity::new(kind, g.uuid, self.mover.pos, g.player.yaw, g.player.pitch, g.player.yaw);
         e.prev = self.prev_pos;
-        e.body_yaw = g.player.yaw;
+        let (prev_body, body) = self.own_body.unwrap_or((g.player.yaw, g.player.yaw));
+        e.body_yaw = body;
+        e.prev_body_yaw = prev_body;
         e.on_ground = self.mover.on_ground;
         e.limb_pos = self.walk_dist;
         e.limb_speed = ((self.walk_dist - self.prev_walk_dist) * 4.0).clamp(0.0, 1.0);
@@ -293,7 +304,11 @@ impl App {
         if self.sprinting {
             flags |= 0x08;
         }
+        if self.own_in_water && self.sprinting && !g.flying {
+            flags |= 0x10; // the swimming flag (Entity.FLAG_SWIMMING) the pose reads
+        }
         e.data.insert(0, flags);
+        e.data.insert(6, self.own_pose);
         e.equipment[0] = g.held();
         e
     }
@@ -412,7 +427,7 @@ impl App {
 
     /// Screenshot (F2 by default): the frame as a PNG in screenshots/, named by the time as
     /// vanilla's Screenshot.getFile does (2026-11-22_11.20.33.png, _1 for a second one).
-    fn save_screenshot(&mut self) {
+    fn save_screenshot(&mut self, g: &mut Game) {
         let (w, h) = self.v.size();
         let png = sdl::screenshot_png(&self.v.gl, w, h);
         let dir = format!("{}/screenshots", crate::data_dir());
@@ -426,6 +441,9 @@ impl App {
         }
         if sys::write_file_readable(&path, &png) {
             say!("screenshot: {}", path);
+            // Vanilla says where the picture went, in chat (the file name only).
+            let name = format!("{}", path.rsplit('/').next().unwrap_or(&path));
+            g.add_chat(format!("Saved screenshot as {}", name));
         } else {
             say!("cannot save screenshot {}", path);
         }
@@ -448,7 +466,8 @@ pub fn run(server: Option<String>, name: &str, account: Option<Account>, relay: 
     }
     let fullscreen = settings.on(O::Fullscreen);
     let v = Video::open("Penryn", 1280, 720, fullscreen)?;
-    unsafe { (v.sdl.SDL_GL_SetSwapInterval)(settings.on(O::Vsync) as i32) };
+    let swap = unsafe { (v.sdl.SDL_GL_SetSwapInterval)(settings.on(O::Vsync) as i32) };
+    say!("vsync {} (SDL: {})", if settings.on(O::Vsync) { "on" } else { "off" }, swap);
     let view: i32 = settings.int(O::RenderDistance);
     say!("OpenGL: {} ({})", v.gl_string(sdl::RENDERER), v.gl_string(sdl::VERSION));
     crate::perf::init(&v);
@@ -465,6 +484,10 @@ pub fn run(server: Option<String>, name: &str, account: Option<Account>, relay: 
         prev_pos: [0.0; 3],
         last_input: 0,
         sprinting: false,
+        own_pose: 0,
+        voice: crate::voicechat::client::Voice::new(),
+        info_sent: false,
+        own_in_water: false,
         mining: None,
         destroy_delay: 0,
         use_delay: 0,
@@ -502,6 +525,7 @@ pub fn run(server: Option<String>, name: &str, account: Option<Account>, relay: 
         prev_equip: 0.0,
         walk_dist: 0.0,
         prev_walk_dist: 0.0,
+        own_body: None,
         bob: 0.0,
         prev_bob: 0.0,
         held_item: None,
@@ -704,6 +728,8 @@ impl App {
     /// A new game: what the last one left behind goes.
     fn new_session(&mut self) {
         use crate::options::O;
+        self.voice = crate::voicechat::client::Voice::new();
+        self.info_sent = false;
         self.r.forget_world(&self.v.gl);
         self.set_screen(Screen::Play);
         self.keys = [false; 512];
@@ -785,6 +811,19 @@ impl App {
             } else {
                 g.sounds.clear();
             }
+            // ---- voice chat: off unless the player turned it on
+            {
+                use crate::options::O;
+                let cfg = crate::voicechat::client::Config {
+                    enabled: self.menu.o.on(O::VoiceChat),
+                    push_to_talk: self.menu.o.int(O::VoiceMic) == 0,
+                    threshold_db: self.menu.o.int(O::VoiceThreshold),
+                    volume: (self.menu.o.get(O::VoiceVolume) * 2.0) as f32,
+                    talk_held: self.screen == Screen::Play && self.held(B::VoiceTalk),
+                };
+                let me = crate::voicechat::client::Listener { pos: [self.mover.pos[0], self.mover.pos[1] + 1.62, self.mover.pos[2]], yaw: g.player.yaw };
+                self.voice.update(sys::now_ms(), g, self.audio.as_mut(), &self.v, &cfg, &me);
+            }
             crate::perf::lap(crate::perf::S::Sound);
             // ---- ticks
             let now = sys::now_ms();
@@ -810,7 +849,7 @@ impl App {
             self.frame_shown = sys::now_ms();
             if self.take_shot {
                 self.take_shot = false;
-                self.save_screenshot();
+                self.save_screenshot(g);
             }
             if let Some(shot) = self.test_shot.as_ref() {
                 // PENRYN_TEST_INPUT "m": wait for a piston in motion.
@@ -1714,6 +1753,22 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 let rocket = self.entities.as_ref().and_then(|t| t.types.iter().position(|x| x.name == "firework_rocket")).map_or(-1, |i| i as i32);
                 if !self.special.travel(g, &mut self.mover, &inp, fluid, rocket) {
                     self.mover.tick(&g.world, &g.blocks, &inp, g.player.yaw, g.flying, fluid);
+                    // Player.updatePlayerPose: crouching on the ground when sneaking, swimming
+                    // while sprinting in water.
+                    if !self.info_sent {
+                        // The skin parts and the rest of the client information, in play too: the
+                        // server keeps what the player last sent for other players' models.
+                        self.info_sent = true;
+                        g.conn.send(crate::ids::play::S_CLIENT_INFORMATION, &crate::options::client_information(self.view as i8))?;
+                    }
+                    self.own_in_water = fluid == crate::blocks::WATER;
+                    self.own_pose = if self.sneaking() && self.mover.on_ground && !g.flying {
+                        crate::poses::CROUCHING
+                    } else if self.own_in_water && self.sprinting && !g.flying {
+                        crate::poses::SWIMMING
+                    } else {
+                        0
+                    };
                 }
                 crate::serverhud::collide(&mut self.mover, self.prev_pos, &g.ui);
             }
@@ -1735,6 +1790,23 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let speed = math::sqrt(dx * dx + dz * dz) as f32;
         self.prev_walk_dist = self.walk_dist;
         self.walk_dist += speed * 0.6;
+        // The body turns to the way the player walks (or stays), 30% of the way a tick; the head
+        // may turn 50 degrees from it at most, then the body follows (Mob.tickHeadTurn).
+        let yaw = g.player.yaw;
+        let (_, mut body) = self.own_body.unwrap_or((yaw, yaw));
+        let old = body;
+        let mut turn_to = body;
+        if speed > 0.0005 {
+            let walk = (math::atan2(dz as f64, dx as f64) * (180.0 / math::PI)) as f32 - 90.0;
+            let diff = (crate::entities::wrap_deg(yaw) - walk).abs();
+            turn_to = if diff > 95.0 && diff < 265.0 { walk - 180.0 } else { walk };
+        }
+        body += crate::entities::wrap_deg(turn_to - body) * 0.3;
+        let head_diff = crate::entities::wrap_deg(yaw - body);
+        if head_diff.abs() > 50.0 {
+            body += head_diff - head_diff.signum() * 50.0;
+        }
+        self.own_body = Some((old, body));
         // Entity.move: a step sound each block walked on the ground (moveDist > nextStep).
         if self.mover.on_ground && !g.flying {
             self.move_dist += speed * 0.6;
@@ -2224,6 +2296,14 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             yaw: cam_yaw,
             pitch: cam_pitch,
             reach: if g.game_mode == 1 { 5.0 } else { 3.0 },
+            tan_y: {
+                let half = math::to_rad(self.r.fov as f64 / 2.0);
+                (math::sin(half) / math::cos(half)) as f32
+            },
+            aspect: {
+                let (vw, vh) = self.v.size();
+                vw as f32 / vh as f32
+            },
         };
         let (day_time, game_time) = (g.day_time, g.game_time as f64 + partial);
         // Clouds reach further than the terrain (vanilla: the cloud range option, 128 by default).
@@ -2249,7 +2329,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 *world_view_ref = *view;
                 if let Some(t) = ents {
                     t.draw(gl, view, eye, entities, pf, own, &ent_cx);
+                    crate::perf::lap(crate::perf::S::Entities);
                     crate::skins::draw(gl, view, eye, entities, pf, own, t, &ent_cx.blocks.items);
+                    crate::perf::lap(crate::perf::S::EntSkins);
                     if !mine.is_empty() {
                         t.draw(gl, view, eye, &mine, pf, -1, &ent_cx);
                         crate::skins::draw(gl, view, eye, &mine, pf, -1, t, &ent_cx.blocks.items);
@@ -2257,7 +2339,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
                 crate::entities::draw_items(gl, view, eye, entities, pf, icons, overlays, blocks_ref, atlas, atlas_size);
                 crate::maps::draw_frames(gl, view, eye, entities, maps_ref, icons, overlays, blocks_ref, atlas, atlas_size);
-                crate::perf::lap(crate::perf::S::Entities);
+                crate::perf::lap(crate::perf::S::EntItems);
                 if let Some(gui) = gui_ref {
                     crate::signs::draw_world(gl, view, eye, block_entities, world_ref, blocks_ref, gui);
                 }

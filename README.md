@@ -182,9 +182,11 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 - Menus: no Singleplayer, Realms, friends list, language or credits screens; server addresses
   are not looked up as SRV records.
 - Resource packs: no pack icons, drag and drop or pack folder button in the selection screen;
-  TrueType and unihex fonts, pack panoramas and splashes on the title screen, animations past
-  their first frame, and core shaders are not used.
-- Chat: text in the uniform and alt fonts is drawn with the default glyphs; other players'
+  TrueType fonts, pack panoramas and splashes on the title screen, animations past
+  their first frame, and core shaders are not used (bitmap, space and unihex fonts are: the
+  packs' other fonts such as `minecraft:gui` draw too, and Unifont's symbols come from a sheet of
+  their own).
+- Chat: text in the alt font is drawn with the default glyphs; other players'
   chat keys are not checked against the services' key list; no chat delay, narrator,
   chat width/opacity options or saved command history yet.
 - No recipe book. The creative inventory draws potions and tipped arrows untinted and without
@@ -299,6 +301,18 @@ another one (for tests). Without a record the name is joined on port 25565.
 options screens have saved `options.txt` there, its render distance and fullscreen win over
 `PENRYN_VIEW` and `PENRYN_FULLSCREEN` (settings.txt's VIEW and FULLSCREEN).
 
+## Voice chat (off by default)
+
+Penryn speaks the Simple Voice Chat server mod (2.6.x, compatibility 20): Options > Voice Chat turns
+it on (`voicechat_enabled` in options.txt), chooses push to talk (key V, rebindable) or voice
+activation, the activation level and the volume. Nothing is sent and nothing is queued while it is
+off. Speech is Opus (mono, 48 kHz, CELT, 32 kbit/s) over AES-GCM on the mod's UDP port; others' voices
+are heard with the mod's distance fall-off and stereo pan. The codec is Penryn's own port of libopus in
+`src/opus/` (decoder: SILK, CELT, hybrid; encoder: CELT only), checked against libopus itself; the
+protocol layer is `src/voicechat/`. The microphone is SDL's on Linux and AudioQueue (loaded at run
+time, so 10.5 and newer) on the Mac. Test hooks: `PENRYN_VOICE_TONE=1` speaks a tone,
+`PENRYN_VOICE_LEVEL=1` logs the microphone level.
+
 ## Controls
 
 Vanilla's defaults: WASD, mouse, space (double-tap to fly in creative), shift sneak, ctrl or double
@@ -310,7 +324,12 @@ key.keyboard.w` and so on); click a button, then press the key or mouse button (
 (Ctrl the stack), F swaps with the off hand, middle click picks the block, Tab lists the players,
 F1 hides the HUD, F2 saves a screenshot to screenshots/, F5 changes the view (first, third person
 behind, third person in front). Sneak and sprint can be toggled, and attack and use too, under
-Options > Controls. Third person draws no model for the player (the server sends none for them).
+Options > Controls. In third person the player's own model follows the head with the body
+(it crouches, swims and turns after the head as vanilla's does). On Linux every run keeps
+`~/.local/bin/penryn` linked to the program that is running.
+
+The title screen's top left button signs in, or switches between the accounts Horizon's launcher
+has on the relay's computer (and signs in with another Microsoft account or signs out).
 
 ## Layout
 
@@ -322,6 +341,9 @@ Options > Controls. Third person draws no model for the player (the server sends
 | `src/render.rs` | drawing the world (OpenGL 1.5 fixed function): fog, sky, passes, outline |
 | `src/mesher.rs`, `terrain.rs`, `occlusion.rs` | meshing sections on worker threads, their vertex buffers and draw calls, cave culling |
 | `src/perf.rs` | the per-stage frame timer behind `PENRYN_PERF` |
+| `src/opus/` | the Opus codec (a port of libopus: range coder, SILK, CELT, the packet layer, a CELT encoder) |
+| `src/voicechat/` | Simple Voice Chat: the protocol, AES-GCM, the session state machine, the UDP socket, the Mac microphone, the glue |
+| `docs/parity-sweep.md` | what Penryn still lacks from Minecraft 26.3, from an audit against the client jar |
 | `src/entities.rs` | entities and their models |
 | `src/mobs.rs`, `signs.rs`, `font.rs`, `creative.rs`, `options.rs` | mob variants, sign pictures and text, the font, the creative inventory, the options screens |
 | `src/skins.rs` | players' skins and capes: profile textures, PNG decoding, the download thread |

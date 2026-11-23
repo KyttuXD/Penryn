@@ -181,6 +181,11 @@ options! {
     // Online
     AllowServerListing: "allowServerListing", "options.allowServerListing", Kind::Bool, 1.0;
     RealmsNotifications: "realmsNotifications", "options.realmsNotifications", Kind::Bool, 1.0;
+    // Voice Chat (voicechat/): Simple Voice Chat servers. Off until the player turns it on.
+    VoiceChat: "voicechat_enabled", "Voice Chat", Kind::Bool, 0.0;
+    VoiceMic: "voicechat_mic", "Microphone", Kind::Cycle(&[("\"ptt\"", "Push to Talk"), ("\"voice\"", "Voice Activation")]), 0.0;
+    VoiceThreshold: "voicechat_threshold", "Activation Level (dB)", Kind::Int(-70, -10, 1), -50.0;
+    VoiceVolume: "voicechat_volume", "Voice Volume", UNIT, 0.5;
 }
 
 /// The sound categories' sliders, in SoundSource order (the mixer's categories).
@@ -490,6 +495,7 @@ pub enum Page {
     Mouse,
     Chat,
     Accessibility,
+    Voice,
 }
 
 impl Page {
@@ -505,6 +511,7 @@ impl Page {
             Page::Mouse => "options.mouse_settings.title",
             Page::Chat => "options.chat.title",
             Page::Accessibility => "options.accessibility.title",
+            Page::Voice => "Voice Chat",
         }
     }
 
@@ -520,6 +527,7 @@ impl Page {
             "mouse" => Page::Mouse,
             "chat" => Page::Chat,
             "accessibility" => Page::Accessibility,
+            "voicechat" => Page::Voice,
             _ => return None,
         })
     }
@@ -591,6 +599,7 @@ fn rows(p: Page) -> Vec<Row> {
             r.extend(small(&[ToggleCrouch, ToggleSprint, ToggleAttack, ToggleUse, AutoJump, SprintWindow, QuitShortcuts, OperatorItemsTab]));
         }
         Page::Keys => {}
+        Page::Voice => r.extend(small(&[VoiceChat, VoiceMic, VoiceThreshold, VoiceVolume])),
         Page::Mouse => r.extend(small(&[Sensitivity, WheelSensitivity, DiscreteScroll, InvertX, InvertY, AllowCursor])),
         Page::Chat => r.extend(small(&[
             ChatVisibility, ChatColors, ChatLinks, ChatLinksPrompt, ChatOpacity, TextBackground, ChatScale, ChatLineSpacing,
@@ -906,7 +915,7 @@ impl Menu {
                 W::Open(Page::Chat, "options.chat"),
                 W::Off("options.resourcepack", None),
                 W::Open(Page::Accessibility, "options.accessibility"),
-                W::Off("options.telemetry", None),
+                W::Open(Page::Voice, "Voice Chat..."),
                 W::Off("options.credits_and_attribution", None),
             ];
             let gx = fl((w - 316.0) / 2.0);

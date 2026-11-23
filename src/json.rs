@@ -210,10 +210,39 @@ fn text_in(j: &J, parent: &str, out: &mut String, depth: u32) {
         }
         J::Obj(_) => {
             let colour = j.get("color").and_then(|c| c.str()).and_then(colour_code);
-            let mine = colour.clone().unwrap_or_else(|| String::from(parent));
-            if let Some(c) = &colour {
-                out.push_str(c);
+            // Formats (bold, italic, underlined, strikethrough, obfuscated) and a pack's font
+            // are "\u{a7}" codes too; a colour code clears them, so a child's own colour brings
+            // the formats it inherits back.
+            let mut own_fmt = String::new();
+            for (key, code) in [("bold", "\u{a7}l"), ("italic", "\u{a7}o"), ("underlined", "\u{a7}n"), ("strikethrough", "\u{a7}m"), ("obfuscated", "\u{a7}k")] {
+                if matches!(j.get(key), Some(J::Bool(true))) && !parent.contains(code) {
+                    own_fmt.push_str(code);
+                }
             }
+            if let Some(f) = j.get("font").and_then(|f| f.str()) {
+                let id = crate::text::font_index(f);
+                if id != 0 && id != 255 {
+                    own_fmt.push('\u{a7}');
+                    own_fmt.push(char::from_u32(0xF800 + id as u32).unwrap_or('r'));
+                }
+            }
+            let mine = match &colour {
+                Some(c) => {
+                    let mut m = c.clone();
+                    for code in ["\u{a7}k", "\u{a7}l", "\u{a7}m", "\u{a7}n", "\u{a7}o"] {
+                        if parent.contains(code) {
+                            m.push_str(code);
+                        }
+                    }
+                    m.push_str(&own_fmt);
+                    out.push_str(&m);
+                    m
+                }
+                None => {
+                    out.push_str(&own_fmt);
+                    alloc::format!("{}{}", parent, own_fmt)
+                }
+            };
             if let Some(k) = j.get("translate").and_then(|k| k.str()) {
                 let args: Vec<String> = j
                     .get("with")
@@ -246,8 +275,10 @@ fn text_in(j: &J, parent: &str, out: &mut String, depth: u32) {
                     }
                 }
             }
-            if colour.is_some() {
-                out.push_str(if parent.is_empty() { "\u{a7}r" } else { parent });
+            if colour.is_some() || !own_fmt.is_empty() {
+                // Back to what the parent had: reset, then its colour and formats again.
+                out.push_str("\u{a7}r");
+                out.push_str(parent);
             }
         }
         J::Null => {}

@@ -22,6 +22,7 @@ impl Event {
 
 pub const INIT_VIDEO: u32 = 0x20;
 pub const WINDOW_OPENGL: u32 = 0x2;
+pub const WINDOW_HIDDEN: u32 = 0x8;
 pub const WINDOW_RESIZABLE: u32 = 0x20;
 pub const WINDOW_FULLSCREEN: u32 = 0x1;
 pub const WINDOW_FULLSCREEN_DESKTOP: u32 = 0x1001;
@@ -71,6 +72,7 @@ api! { Sdl, "", "C",
     SDL_GL_CreateContext(*mut c_void) -> *mut c_void;
     SDL_GL_SetSwapInterval(c_int) -> c_int;
     SDL_GL_SwapWindow(*mut c_void);
+    SDL_ShowWindow(*mut c_void);
     SDL_GL_GetProcAddress(*const c_char) -> *mut c_void;
     SDL_PollEvent(*mut Event) -> c_int;
     SDL_PumpEvents();
@@ -139,6 +141,7 @@ pub const ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
 pub const BACK: u32 = 0x0405;
 pub const RENDERER: u32 = 0x1F01;
 pub const RGBA: u32 = 0x1908;
+pub const ALPHA: u32 = 0x1906;
 pub const TEXTURE_2D: u32 = 0x0DE1;
 pub const TEXTURE_COORD_ARRAY: u32 = 0x8078;
 pub const ALPHA_TEST: u32 = 0x0BC0;
@@ -251,7 +254,8 @@ impl Video {
             (sdl.SDL_GL_SetAttribute)(GL_DOUBLEBUFFER, 1);
             (sdl.SDL_GL_SetAttribute)(GL_DEPTH_SIZE, 24);
             let t = sys::cstr(title);
-            let mut flags = WINDOW_OPENGL | WINDOW_RESIZABLE;
+            // Hidden until the first (black) frame is there: no blank window while the game's files load.
+            let mut flags = WINDOW_OPENGL | WINDOW_RESIZABLE | WINDOW_HIDDEN;
             if fullscreen {
                 flags |= WINDOW_FULLSCREEN_DESKTOP;
             }
@@ -262,6 +266,23 @@ impl Video {
             if (sdl.SDL_GL_CreateContext)(window).is_null() {
                 return Err(alloc::format!("no OpenGL: {}", sys::from_cstr((sdl.SDL_GetError)())));
             }
+            // Apple's multithreaded OpenGL engine moves driver work off this thread. Off unless
+            // PENRYN_GLMT=1 (it is for A/B tests: the 10.6 Macs' drivers are not trusted with it).
+            #[cfg(target_os = "macos")]
+            if sys::env("PENRYN_GLMT").as_deref() == Some("1") {
+                let rtld_default = (-2isize) as *mut c_void;
+                let cur = sys::dlsym(rtld_default, sys::cstr("CGLGetCurrentContext").as_ptr() as *const c_char);
+                let en = sys::dlsym(rtld_default, sys::cstr("CGLEnable").as_ptr() as *const c_char);
+                if !cur.is_null() && !en.is_null() {
+                    let cur: unsafe extern "C" fn() -> *mut c_void = core::mem::transmute(cur);
+                    let en: unsafe extern "C" fn(*mut c_void, i32) -> i32 = core::mem::transmute(en);
+                    let ctx = cur();
+                    if !ctx.is_null() {
+                        let r = en(ctx, 313); // kCGLCEMPEngine
+                        crate::say!("OpenGL multithreaded engine: {}", r);
+                    }
+                }
+            }
             (sdl.SDL_GL_SetSwapInterval)(1);
             let get = |n: &str| {
                 let mut p = (sdl.SDL_GL_GetProcAddress)(sys::cstr(&alloc::format!("gl{}", n)).as_ptr() as *const c_char);
@@ -271,6 +292,10 @@ impl Video {
                 p
             };
             let gl = Gl::load(&get).map_err(|m| alloc::format!("this OpenGL driver has no gl{} (OpenGL 1.5 is needed)", m))?;
+            (gl.ClearColor)(0.0, 0.0, 0.0, 1.0);
+            (gl.Clear)(COLOR_BUFFER_BIT | DEPTH_BUFFER_BIT);
+            (sdl.SDL_GL_SwapWindow)(window);
+            (sdl.SDL_ShowWindow)(window);
             Ok(Video { sdl, gl, window })
         }
     }

@@ -92,6 +92,11 @@ pub mod play {
     pub const C_START_CONFIGURATION: i32 = 120;
     pub const C_SOUND_ENTITY: i32 = 118;
     pub const C_SOUND: i32 = 119;
+    /// ClientboundSwingAnimationPacket (26.3): entity id, hand, animation. Animate no longer swings.
+    pub const C_SWING_ANIMATION: i32 = 123;
+    /// Play-state custom payloads (read from the jar's GameProtocols order): the voice chat's channels.
+    pub const C_CUSTOM_PAYLOAD: i32 = 24;
+    pub const S_CUSTOM_PAYLOAD: i32 = 22;
     pub const C_SYSTEM_CHAT: i32 = 124;
     pub const C_TAKE_ITEM_ENTITY: i32 = 127;
     pub const C_UPDATE_ATTRIBUTES: i32 = 134;
