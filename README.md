@@ -317,6 +317,25 @@ another one (for tests). Without a record the name is joined on port 25565.
 options screens have saved `options.txt` there, its render distance and fullscreen win over
 `PENRYN_VIEW` and `PENRYN_FULLSCREEN` (settings.txt's VIEW and FULLSCREEN).
 
+## Offline, no relay
+
+The relay is optional. Without one Penryn plays offline-mode servers under a name: `penryn --offline [--name NAME]
+HOST[:PORT]` (or `PENRYN_OFFLINE=1`; without a server it is the title screen). The title screen's **Change name...**
+button sets the name (1 to 16 letters, digits and `_`) and keeps it in `offline-name.txt` in the data folder; without
+`--name` the saved name is used, else the computer's user name. Offline it never contacts a relay: no Microsoft
+sign-in (so no online-mode servers), no skins, no server resource packs, no update check. The Mac app is offline when
+`RELAY=` is empty in its `settings.txt` (the default). Singleplayer is not part of Penryn: the title screen's
+Singleplayer button stays greyed.
+
+The game files are read from `PENRYN_DATA`, else (Linux) the current folder when it holds `blocks.bin`, else
+`~/.local/share/penryn`. They are made once, from this computer's own Minecraft 26.3 and Horizon's prepared data, with
+no server running:
+
+```sh
+python3 tools/relay.py --build-assets ~/.local/share/penryn
+penryn --offline localhost:25565
+```
+
 ## Display entities
 
 `block_display` and `item_display` entities are drawn with the transformation the server sends (translation, scale,
