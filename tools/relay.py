@@ -213,18 +213,24 @@ def update_archive(platform, want):
         raise ValueError("the release file is too large")
     opener = urllib.request.build_opener(_GithubOnly)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    h = hashlib.sha256()
     data = bytearray()
-    with opener.open(req, timeout=120) as r:
-        while True:
-            chunk = r.read(1 << 16)
-            if not chunk:
-                break
-            data += chunk
-            if len(data) > UPDATE_LIMIT:
-                raise ValueError("the release file is too large")
-            h.update(chunk)
-    if h.hexdigest() != want:
+    # Right after CI replaced the file, GitHub's file host may still serve the old copy for a moment: tried again.
+    for attempt in range(4):
+        h = hashlib.sha256()
+        data = bytearray()
+        with opener.open(req, timeout=120) as r:
+            while True:
+                chunk = r.read(1 << 16)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > UPDATE_LIMIT:
+                    raise ValueError("the release file is too large")
+                h.update(chunk)
+        if h.hexdigest() == want:
+            break
+        time.sleep(5)
+    else:
         raise ValueError("checksum mismatch: the release file was not used")
     entries = update_entries(platform, bytes(data))
     out = bytearray(b"PNU1" + struct.pack("<I", len(entries)))
