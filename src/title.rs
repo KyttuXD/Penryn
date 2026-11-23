@@ -561,6 +561,32 @@ enum Scr {
     SignIn(SignIn),
     /// The account switch menu.
     Accounts(AccMenu),
+    /// Changing the offline player name (typed text).
+    Name(String),
+}
+
+/// The file holding the offline player name, in the data folder.
+fn name_file() -> String {
+    format!("{}/offline-name.txt", crate::data_dir())
+}
+
+/// A name a server accepts in offline mode: 1 to 16 of letters, digits and underscore.
+pub fn valid_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 16 && n.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// The saved offline name, if there is a good one.
+pub fn saved_name() -> Option<String> {
+    let d = sys::read_file(&name_file())?;
+    let n = String::from(String::from_utf8_lossy(&d).trim());
+    valid_name(&n).then_some(n)
+}
+
+/// The offline name to play under when none is given: the saved one, else this computer's user name, else Player.
+pub fn default_name() -> String {
+    saved_name()
+        .or_else(|| sys::env("USER").filter(|u| valid_name(u)))
+        .unwrap_or_else(|| String::from("Player"))
 }
 
 /// The pieces of the window the menus use, lent by play.rs.
@@ -689,6 +715,30 @@ impl Front {
         } else {
             Button::new(2.0, 12.0, 98.0, String::from("Sign in..."))
         })
+    }
+
+    /// "Change name..." while playing offline (no account), under the sign-in button when there is one.
+    fn name_button(&self) -> Option<Button> {
+        if self.account.is_some() {
+            return None;
+        }
+        let y = if self.relay.is_some() { 36.0 } else { 12.0 };
+        Some(Button::new(2.0, y, 120.0, String::from("Change name...")))
+    }
+
+    /// The name screen's Done and Cancel buttons.
+    fn name_layout(gw: f32, gh: f32) -> [Button; 2] {
+        let cx = fl(gw / 2.0) - 100.0;
+        let y = fl(gh / 2.0) + 4.0;
+        [Button::new(cx, y, 98.0, String::from("Done")), Button::new(cx + 102.0, y, 98.0, lang::get("gui.cancel"))]
+    }
+
+    /// Saves the new offline name and uses it.
+    fn set_name(&mut self, n: &str) {
+        if valid_name(n) {
+            self.name = String::from(n);
+            sys::write_file_readable(&name_file(), n.as_bytes());
+        }
     }
 
     /// Microsoft's device code, whatever the launcher has.
@@ -975,6 +1025,13 @@ impl Front {
         if let (Scr::Multiplayer, Some(mp)) = (&self.scr, self.mp.as_mut()) {
             mp.text(s);
         }
+        if let Scr::Name(t) = &mut self.scr {
+            for c in s.chars() {
+                if (c.is_ascii_alphanumeric() || c == '_') && t.len() < 16 {
+                    t.push(c);
+                }
+            }
+        }
     }
 
     fn event(&mut self, ui: &mut Ui, e: &sdl::Event) -> Option<Next> {
@@ -1061,6 +1118,18 @@ impl Front {
                     self.scr = Scr::Title;
                 }
             }
+            Scr::Name(t) => match sc {
+                42 => {
+                    t.pop();
+                }
+                41 => self.scr = Scr::Title,
+                40 | 88 if valid_name(t) => {
+                    let n = t.clone();
+                    self.set_name(&n);
+                    self.scr = Scr::Title;
+                }
+                _ => {}
+            },
         }
         None
     }
@@ -1132,6 +1201,9 @@ impl Front {
                     } else {
                         self.start_sign_in();
                     }
+                } else if self.name_button().map_or(false, |s| s.hit(mx, my)) {
+                    Self::click_sound(ui);
+                    self.scr = Scr::Name(String::new());
                 }
             }
             Scr::Options => {
@@ -1175,6 +1247,18 @@ impl Front {
             }
             Scr::SignIn(_) => {
                 if Self::connect_buttons(gw, gh).hit(mx, my) {
+                    Self::click_sound(ui);
+                    self.scr = Scr::Title;
+                }
+            }
+            Scr::Name(t) => {
+                let b = Self::name_layout(gw, gh);
+                if b[0].hit(mx, my) && valid_name(t) {
+                    Self::click_sound(ui);
+                    let n = t.clone();
+                    self.set_name(&n);
+                    self.scr = Scr::Title;
+                } else if b[1].hit(mx, my) {
                     Self::click_sound(ui);
                     self.scr = Scr::Title;
                 }
@@ -1225,7 +1309,7 @@ impl Front {
         let (gw, gh) = (gui.width, gui.height);
         let cx = fl(gw / 2.0);
         // Text fields want the text input on.
-        let want = matches!(self.scr, Scr::Multiplayer) && self.mp.as_ref().map_or(false, |m| m.in_text());
+        let want = (matches!(self.scr, Scr::Multiplayer) && self.mp.as_ref().map_or(false, |m| m.in_text())) || matches!(self.scr, Scr::Name(_));
         if self.text_on != Some(want) {
             self.text_on = Some(want);
             ui.v.text_input(want);
@@ -1242,6 +1326,9 @@ impl Front {
                 let sign_in = self.sign_in_button(gw);
                 let splash = if ui.menu.o.on(O::HideSplash) { None } else { self.splash.as_deref() };
                 draw_title(gui, a, splash, fade, mx, my, &account, sign_in.as_ref());
+                if let Some(b) = self.name_button() {
+                    b.draw(gui, mx, my);
+                }
             }
             Scr::Options => {
                 menu_background(gl, gui, w, h, speed, blur);
@@ -1282,6 +1369,28 @@ impl Front {
                     gui.text_centered(&n, cx, 26.0, WHITE);
                 }
                 for (b, _) in self.accounts_layout(gw, gh, m).iter() {
+                    b.draw(gui, mx, my);
+                }
+            }
+            Scr::Name(t) => {
+                menu_background(gl, gui, w, h, speed, blur);
+                gui.text_centered("Change your offline name", cx, fl(gh / 2.0) - 50.0, WHITE);
+                gui.text_centered("Letters, digits and _ (1 to 16). Offline-mode servers take it as you type it.", cx, fl(gh / 2.0) - 38.0, 0xFFAAAAAA);
+                let (x0, y0) = (cx - 100.0, fl(gh / 2.0) - 22.0);
+                gui.fill(x0 - 1.0, y0 - 1.0, x0 + 201.0, y0 + 21.0, 0xFFFFFFFF);
+                gui.fill(x0, y0, x0 + 200.0, y0 + 20.0, 0xFF000000);
+                let blink = (sys::now_ms() / 500) % 2 == 0;
+                if t.is_empty() {
+                    // The name now, as a hint until something is typed.
+                    gui.text(&format!("{}{}", if blink { "_" } else { "" }, ""), x0 + 4.0, y0 + 6.0, WHITE);
+                    gui.text(&self.name, x0 + 12.0, y0 + 6.0, 0xFF707070);
+                } else {
+                    let shown = format!("{}{}", t, if blink { "_" } else { "" });
+                    gui.text(&shown, x0 + 4.0, y0 + 6.0, WHITE);
+                }
+                let ok = valid_name(t);
+                for (i, b) in Self::name_layout(gw, gh).iter().enumerate() {
+                    let _ = (i, ok);
                     b.draw(gui, mx, my);
                 }
             }

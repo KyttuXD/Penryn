@@ -2,10 +2,10 @@
 # Installs dist/Penryn.app into /Applications on a Mac over SSH, and moves an older
 # ~/Penryn folder's settings, sign-in and game files into ~/Library/Application Support/Penryn.
 #
-#   scripts/install-mac.sh HOST [SERVER RELAY]
+#   scripts/install-mac.sh HOST [SERVER [RELAY]]
 #
 # HOST is an SSH destination (e.g. KT-MBA). SERVER and RELAY, when given, are written into
-# settings.txt (e.g. 192.168.1.10:25565 192.168.1.10:25580).
+# settings.txt (e.g. 192.168.1.10:25565 192.168.1.10:25580); without a RELAY the app plays offline.
 set -eu
 cd "$(dirname "$0")/.."
 HOST="$1"

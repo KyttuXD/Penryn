@@ -264,7 +264,7 @@ fn run(args: &[String]) -> Result<(), String> {
             if offline {
                 relay = None;
                 if name.is_none() {
-                    name = Some(sys::env("USER").filter(|u| !u.is_empty()).unwrap_or_else(|| String::from("Player")));
+                    name = Some(title::default_name());
                 }
             }
             // The address as typed: whether it names a port decides an SRV lookup (srv.rs).
@@ -297,7 +297,8 @@ fn run(args: &[String]) -> Result<(), String> {
             account::ensure_game_files(fetch_from.as_ref())?;
             skins::set_relay(fetch_from.clone());
             packs::set_relay(fetch_from.clone());
-            let name = name.unwrap_or_else(|| String::from("Player"));
+            // The offline name: given, else the one saved from the title screen's "Change name...", else the user name.
+            let name = name.unwrap_or_else(title::default_name);
             play::run(server, &name, acc, fetch_from)
         }
     }

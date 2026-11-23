@@ -51,17 +51,20 @@ cat > "$APP/Contents/Resources/settings.txt" <<'EOF'
 # Penryn opens at its title screen: Multiplayer has the server list (add servers there).
 # A server here (host or host:port) is put in that list for you. Optional.
 SERVER=
-# The computer running penryn-relay (tools/relay.py), for signing in and the game files.
-RELAY=10.0.0.1:25580
-# Leave empty to play signed in (the title screen's "Sign in..." button, or Sign in.command);
-# a name plays offline under it (offline-mode servers only).
+# Empty: offline play, no relay at all (offline-mode servers only; the title screen's "Change name..." sets the
+# name). The game files must then be in this folder already (see README.md). Or the computer running penryn-relay
+# (tools/relay.py): Microsoft sign-in for online-mode servers, skins, server resource packs, the game files and
+# updates.
+RELAY=
+# Offline player name; empty: the one saved by "Change name..." (else the user name of this Mac). With a RELAY,
+# empty plays signed in (the "Sign in..." button, or Sign in.command).
 NAME=
 # Chunks in each direction (2 to 16). 6 to 8 suits a Radeon HD 2600. Only until the game's
 # Options... screens save options.txt (here too): its render distance is used from then on.
 VIEW=8
 # yes: full screen (F11 switches too)
 FULLSCREEN=
-# no: do not look for a newer nightly build when Penryn starts (only the downloaded nightly build looks;
+# no: do not look for a newer nightly build when Penryn starts (only the downloaded nightly build with a RELAY looks;
 # the relay must be the one from the same download).
 UPDATE=
 EOF
@@ -74,6 +77,10 @@ cat > "$APP/Contents/Resources/Sign in.command" <<'EOF'
 DATA="$HOME/Library/Application Support/Penryn"
 . "$DATA/settings.txt"
 export PENRYN_DATA="$DATA"
+if [ -z "$RELAY" ]; then
+  echo "Set RELAY in settings.txt first: signing in needs the relay (without one Penryn plays offline)."
+  exit 1
+fi
 "$(dirname "$0")/../MacOS/penryn-bin" login "$RELAY"
 echo
 echo "Done: open Penryn again. You can close this window."
@@ -96,11 +103,8 @@ if [ ! -f "$DATA/settings.txt" ]; then
   cp "$RES/settings.txt" "$DATA/settings.txt"
 fi
 . "$DATA/settings.txt"
-if [ "$RELAY" = "10.0.0.1:25580" ]; then
-  open -t "$DATA/settings.txt"
-  say "Set RELAY in settings.txt (it is open now), save it, then open Penryn again."
-  exit 0
-fi
+# An old settings.txt may still hold the placeholder relay: that is no relay.
+[ "$RELAY" = "10.0.0.1:25580" ] && RELAY=
 export PENRYN_DATA="$DATA" PENRYN_VIEW="${VIEW:-8}"
 # Apple's multithreaded OpenGL engine (driver work off the render thread): 45% more frames on a
 # 2015 MacBook Air. Not for Mac OS X 10.6 and 10.7, whose drivers are not trusted with it.
@@ -116,8 +120,15 @@ export PENRYN_APP="$(cd "$HERE/../.." && pwd)"
 if [ -n "$SERVER" ]; then
   "$HERE/penryn-bin" add-server "$SERVER" >"$LOG" 2>&1
 fi
-# The title screen. Signing in is its "Sign in..." button (or Sign in.command).
-if [ -n "$NAME" ]; then
+# The title screen. With a RELAY signing in is its "Sign in..." button (or Sign in.command); without one it is
+# offline play ("Change name..." there).
+if [ -z "$RELAY" ]; then
+  if [ -n "$NAME" ]; then
+    "$HERE/penryn-bin" --offline --name "$NAME" >>"$LOG" 2>&1
+  else
+    "$HERE/penryn-bin" --offline >>"$LOG" 2>&1
+  fi
+elif [ -n "$NAME" ]; then
   "$HERE/penryn-bin" --relay "$RELAY" --name "$NAME" >>"$LOG" 2>&1
 else
   "$HERE/penryn-bin" --relay "$RELAY" >>"$LOG" 2>&1
