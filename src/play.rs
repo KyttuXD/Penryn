@@ -174,6 +174,9 @@ pub struct App {
     frames: u32,
     /// PENRYN_SHOT=path and PENRYN_SHOT_AFTER=seconds: save the picture then and quit (tests).
     test_shot: Option<(String, u64)>,
+    /// PENRYN_SHOT_INGAME=SECONDS: the shot is taken that long after the first frame of the game itself (the menus,
+    /// the pack screens and the loading never take it), instead of PENRYN_SHOT_AFTER seconds after the start.
+    shot_ingame: Option<u64>,
     /// PENRYN_TEST_INPUT: held keys for tests, e.g. "w" to walk forward.
     test_keys: String,
     fps_at: u64,
@@ -502,8 +505,11 @@ pub fn run(server: Option<String>, name: &str, account: Option<Account>, relay: 
         frames: 0,
         test_shot: sys::env("PENRYN_SHOT").map(|p| {
             let after: u64 = sys::env("PENRYN_SHOT_AFTER").and_then(|s| s.parse().ok()).unwrap_or(8);
-            (p, sys::now_ms() + after * 1000)
+            // Waiting for the game: no deadline until its first frame.
+            let ingame = sys::env("PENRYN_SHOT_INGAME").is_some();
+            (p, if ingame { u64::MAX } else { sys::now_ms() + after * 1000 })
         }),
+        shot_ingame: sys::env("PENRYN_SHOT_INGAME").and_then(|s| s.parse().ok()),
         test_keys: crate::title::game_test_keys(&sys::env("PENRYN_TEST_INPUT").unwrap_or_default()),
         fps_at: sys::now_ms(),
         perf: sys::env("PENRYN_PERF").is_some(),
@@ -850,6 +856,11 @@ impl App {
             if self.take_shot {
                 self.take_shot = false;
                 self.save_screenshot(g);
+            }
+            if let (Some(secs), Some(shot)) = (self.shot_ingame, self.test_shot.as_mut()) {
+                if shot.1 == u64::MAX {
+                    shot.1 = now + secs * 1000;
+                }
             }
             if let Some(shot) = self.test_shot.as_ref() {
                 // PENRYN_TEST_INPUT "m": wait for a piston in motion.

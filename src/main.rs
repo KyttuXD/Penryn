@@ -120,6 +120,9 @@ const USAGE: &str = "Penryn: a Minecraft Java Edition 26.3 client for old Macs
   penryn logout                    forget the saved sign-in
   penryn status HOST[:PORT]        the server-list ping
   --no-update                      (with the title screen or play) skip the check for a newer nightly build
+  --offline                        (or PENRYN_OFFLINE=1) no relay at all: offline play as --name (else the user
+                                   name of this computer), on offline-mode servers; the game files must be in the
+                                   data folder (Linux: ~/.local/share/penryn, or PENRYN_DATA)
   penryn add-server HOST[:PORT] [NAME]
                                    put a server in the Multiplayer list (servers.dat)
   penryn join HOST[:PORT] [NAME]   join without a window, printing what happens (tests)
@@ -130,7 +133,26 @@ sign-in Mac OS X 10.6 cannot, and makes the game files from your own copy of Min
 See README.md.";
 
 pub fn data_dir() -> String {
-    sys::env("PENRYN_DATA").unwrap_or_else(|| String::from("."))
+    if let Some(d) = sys::env("PENRYN_DATA") {
+        return d;
+    }
+    // Linux: without PENRYN_DATA and without game files in the current folder, ~/.local/share/penryn.
+    #[cfg(target_os = "linux")]
+    {
+        if sys::read_head("./blocks.bin", 4).is_none() {
+            if let Some(home) = sys::env("HOME") {
+                let d = alloc::format!("{}/.local/share/penryn", home);
+                static MADE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+                if !MADE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                    sys::make_dir(&alloc::format!("{}/.local", home));
+                    sys::make_dir(&alloc::format!("{}/.local/share", home));
+                    sys::make_dir(&d);
+                }
+                return d;
+            }
+        }
+    }
+    String::from(".")
 }
 
 pub fn load_blocks() -> Result<blocks::Blocks, String> {
@@ -216,12 +238,14 @@ fn run(args: &[String]) -> Result<(), String> {
             // penryn [play] [--relay R] [--name N] [HOST[:PORT]] [NAME]: without a server,
             // the title screen.
             let mut relay = sys::env("PENRYN_RELAY").map(|r| http::host_port(&r, 25580));
+            let mut offline = sys::env("PENRYN_OFFLINE").is_some();
             let mut name = None;
             let mut host = None;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
                     "play" | "connect" | "--no-update" => {}
+                    "--offline" => offline = true,
                     "--relay" => {
                         i += 1;
                         relay = Some(http::host_port(args.get(i).ok_or(USAGE)?, 25580));
@@ -234,6 +258,14 @@ fn run(args: &[String]) -> Result<(), String> {
                     x => name = Some(String::from(x)),
                 }
                 i += 1;
+            }
+            // Offline: no relay at all (no sign-in, no skins, no server packs, no update check), the player is
+            // NAME, else the login name of this computer. Only offline-mode servers let that in.
+            if offline {
+                relay = None;
+                if name.is_none() {
+                    name = Some(sys::env("USER").filter(|u| !u.is_empty()).unwrap_or_else(|| String::from("Player")));
+                }
             }
             // The address as typed: whether it names a port decides an SRV lookup (srv.rs).
             let server = match host {

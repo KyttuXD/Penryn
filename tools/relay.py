@@ -446,8 +446,8 @@ class Relay:
                     return p
         return None
 
-    def build_assets(self, token=None):
-        out = os.path.join(self.data_dir, "assets")
+    def build_assets(self, token=None, out=None):
+        out = out or os.path.join(self.data_dir, "assets")
         names = ("blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin", "menu.bin", "serverui.bin",
                  "containers.bin", "items.bin")
         tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_assets.py")
@@ -847,6 +847,14 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def main():
     port, data = 25580, os.path.join(HOME, ".local/share/penryn-relay")
     args = sys.argv[1:]
+    if "--build-assets" in args:
+        # No server: only make the game files (from this computer's own Minecraft 26.3 and Horizon's prepared data)
+        # in the folder given, for `penryn --offline`: python3 tools/relay.py --build-assets ~/.local/share/penryn
+        i = args.index("--build-assets")
+        out = args[i + 1] if i + 1 < len(args) else os.path.join(HOME, ".local/share/penryn")
+        os.makedirs(out, exist_ok=True)
+        print("game files made in", Relay("", data).build_assets(out=out))
+        return
     if "--port" in args:
         port = int(args[args.index("--port") + 1])
     if "--data" in args:
