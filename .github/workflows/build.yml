@@ -20,6 +20,8 @@ permissions:
 
 env:
   RUST_TOOLCHAIN: "1.99.1"
+  # Built into the program: only a CI build looks for a newer nightly build when it starts (src/update.rs).
+  PENRYN_BUILD: ${{ github.run_number }}
 
 jobs:
   linux:

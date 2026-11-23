@@ -61,6 +61,9 @@ NAME=
 VIEW=8
 # yes: full screen (F11 switches too)
 FULLSCREEN=
+# no: do not look for a newer nightly build when Penryn starts (only the downloaded nightly build looks;
+# the relay must be the one from the same download).
+UPDATE=
 EOF
 
 # Signing in from Terminal, for those who prefer it to the title screen's button.
@@ -106,6 +109,9 @@ case "$(sw_vers -productVersion 2>/dev/null)" in
   *) export PENRYN_GLMT="${PENRYN_GLMT:-1}" ;;
 esac
 [ "$FULLSCREEN" = yes ] && export PENRYN_FULLSCREEN=1
+# The app updates itself in place from the nightly release (through the relay): it needs to know where it is.
+export PENRYN_APP="$(cd "$HERE/../.." && pwd)"
+[ "$UPDATE" = no ] && export PENRYN_NO_UPDATE=1
 # SERVER (optional) goes into the Multiplayer list (servers.dat) once.
 if [ -n "$SERVER" ]; then
   "$HERE/penryn-bin" add-server "$SERVER" >"$LOG" 2>&1

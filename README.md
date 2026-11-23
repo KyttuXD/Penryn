@@ -317,6 +317,20 @@ another one (for tests). Without a record the name is joined on port 25565.
 options screens have saved `options.txt` there, its render distance and fullscreen win over
 `PENRYN_VIEW` and `PENRYN_FULLSCREEN` (settings.txt's VIEW and FULLSCREEN).
 
+## Updates (nightly builds)
+
+CI builds Penryn on every push to `main` and replaces the **nightly** [release](../../releases/tag/nightly)
+(`penryn-macos-x86_64.zip`, `penryn-linux-x86_64.tar.gz`). The nightly builds update themselves: at
+start, before the window opens, Penryn asks the relay for the release's SHA-256 (the relay reads the
+release from GitHub, which Penryn cannot do itself, checks the download against the checksum GitHub
+reports, and hands the files over). When it differs from the one installed, the files are put in place
+(the Mac app in place, the Linux program and the files beside it) and Penryn starts again. Needs the
+relay's `tools/relay.py` of the same download (restart it after an update: it is not replaced while it
+runs). Off with `UPDATE=no` in the Mac app's `settings.txt`, `--no-update`, or `PENRYN_NO_UPDATE=1`.
+A build made by hand (not by CI) never checks, so it is never replaced. The installed release is
+recorded in `installed-release.txt` in the data folder; a release that is installed twice without
+becoming the running program is not installed a third time.
+
 ## Voice chat (off by default)
 
 Penryn speaks the Simple Voice Chat server mod (2.6.x, compatibility 20): Options > Voice Chat turns

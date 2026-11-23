@@ -33,7 +33,7 @@ exports:
                _abort, _getenv, _usleep, _gettimeofday, _socket, _connect, _send, _recv,
                _getaddrinfo, _freeaddrinfo, _poll, _dlopen, _dlsym, _pthread_create, _pthread_detach,
                _pthread_attr_init, _pthread_attr_setstacksize, _pthread_attr_destroy, _bind, _setsockopt, _recvfrom,
-               _localtime_r, _system, _sysconf, _mkdir,
+               _localtime_r, _system, _sysconf, _mkdir, _symlink, _unlink,
                _memcpy, _memmove, _memset, _memcmp, _bcmp, _bzero, ___bzero, _memset_pattern16,
                dyld_stub_binder ]
 ...

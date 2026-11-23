@@ -114,8 +114,49 @@ extern "C" {
 #[cfg(target_os = "linux")]
 extern "C" {
     fn readlink(path: *const c_char, buf: *mut u8, n: SizeT) -> SsizeT;
+}
+
+extern "C" {
     fn symlink(target: *const c_char, link: *const c_char) -> c_int;
     fn unlink(path: *const c_char) -> c_int;
+}
+
+/// Runs a shell command and waits for it (its exit status, -1 when it could not start).
+pub fn shell(cmd: &str) -> i32 {
+    let c = cstr(cmd);
+    let r = unsafe { system(c.as_ptr() as *const c_char) };
+    if r == -1 {
+        -1
+    } else {
+        (r >> 8) & 0xff
+    }
+}
+
+/// Makes `link` a symbolic link to `target` (replacing a file or link there).
+pub fn make_symlink(target: &str, link: &str) -> bool {
+    let (t, l) = (cstr(target), cstr(link));
+    unsafe {
+        unlink(l.as_ptr() as *const c_char);
+        symlink(t.as_ptr() as *const c_char, l.as_ptr() as *const c_char) == 0
+    }
+}
+
+/// Deletes a file or link.
+pub fn remove_file(path: &str) {
+    let p = cstr(path);
+    unsafe { unlink(p.as_ptr() as *const c_char) };
+}
+
+/// Where the running program is (Linux only: /proc/self/exe).
+pub fn exe_path() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        read_link("/proc/self/exe")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 /// Where a symbolic link points (None: not a link, or too long).
@@ -468,7 +509,8 @@ pub fn write_file_readable(path: &str, data: &[u8]) -> bool {
     write_file_mode(path, data, 0o644)
 }
 
-fn write_file_mode(path: &str, data: &[u8], mode: c_int) -> bool {
+/// Writes `data` to `path` with the given file mode (the bits a new file gets, before the umask).
+pub fn write_file_mode(path: &str, data: &[u8], mode: i32) -> bool {
     let p = cstr(path);
     let fd = unsafe { open(p.as_ptr() as *const c_char, O_WRONLY_CREAT_TRUNC, mode) };
     if fd < 0 {

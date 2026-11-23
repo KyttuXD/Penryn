@@ -6,6 +6,7 @@
 extern crate alloc;
 
 mod account;
+mod update;
 mod audio;
 mod blocks;
 mod books;
@@ -117,6 +118,7 @@ const USAGE: &str = "Penryn: a Minecraft Java Edition 26.3 client for old Macs
                                    (Horizon's launcher's account there, else a device code)
   penryn logout                    forget the saved sign-in
   penryn status HOST[:PORT]        the server-list ping
+  --no-update                      (with the title screen or play) skip the check for a newer nightly build
   penryn add-server HOST[:PORT] [NAME]
                                    put a server in the Multiplayer list (servers.dat)
   penryn join HOST[:PORT] [NAME]   join without a window, printing what happens (tests)
@@ -218,7 +220,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
-                    "play" | "connect" => {}
+                    "play" | "connect" | "--no-update" => {}
                     "--relay" => {
                         i += 1;
                         relay = Some(http::host_port(args.get(i).ok_or(USAGE)?, 25580));
@@ -257,6 +259,8 @@ fn run(args: &[String]) -> Result<(), String> {
                 say!("signed in as {}", a.name);
             }
             let fetch_from = relay.clone().or_else(|| acc.as_ref().map(|a| a.relay.clone()));
+            // A newer nightly build replaces this one and starts (update.rs).
+            update::run(fetch_from.as_ref(), &args);
             account::ensure_game_files(fetch_from.as_ref())?;
             skins::set_relay(fetch_from.clone());
             packs::set_relay(fetch_from.clone());
@@ -392,6 +396,9 @@ fn selftest() -> Result<(), String> {
     let z = zlib::store(&data);
     check("zlib stored round trip", alloc::format!("{}", zlib::inflate(&z, data.len()) == Some(data.clone())), "true");
     for (what, got, want) in talk::selftest().into_iter().chain(text::selftest()).chain(commands::selftest()).chain(chatui::selftest()) {
+        check(what, got, want);
+    }
+    for (what, got, want) in update::selftest() {
         check(what, got, want);
     }
     for (what, got, want) in opus::selftest() {

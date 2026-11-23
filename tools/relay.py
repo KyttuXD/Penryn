@@ -88,6 +88,157 @@ def call(url, data=None, form=None, token=None, method=None):
             return e.code, {"error": raw.decode(errors="replace")[:300]}
 
 
+# ---------------------------------------------------------- updates
+#
+# Penryn updates itself from the GitHub "nightly" release (CI replaces it on every push to main). The
+# program cannot speak HTTPS, so the relay reads the release and unpacks the build for it: the client
+# asks GET /update/check?platform=macos|linux (the release file's SHA-256) and, when that differs from
+# what it installed, GET /update/download?platform=...&sha=... (the files, as one "PNU1" archive).
+# The SHA-256 of the release file is the one GitHub itself reports for it, and is checked here.
+
+UPDATE_REPO = "KyttuXD/Penryn"
+UPDATE_FILES = {"macos": "penryn-macos-x86_64.zip", "linux": "penryn-linux-x86_64.tar.gz"}
+UPDATE_LIMIT = 64 << 20
+_update_cache = {}  # platform -> (time, (sha256, size)) | sha256 -> archive bytes
+_update_lock = threading.Lock()
+
+
+def update_release_host_ok(url):
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    return parts.scheme == "https" and (host == "github.com" or host.endswith(".github.com")
+                                        or host.endswith(".githubusercontent.com"))
+
+
+class _GithubOnly(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not update_release_host_ok(newurl):
+            raise urllib.error.URLError("the download moved to %s" % newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def update_release(platform):
+    """(sha256, size, download url) of the nightly release's file for `platform`."""
+    name = UPDATE_FILES.get(platform)
+    if not name:
+        raise ValueError("unknown platform")
+    req = urllib.request.Request("https://api.github.com/repos/%s/releases/tags/nightly" % UPDATE_REPO,
+                                 headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        release = json.loads(r.read(4 << 20))
+    for a in release.get("assets", []):
+        if a.get("name") == name:
+            digest = str(a.get("digest") or "")
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                raise ValueError("the release file has no checksum")
+            return digest[7:], int(a.get("size") or 0), a["browser_download_url"]
+    raise ValueError("the nightly release has no %s" % name)
+
+
+def update_check(platform):
+    """The nightly file's "SHA-256 size" (looked up at most once a minute)."""
+    with _update_lock:
+        hit = _update_cache.get(platform)
+        if hit and time.time() - hit[0] < 60:
+            return hit[1]
+    sha, size, _ = update_release(platform)
+    with _update_lock:
+        _update_cache[platform] = (time.time(), (sha, size))
+    return sha, size
+
+
+def _update_path_ok(path):
+    return bool(path) and not path.startswith("/") and ".." not in path.split("/") and "\0" not in path \
+        and "\\" not in path
+
+
+def update_entries(platform, data):
+    """[(kind, path, mode, bytes)] of the release file: kind 0 file, 1 folder, 2 link (bytes: target).
+    The top folder (Penryn.app/, penryn-linux/) is dropped; the Mac build keeps the whole app, the
+    Linux build the program and tools/."""
+    import io
+    import stat
+    import tarfile
+    import zipfile
+    out = []
+    if platform == "macos":
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for i in z.infolist():
+                path = i.filename.rstrip("/")
+                if not path or path.startswith("__MACOSX/") or "/._" in "/" + path:
+                    continue
+                if not _update_path_ok(path):
+                    raise ValueError("unsafe path in the release file: " + path)
+                path = path.partition("/")[2]
+                if not path:
+                    continue
+                mode = (i.external_attr >> 16) & 0o7777
+                kind = stat.S_IFMT(i.external_attr >> 16)
+                if i.is_dir():
+                    out.append((1, path, mode or 0o755, b""))
+                elif kind == stat.S_IFLNK:
+                    out.append((2, path, mode, z.read(i)))
+                else:
+                    out.append((0, path, mode or 0o644, z.read(i)))
+    else:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
+            for m in t.getmembers():
+                path = m.name.rstrip("/")
+                top, _, rest = path.partition("/")
+                if not rest:
+                    continue
+                if not _update_path_ok(path):
+                    raise ValueError("unsafe path in the release file: " + path)
+                if m.isdir():
+                    out.append((1, rest, 0o755, b""))
+                elif m.issym():
+                    out.append((2, rest, 0o777, m.linkname.encode()))
+                elif m.isfile():
+                    out.append((0, rest, m.mode & 0o7777, t.extractfile(m).read()))
+    return out
+
+
+def update_archive(platform, want):
+    """The PNU1 archive of the nightly file with SHA-256 `want` (it is verified against the download):
+    "PNU1", u32 count, then for each entry: u8 kind, u16 mode, u16 path length, path, u32 length, data."""
+    import struct
+    with _update_lock:
+        hit = _update_cache.get(("archive", platform, want))
+    if hit:
+        return hit
+    sha, size, url = update_release(platform)
+    if sha != want:
+        raise ValueError("the release changed: ask again")
+    if size > UPDATE_LIMIT:
+        raise ValueError("the release file is too large")
+    opener = urllib.request.build_opener(_GithubOnly)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    h = hashlib.sha256()
+    data = bytearray()
+    with opener.open(req, timeout=120) as r:
+        while True:
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) > UPDATE_LIMIT:
+                raise ValueError("the release file is too large")
+            h.update(chunk)
+    if h.hexdigest() != want:
+        raise ValueError("checksum mismatch: the release file was not used")
+    entries = update_entries(platform, bytes(data))
+    out = bytearray(b"PNU1" + struct.pack("<I", len(entries)))
+    for kind, path, mode, body in entries:
+        pb = path.encode()
+        out += struct.pack("<BHH", kind, mode, len(pb)) + pb + struct.pack("<I", len(body)) + body
+    out = bytes(out)
+    with _update_lock:
+        for k in [k for k in _update_cache if isinstance(k, tuple)]:
+            del _update_cache[k]  # one archive is kept
+        _update_cache[("archive", platform, want)] = out
+    return out
+
+
 class Relay:
     def __init__(self, client_id, data_dir):
         self.client_id = client_id
@@ -549,6 +700,17 @@ def make_handler(relay):
         def do_GET(self):
             if not private(self.client_address[0]):
                 return self.reply(403, "local network only")
+            m = re.fullmatch(r"/update/(check|download)\?platform=(macos|linux)(?:&sha=([0-9a-f]{64}))?", self.path)
+            if m:
+                try:
+                    if m.group(1) == "check":
+                        sha, size = update_check(m.group(2))
+                        return self.reply(200, "%s %d\n" % (sha, size))
+                    if not m.group(3):
+                        return self.reply(400, "sha is missing")
+                    return self.reply(200, update_archive(m.group(2), m.group(3)), "application/octet-stream")
+                except Exception as e:  # noqa: BLE001 - reported to the client
+                    return self.reply(502, "update: %s" % e)
             if self.path == "/assets/effects.bin":
                 # Optional (the status effect icons): 404 when the files were made without it.
                 try:
