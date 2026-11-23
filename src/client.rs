@@ -1069,7 +1069,7 @@ impl Game {
                     let ok = entity_data(&mut r, e);
                     crate::display::data_changed(e, before);
                     e.version = e.version.wrapping_add(1);
-                    if crate::sys::env("PENRYN_DEBUG").is_some() {
+                    if crate::sys::env("PENRYN_DEBUG").as_deref() == Some("2") {
                         crate::say!(
                             "entity {} data: {} (item {:?} {}, patch {} bytes, values {:?})",
                             id,

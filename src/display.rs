@@ -353,14 +353,20 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entit
     let tiles_row = (cx.atlas_size.0 / 16.0) as u32;
     let mut atlas_v: Vec<V> = Vec::new();
     let mut heads: Vec<(u32, Vec<V>)> = Vec::new();
+    // PENRYN_DEBUG: what became of the displays, said every few seconds. Counts: total, too far, block without a
+    // state, item display without an item, no icon for its item, head without its texture yet, then drawn: flat
+    // items, models, heads, blocks.
+    let mut stats = [0u32; 10];
     for e in ents.values() {
         let block = e.kind == kb;
         if !(block || e.kind == ki) {
             continue;
         }
+        stats[0] += 1;
         let lerp = |a: f64, b: f64| a + (b - a) * partial as f64;
         let p = [lerp(e.prev[0], e.pos[0]) - eye[0], lerp(e.prev[1], e.pos[1]) - eye[1], lerp(e.prev[2], e.pos[2]) - eye[2]];
         if p[0] * p[0] + p[1] * p[1] + p[2] * p[2] > 128.0 * 128.0 {
+            stats[1] += 1;
             continue;
         }
         let lc = cx.lit.at([p[0] + eye[0], p[1] + eye[1], p[2] + eye[2]]);
@@ -368,7 +374,11 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entit
             .then(&orientation(e, cx.yaw, cx.pitch))
             .then(&matrix(&transformation(e, partial)));
         if block {
-            let Some(st) = e.data.get(&23).and_then(|&s| blocks.states.get(s as usize)) else { continue };
+            let Some(st) = e.data.get(&23).and_then(|&s| blocks.states.get(s as usize)) else {
+                stats[2] += 1;
+                continue;
+            };
+            stats[9] += 1;
             let first = st.first_quad as usize;
             let qs = &blocks.quads[first.min(blocks.quads.len())..(first + st.quads as usize).min(blocks.quads.len())];
             for q in qs {
@@ -382,12 +392,19 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entit
             }
             continue;
         }
-        let Some((item, _)) = e.item else { continue };
+        let Some((item, _)) = e.item else {
+            stats[3] += 1;
+            continue;
+        };
         let ctx = e.data.get(&24).copied().unwrap_or(0);
         // ItemDisplayRenderer turns the item half a turn about the vertical.
         let place = place.then(&A::rot_y(core::f32::consts::PI));
         if blocks.items.get(item as usize).map(|n| n.as_str()) == Some("player_head") {
-            let Some(tex) = head_skin(&e.item_patch).and_then(|u| crate::skins::texture_for(&u)) else { continue };
+            let Some(tex) = head_skin(&e.item_patch).and_then(|u| crate::skins::texture_for(&u)) else {
+                stats[5] += 1;
+                continue;
+            };
+            stats[8] += 1;
             let mut v = Vec::new();
             skull_vertices(&mut v, &place.then(&skull_context(ctx)), crate::lightmap::tint([255; 4], lc));
             heads.push((tex, v));
@@ -414,6 +431,7 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entit
         };
         match shown.as_ref() {
             Some(crate::gui::Icon::Flat(layers)) => {
+                stats[6] += 1;
                 for &(tile, tint) in layers.iter() {
                     let (tx, ty) = ((tile as u32 % tiles_row) as f32 * 16.0, (tile as u32 / tiles_row) as f32 * 16.0);
                     let (u0, v0, u1, v1) = (tx / cx.atlas_size.0, ty / cx.atlas_size.1, (tx + 16.0) / cx.atlas_size.0, (ty + 16.0) / cx.atlas_size.1);
@@ -428,6 +446,7 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entit
                 }
             }
             Some(crate::gui::Icon::Model { first, count, tint, .. }) => {
+                stats[7] += 1;
                 let qs = &blocks.quads[*first as usize..(*first as usize + *count as usize).min(blocks.quads.len())];
                 let tc = if *tint != 0 { [(*tint >> 16) as u8, (*tint >> 8) as u8, *tint as u8] } else { [255; 3] };
                 for q in qs {
@@ -440,7 +459,16 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entit
                     }
                 }
             }
-            _ => {}
+            _ => stats[4] += 1,
+        }
+    }
+    if crate::sys::env("PENRYN_DEBUG").is_some() && stats[0] > 0 {
+        static CALLS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        if CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % 200 == 0 {
+            crate::say!(
+                "displays: {} (far {}, no state {}, no item {}, no icon {}, head no texture {}); drawn: flat {}, model {}, head {}, block {}",
+                stats[0], stats[1], stats[2], stats[3], stats[4], stats[5], stats[6], stats[7], stats[8], stats[9]
+            );
         }
     }
     if atlas_v.is_empty() && heads.is_empty() {
