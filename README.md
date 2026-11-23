@@ -327,7 +327,8 @@ reports, and hands the files over). When it differs from the one installed, the 
 (the Mac app in place, the Linux program and the files beside it) and Penryn starts again. Needs the
 relay's `tools/relay.py` of the same download (restart it after an update: it is not replaced while it
 runs). Off with `UPDATE=no` in the Mac app's `settings.txt`, `--no-update`, or `PENRYN_NO_UPDATE=1`.
-A build made by hand (not by CI) never checks, so it is never replaced. The installed release is
+The relay is what Penryn trusts for this (as it already is for your sign-in): the checksum is checked there, on
+your computer, not in the program, so keep the relay on a network you trust. A build made by hand (not by CI) never checks, so it is never replaced. The installed release is
 recorded in `installed-release.txt` in the data folder; a release that is installed twice without
 becoming the running program is not installed a third time.
 

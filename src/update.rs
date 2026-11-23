@@ -74,6 +74,10 @@ pub fn parse_archive(b: &[u8]) -> Result<Vec<Entry>, String> {
                 return Err(format!("the update archive has an unsafe link ({})", path));
             }
         }
+        // Nothing is made below a link (a file written "through" it would land wherever it points).
+        if out.iter().any(|e: &Entry| e.kind == 2 && path.len() > e.path.len() && path.starts_with(e.path.as_str()) && path.as_bytes()[e.path.len()] == b'/') {
+            return Err(format!("the update archive writes below a link ({})", path));
+        }
         out.push(Entry { kind, mode, path: String::from(path), data: data.to_vec() });
     }
     if o != b.len() {
@@ -206,7 +210,20 @@ pub fn run(relay: Option<&(String, u16)>, args: &[String]) {
 
 fn try_update(relay: &(String, u16), root: &str, args: &[String], build: &str) -> Result<(), String> {
     let dir = crate::data_dir();
-    let r = http::get(&relay.0, relay.1, &format!("/update/check?platform={}", PLATFORM), 15000)?;
+    // The question runs on a thread: connecting to a relay that is off or asleep has no time limit of its own
+    // (the system's, a minute or two), and the game must not wait for that.
+    let (host, port) = (relay.0.clone(), relay.1);
+    let mut asking = crate::task::spawn(move || http::get(&host, port, &format!("/update/check?platform={}", PLATFORM), 15000));
+    let deadline = sys::now_ms() + 10_000;
+    let r = loop {
+        if let Some(r) = asking.take() {
+            break r?;
+        }
+        if sys::now_ms() > deadline {
+            return Err(String::from("the relay did not answer in time"));
+        }
+        sys::sleep_ms(20);
+    };
     if r.status != 200 {
         return Err(format!("the relay could not read the release ({} {})", r.status, r.text().trim()));
     }
@@ -228,7 +245,6 @@ fn try_update(relay: &(String, u16), root: &str, args: &[String], build: &str) -
     if tried_sha == want && tried_n >= 2 {
         return Err(String::from("this release was installed twice and the program is still not it: not installing it again"));
     }
-    sys::write_file_private(&attempts, format!("{} {}", want, if tried_sha == want { tried_n + 1 } else { 1 }).as_bytes());
     crate::say!("update: downloading the nightly build ({}) ...", &want[..12]);
     let r = http::get(&relay.0, relay.1, &format!("/update/download?platform={}&sha={}", PLATFORM, want), 600_000)?;
     if r.status != 200 {
@@ -239,7 +255,12 @@ fn try_update(relay: &(String, u16), root: &str, args: &[String], build: &str) -
         return Err(String::from("the update has no program"));
     }
     let n = install(root, &entries)?;
-    sys::write_file_private(&record, want.as_bytes());
+    if !sys::write_file_private(&record, want.as_bytes()) {
+        return Err(String::from("cannot write installed-release.txt: not starting the new build (it would update again)"));
+    }
+    // Counted when it was installed (a failed download is no attempt): the guard stops a release that is
+    // installed twice and still is not the running program.
+    sys::write_file_private(&attempts, format!("{} {}", want, if tried_sha == want { tried_n + 1 } else { 1 }).as_bytes());
     crate::say!("update: {} files replaced, starting the new build", n);
     restart(root, args)
 }
@@ -269,6 +290,7 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     let link_out = archive(&[(2, 0o777, "l", b"../../x")]);
     let mut cut = good.clone();
     cut.truncate(cut.len() - 3);
+    let through = archive(&[(2, 0o777, "l", b"x"), (0, 0o644, "l/f", b"x")]);
     let mut extra = good.clone();
     extra.push(0);
     alloc::vec![
@@ -276,6 +298,7 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
         ("update rejects ..", format!("{}", parse_archive(&dotdot).is_err()), "true"),
         ("update rejects absolute paths", format!("{}", parse_archive(&abs).is_err()), "true"),
         ("update rejects links out of the folder", format!("{}", parse_archive(&link_out).is_err()), "true"),
+        ("update rejects writing through a link", format!("{}", parse_archive(&through).is_err()), "true"),
         ("update rejects a cut archive", format!("{}", parse_archive(&cut).is_err()), "true"),
         ("update rejects trailing bytes", format!("{}", parse_archive(&extra).is_err()), "true"),
         ("update rejects another magic", format!("{}", parse_archive(b"PNU2\0\0\0\0").is_err()), "true"),

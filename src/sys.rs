@@ -244,14 +244,20 @@ unsafe impl GlobalAlloc for Malloc {
 
 // ------------------------------------------------------------------ text out
 
-fn write_all(fd: c_int, mut b: &[u8]) {
+fn write_all(fd: c_int, b: &[u8]) {
+    write_all_ok(fd, b);
+}
+
+/// Writes all of `b`; false when the disk refused some of it (full, quota, I/O error).
+fn write_all_ok(fd: c_int, mut b: &[u8]) -> bool {
     while !b.is_empty() {
         let n = unsafe { write(fd, b.as_ptr() as *const c_void, b.len()) };
         if n <= 0 {
-            return;
+            return false;
         }
         b = &b[n as usize..];
     }
+    true
 }
 
 pub fn print(s: &str) {
@@ -516,7 +522,8 @@ pub fn write_file_mode(path: &str, data: &[u8], mode: i32) -> bool {
     if fd < 0 {
         return false;
     }
-    write_all(fd, data);
-    unsafe { close(fd) };
-    true
+    let ok = write_all_ok(fd, data);
+    // close can report the delayed write error of a full disk too.
+    let closed = unsafe { close(fd) } == 0;
+    ok && closed
 }
