@@ -1,0 +1,92 @@
+# Builds Penryn for Linux (x86_64) and for Intel Macs (Mac OS X 10.6 and newer). Each build is published to a
+# rolling pre-release in Releases (not Actions artifacts): "nightly". The release is replaced in place on every
+# push to main (packaging/nightly.sh). The Linux build is penryn-linux-x86_64.tar.gz (the program, the relay and the
+# game-file maker, the README) and the Mac build is penryn-macos-x86_64.zip (Penryn.app, which bundles SDL2 2.0.4).
+# Penryn is built from POSIX calls and OpenGL through SDL2, so Windows and Apple Silicon builds do not exist (the Mac
+# build is one x86_64 app; Apple Silicon Macs open it through Rosetta 2 where that accepts a 10.6 binary).
+# The repository is public, so GitHub-hosted runners (including macOS) are free.
+name: build
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".claude/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          key: linux
+      - name: Build times header
+        shell: bash
+        run: |
+          printf '### Build times (linux)\n\n| step | os | cache | elapsed |\n|---|---|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: packaging/linux/build.sh
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          t0=$(date +%s); date -u +"start %FT%TZ"
+          trap 'echo "| packaging/linux/build.sh | ${{ runner.os }} | cache-hit: ${CACHE_HIT:-n/a} | $(( $(date +%s) - t0 ))s |" >> "$GITHUB_STEP_SUMMARY"; date -u +"end   %FT%TZ"' EXIT
+          sh packaging/linux/build.sh
+      - name: Publish to nightly
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh packaging/nightly.sh dist/penryn-linux-x86_64.tar.gz dist/penryn-linux-x86_64.tar.gz.sha256
+
+  # Intel Mac: its own build, its own zip. Built on the Apple Silicon runner (it is about twice as fast as the Intel
+  # one): the x86_64 target is cross-compiled, which is how Penryn is always built for the Mac (scripts/build-mac.sh:
+  # Rust's own linker and a text stub of the libSystem calls, no Xcode and no Apple SDK).
+  macos-intel:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      # The SDL2.framework (2.0.4, the SDL that runs on Mac OS X 10.6) bundled in the app: it lives in VoxelRust.
+      - uses: actions/checkout@v6
+        with:
+          repository: KyttuXD/VoxelRust
+          path: vendor-voxelrust
+          sparse-checkout: vendor/sdl2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          key: macos-intel
+      - name: Build times header
+        shell: bash
+        run: |
+          printf '### Build times (macos intel)\n\n| step | os | cache | elapsed |\n|---|---|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Build the Intel app
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+          SDL2_FRAMEWORK: vendor-voxelrust/vendor/sdl2/SDL2.framework
+        run: |
+          t0=$(date +%s); date -u +"start %FT%TZ"
+          trap 'echo "| Build the Intel app | macOS Intel | cache-hit: ${CACHE_HIT:-n/a} | $(( $(date +%s) - t0 ))s |" >> "$GITHUB_STEP_SUMMARY"; date -u +"end   %FT%TZ"' EXIT
+          sh packaging/macos/build_app.sh
+      - name: Publish to nightly
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh packaging/nightly.sh dist/penryn-macos-x86_64.zip

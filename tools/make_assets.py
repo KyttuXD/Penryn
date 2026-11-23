@@ -253,6 +253,15 @@ class Assets:
     def base(self, full):
         if not safe_name(full):
             return None
+        # The fonts: the client jar's include/unifont.json lists no providers (the game gets the
+        # Unifont definitions and its zips from the downloaded assets), so with a jar the prepared
+        # folder, which has both, answers first.
+        if self.folder and self.zip and full.startswith("assets/minecraft/font/"):
+            try:
+                with open(os.path.join(self.folder, *full.split("/")), "rb") as f:
+                    return f.read()
+            except OSError:
+                pass
         if self.zip:
             try:
                 return self.zip.read(full)
@@ -2121,7 +2130,7 @@ def main():
             gatlas[o:o + w * 4] = px[yy * w * 4:(yy + 1) * w * 4]
 
     with open(os.path.join(out_dir, "gui.bin"), "wb") as f:
-        f.write(b"PNG5" + struct.pack("<HH", gw, gh) + bytes(gatlas))
+        f.write(b"PNG6" + struct.pack("<HH", gw, gh) + bytes(gatlas))
         names_ = [k for k in sprites if not k.startswith("font/")]
         f.write(struct.pack("<I", len(names_)))
         for k in names_:

@@ -1,0 +1,70 @@
+# Builds Penryn on Linux, runs its self-test (the built-in checks of the crypto, compression, protocol, text, physics,
+# Opus codec, voice chat and so on) and checks the Python tools. Nothing is published.
+#
+# The self-test skips the checks that need the game files (they are made from the player's own copy of Minecraft and are
+# never in the repository), so it checks everything else; the checks that need an OpenGL window or an audio device are
+# not part of it (a hosted runner has neither).
+name: test
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".claude/**"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-22.04"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          targets: x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          key: test-${{ matrix.os }}
+
+      - name: Build times header
+        run: |
+          printf '### Build times (test, ${{ matrix.os }})\n\n| step | os | cache | elapsed |\n|---|---|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: cargo build --release
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          t0=$(date +%s); date -u +"start %FT%TZ"
+          trap 'echo "| cargo build --release | ${{ runner.os }} | cache-hit: ${CACHE_HIT:-n/a} | $(( $(date +%s) - t0 ))s |" >> "$GITHUB_STEP_SUMMARY"; date -u +"end   %FT%TZ"' EXIT
+          cargo build --release --locked
+
+      # Exit status 1 when any check fails.
+      - name: penryn selftest
+        run: ./target/release/penryn selftest
+
+      # The Mac program is linked without Xcode (scripts/build-mac.sh): a build here proves the Mac-only code compiles and links.
+      - name: The Mac program builds
+        run: sh scripts/build-mac.sh
+
+      - name: The tools are valid Python
+        run: python3 -m py_compile tools/make_assets.py tools/relay.py tools/make_icon.py
