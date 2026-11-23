@@ -159,9 +159,9 @@ fn install(root: &str, entries: &[Entry]) -> Result<usize, String> {
                 }
                 // A link is cheap and replaced at once (the old link, if any, goes).
                 let target = String::from_utf8_lossy(&e.data).into_owned();
+                // Not fatal: where a real folder already is (a copy that followed the links), the files are there.
                 if !sys::make_symlink(&target, &dest) {
-                    cleanup(&staged);
-                    return Err(format!("cannot make the link {}", dest));
+                    crate::warn!("update: cannot make the link {}", dest);
                 }
             }
         }
