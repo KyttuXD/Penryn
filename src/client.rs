@@ -900,6 +900,9 @@ impl Game {
                     // An item frame's facing (Direction.get3DDataValue).
                     e.data.insert(crate::maps::SPAWN_DATA, r.varint().unwrap_or(3) as i64);
                 }
+                if crate::sys::env("PENRYN_DEBUG").is_some() {
+                    crate::say!("entity {} added: type {}, at {:.2} {:.2} {:.2}", id, kind, pos[0], pos[1], pos[2]);
+                }
                 self.entities.insert(id, e);
             }
             play::C_REMOVE_ENTITIES => {
@@ -1062,8 +1065,21 @@ impl Game {
                     }
                 }
                 if let Some(e) = self.entities.get_mut(&id) {
-                    entity_data(&mut r, e);
+                    let before = crate::display::snapshot(e);
+                    let ok = entity_data(&mut r, e);
+                    crate::display::data_changed(e, before);
                     e.version = e.version.wrapping_add(1);
+                    if crate::sys::env("PENRYN_DEBUG").is_some() {
+                        crate::say!(
+                            "entity {} data: {} (item {:?} {}, patch {} bytes, values {:?})",
+                            id,
+                            if ok.is_some() { "read" } else { "NOT READ TO THE END" },
+                            e.item,
+                            e.item.and_then(|(i, _)| self.blocks.items.get(i as usize)).map(|s| s.as_str()).unwrap_or(""),
+                            e.item_patch.len(),
+                            e.data
+                        );
+                    }
                 }
             }
             crate::mobs::C_SET_EQUIPMENT => {
@@ -1596,13 +1612,24 @@ pub(crate) fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option
                     r.take(8)?;
                 }
             }
+            // Vector3f and Quaternionf (a display entity's translation, scale and rotations).
             39 => {
-                r.take(12)?;
+                let v = [f32::from_bits(r.i32()? as u32), f32::from_bits(r.i32()? as u32), f32::from_bits(r.i32()? as u32), 0.0];
+                e.fvals.insert(index, v);
             }
             40 => {
-                r.take(16)?;
+                let v = [f32::from_bits(r.i32()? as u32), f32::from_bits(r.i32()? as u32), f32::from_bits(r.i32()? as u32), f32::from_bits(r.i32()? as u32)];
+                e.fvals.insert(index, v);
             }
-            _ => return None,
+            _ => {
+                // Once per kind, in the log: an entity data type this client does not know stops that packet's values.
+                static SEEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                let bit = 1u64 << (kind as u32 & 63);
+                if SEEN.fetch_or(bit, core::sync::atomic::Ordering::Relaxed) & bit == 0 {
+                    crate::warn!("entity data: unknown value type {} at index {} of an entity of type {}", kind, index, e.kind);
+                }
+                return None;
+            }
         }
     }
 }

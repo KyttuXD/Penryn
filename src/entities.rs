@@ -51,6 +51,13 @@ pub struct Entity {
     /// Its byte, VarInt and VarLong entity data values, by index (a sheep's wool is 18 in 26.3).
     pub data: BTreeMap<u8, i64>,
     pub age: u32,
+    /// Vector3f and Quaternionf entity data by index (x, y, z, w): a display entity's transformation (display.rs).
+    pub fvals: BTreeMap<u8, [f32; 4]>,
+    /// A display entity's transformation interpolation: the transformation when it started (translation, scale,
+    /// left and right rotation), the age it starts at, and its length in ticks.
+    pub disp_from: Option<[[f32; 4]; 4]>,
+    pub disp_start: i64,
+    pub disp_dur: i32,
     /// ClientboundSetEquipmentPacket: per EquipmentSlot (main hand, off hand, feet, legs, chest,
     /// head, body, saddle) the item and count.
     pub equipment: [Option<(i32, i32)>; 8],
@@ -112,6 +119,10 @@ impl Entity {
             item_patch: Vec::new(),
             data: BTreeMap::new(),
             age: 0,
+            fvals: BTreeMap::new(),
+            disp_from: None,
+            disp_start: 0,
+            disp_dur: 0,
             equipment: [None; 8],
             custom_name: None,
             health: None,
@@ -1197,12 +1208,13 @@ pub fn draw_items(
     atlas: u32,
     atlas_size: (f32, f32),
     lit: &crate::lightmap::Lit,
+    skip_kinds: &[i32],
 ) {
     let mut v: Vec<V> = Vec::new();
     let tiles_row = (atlas_size.0 / 16.0) as u32;
     for e in ents.values() {
         let Some((item, _)) = e.item else { continue };
-        if crate::maps::is_frame(e.kind) {
+        if crate::maps::is_frame(e.kind) || skip_kinds.contains(&e.kind) {
             continue; // maps.rs draws what is in item frames
         }
         let lerp = |a: f64, b: f64| a + (b - a) * partial as f64;

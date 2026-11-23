@@ -551,6 +551,13 @@ pub fn skin_of(uuid: &[u8; 16]) -> Option<(u32, bool)> {
     Some((ready(&p.skin)?, p.slim))
 }
 
+/// The texture of a skin PNG at `url` (a player head's profile): asked for once, None until it is downloaded.
+pub fn texture_for(url: &str) -> Option<u32> {
+    let u = Some(String::from(url));
+    want(&u, true);
+    ready(&u)
+}
+
 /// A player's downloaded cape texture.
 pub fn cape_of(uuid: &[u8; 16]) -> Option<u32> {
     ready(&st().profiles.get(uuid)?.cape)

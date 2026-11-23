@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod account;
 mod update;
+mod display;
 mod audio;
 mod blocks;
 mod books;
@@ -396,6 +397,9 @@ fn selftest() -> Result<(), String> {
     let z = zlib::store(&data);
     check("zlib stored round trip", alloc::format!("{}", zlib::inflate(&z, data.len()) == Some(data.clone())), "true");
     for (what, got, want) in talk::selftest().into_iter().chain(text::selftest()).chain(commands::selftest()).chain(chatui::selftest()) {
+        check(what, got, want);
+    }
+    for (what, got, want) in display::selftest() {
         check(what, got, want);
     }
     for (what, got, want) in update::selftest() {

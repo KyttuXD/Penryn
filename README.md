@@ -317,6 +317,13 @@ another one (for tests). Without a record the name is joined on port 25565.
 options screens have saved `options.txt` there, its render distance and fullscreen win over
 `PENRYN_VIEW` and `PENRYN_FULLSCREEN` (settings.txt's VIEW and FULLSCREEN).
 
+## Display entities
+
+`block_display` and `item_display` entities are drawn with the transformation the server sends (translation, scale,
+both rotations, glided over the server's duration, and the billboard setting): holograms and plugins such as
+JoltRagdolls (ragdolls are item displays of player heads, shown with the skin from the head's profile, through the
+relay). Items drawn are flat items, block items and player heads; other mob heads and `text_display` are not drawn yet.
+
 ## Updates (nightly builds)
 
 CI builds Penryn on every push to `main` and replaces the **nightly** [release](../../releases/tag/nightly)

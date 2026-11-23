@@ -2364,7 +2364,12 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                         crate::skins::draw(gl, view, eye, &mine, pf, -1, t, &ent_cx.blocks.items, lit);
                     }
                 }
-                crate::entities::draw_items(gl, view, eye, entities, pf, icons, overlays, blocks_ref, atlas, atlas_size, lit);
+                // Display entities (display.rs) are not dropped items.
+                let skip_kinds = ents.map_or([-1, -1], |t| crate::display::kinds(t));
+                crate::entities::draw_items(gl, view, eye, entities, pf, icons, overlays, blocks_ref, atlas, atlas_size, lit, &skip_kinds);
+                if let Some(t) = ents {
+                    crate::display::draw(gl, view, eye, entities, pf, t, &ent_cx, overlays);
+                }
                 crate::maps::draw_frames(gl, view, eye, entities, maps_ref, icons, overlays, blocks_ref, atlas, atlas_size, lit);
                 crate::perf::lap(crate::perf::S::EntItems);
                 if let Some(gui) = gui_ref {
