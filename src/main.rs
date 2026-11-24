@@ -488,7 +488,7 @@ fn selftest() -> Result<(), String> {
         check(what, got, want);
     }
     // The server-driven HUD, tooltips and game modes (serverui.bin when present).
-    for (what, got, want) in serverui::selftest().into_iter().chain(tooltip::selftest()).chain(serverhud::selftest()).chain(gamemode::selftest()) {
+    for (what, got, want) in serverui::selftest().into_iter().chain(tooltip::selftest()).chain(serverhud::selftest()).chain(gamemode::selftest()).chain(play::selftest()) {
         check(what, got, want);
     }
     // The creative inventory's tabs, search and clicks (needs gui.bin and blocks.bin).

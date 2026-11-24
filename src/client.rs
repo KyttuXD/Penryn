@@ -90,6 +90,8 @@ pub struct Game {
     pub entities: alloc::collections::BTreeMap<i32, crate::entities::Entity>,
     /// Set when the arm swings (the hand's swing animation starts).
     pub swung: bool,
+    /// The local player's pose is sleeping (the server's entity data): the in-bed screen shows.
+    pub sleeping: bool,
     /// The level's game time in ticks (clouds drift with it).
     pub game_time: i64,
     /// Sounds the server asked for, waiting for the window to play them.
@@ -417,6 +419,7 @@ impl Game {
             clock_rate: 1.0,
             entities: alloc::collections::BTreeMap::new(),
             swung: false,
+            sleeping: false,
             game_time: 0,
             sounds: Vec::new(),
             placing: None,
@@ -1063,6 +1066,10 @@ impl Game {
                     if let Some(&a) = me.data.get(&1) {
                         self.air = a as i32;
                     }
+                    // Pose (data 6): 2 is sleeping.
+                    if let Some(&pose) = me.data.get(&6) {
+                        self.sleeping = pose as i64 == crate::poses::SLEEPING;
+                    }
                 }
                 if let Some(e) = self.entities.get_mut(&id) {
                     let before = crate::display::snapshot(e);
@@ -1272,12 +1279,18 @@ impl Game {
     }
 
     pub fn place(&mut self, x: i32, y: i32, z: i32, face: i32, cursor: [f32; 3], inside: bool) -> Result<(), String> {
+        self.place_with(0, x, y, z, face, cursor, inside)
+    }
+
+    /// ServerboundUseItemOn for `hand` (0 main, 1 off).
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_with(&mut self, hand: i32, x: i32, y: i32, z: i32, face: i32, cursor: [f32; 3], inside: bool) -> Result<(), String> {
         self.sequence += 1;
         const OFF: [[i32; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
         let o = OFF[face.clamp(0, 5) as usize];
         self.placing = Some(([x + o[0], y + o[1], z + o[2]], crate::sys::now_ms()));
         let mut o = Out::new();
-        o.varint(0).i64(Self::pos_long(x, y, z)).varint(face).f32(cursor[0]).f32(cursor[1]).f32(cursor[2]).bool(inside).bool(false).varint(self.sequence);
+        o.varint(hand).i64(Self::pos_long(x, y, z)).varint(face).f32(cursor[0]).f32(cursor[1]).f32(cursor[2]).bool(inside).bool(false).varint(self.sequence);
         self.conn.send(play::S_USE_ITEM_ON, &o)
     }
 
@@ -1342,14 +1355,28 @@ impl Game {
     }
 
     pub fn use_item(&mut self) -> Result<(), String> {
+        self.use_item_with(0)
+    }
+
+    /// ServerboundUseItem for `hand` (0 main, 1 off).
+    pub fn use_item_with(&mut self, hand: i32) -> Result<(), String> {
         self.sequence += 1;
         let mut o = Out::new();
-        o.varint(0).varint(self.sequence).f32(self.player.yaw).f32(self.player.pitch);
+        o.varint(hand).varint(self.sequence).f32(self.player.yaw).f32(self.player.pitch);
         self.conn.send(play::S_USE_ITEM, &o)
     }
 
     pub fn held(&self) -> Option<(i32, i32)> {
         self.inventory[36 + self.selected as usize]
+    }
+
+    /// The item in a hand (0 main, 1 off: inventory slot 45).
+    pub fn hand_item(&self, hand: i32) -> Option<(i32, i32)> {
+        if hand == 1 {
+            self.inventory[45]
+        } else {
+            self.held()
+        }
     }
 
     pub fn select_slot(&mut self, slot: i16) -> Result<(), String> {

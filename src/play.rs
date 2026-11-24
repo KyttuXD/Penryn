@@ -89,6 +89,73 @@ fn use_duration(name: &str) -> Option<u32> {
     }
 }
 
+/// Items whose use (Item.use) does something without a block: they end a right click even when
+/// they use no time (throwables, buckets, rods, boats, maps, armour that equips, spawn eggs...).
+fn use_acts(name: &str) -> bool {
+    use_duration(name).is_some()
+        || matches!(
+            name,
+            "ender_pearl" | "snowball" | "egg" | "blue_egg" | "brown_egg" | "wind_charge" | "experience_bottle" | "splash_potion"
+                | "lingering_potion" | "fishing_rod" | "ender_eye" | "writable_book" | "written_book" | "filled_map" | "map"
+                | "glass_bottle" | "elytra" | "lily_pad" | "frogspawn" | "knowledge_book"
+        )
+        || name.ends_with("bucket")
+        || name.ends_with("_boat")
+        || name.ends_with("_raft")
+        || name.ends_with("_spawn_egg")
+        || ["_helmet", "_chestplate", "_leggings", "_boots"].iter().any(|w| name.ends_with(w))
+}
+
+/// What the client predicts Item.useOn does to the block aimed at (a consumed result: no
+/// UseItem follows): block items place, tools and utensils act on the blocks they work on.
+fn use_on_consumes(block_item: bool, item: &str, block: &str) -> bool {
+    let has = |ws: &[&str]| ws.iter().any(|w| block.contains(w));
+    if item.ends_with("_axe") {
+        return !block.starts_with("stripped_") && has(&["log", "wood", "stem", "hyphae", "copper", "bamboo_block"]);
+    }
+    if item.ends_with("_shovel") {
+        return has(&["grass_block", "dirt", "podzol", "mycelium", "campfire"]);
+    }
+    if item.ends_with("_hoe") {
+        return has(&["grass_block", "dirt", "podzol", "mycelium", "moss_block", "rooted_dirt"]);
+    }
+    if item.ends_with("minecart") {
+        return block.contains("rail");
+    }
+    if item.ends_with("_dye") || item == "ink_sac" || item == "glow_ink_sac" {
+        return block.contains("sign");
+    }
+    if item.starts_with("music_disc_") {
+        return block.contains("jukebox");
+    }
+    match item {
+        "flint_and_steel" | "fire_charge" | "bone_meal" | "armor_stand" | "painting" | "item_frame" | "glow_item_frame" => return true,
+        "end_crystal" => return has(&["obsidian", "bedrock"]),
+        "lead" => return has(&["fence", "wall"]),
+        "ender_eye" => return block.contains("end_portal_frame"),
+        "honeycomb" => return has(&["copper", "sign"]),
+        "shears" => return has(&["pumpkin", "beehive", "bee_nest"]),
+        "brush" => return block.contains("suspicious"),
+        "lily_pad" | "frogspawn" => return false,
+        _ => {}
+    }
+    if item.ends_with("_spawn_egg") {
+        return true;
+    }
+    if block.contains("cauldron") && (item.ends_with("bucket") || item.ends_with("potion") || item == "glass_bottle") {
+        return true;
+    }
+    // A block item places itself (BlockItem.useOn).
+    block_item
+}
+
+/// InBedChatScreen's Leave Bed button: 200 wide, 40 above the bottom.
+fn leave_bed_button(gui: &Gui) -> screens::Button {
+    let key = "multiplayer.stopSleeping";
+    let t = crate::lang::get(key);
+    screens::Button::new(crate::math::floor((gui.width - 200.0) as f64 / 2.0) as f32, gui.height - 40.0, 200.0, if t == key { String::from("Leave Bed") } else { t })
+}
+
 /// Blocks a right click uses rather than letting the held item act (doors, containers...).
 fn interactive(block: &str) -> bool {
     ["door", "trapdoor", "gate", "button", "lever", "chest", "barrel", "furnace", "smoker", "crafting_table", "anvil",
@@ -179,6 +246,10 @@ pub struct App {
     shot_ingame: Option<u64>,
     /// PENRYN_TEST_INPUT: held keys for tests, e.g. "w" to walk forward.
     test_keys: String,
+    /// The in-bed screen (InBedChatScreen) is the chat screen with a Leave Bed button; after
+    /// leaving it stays closed until the server stands the player up.
+    in_bed: bool,
+    bed_left: bool,
     fps_at: u64,
     /// PENRYN_PERF: print the frame rate, the slowest frame and sound decoding time each second.
     perf: bool,
@@ -491,6 +562,8 @@ pub fn run(server: Option<String>, name: &str, account: Option<Account>, relay: 
         voice: crate::voicechat::client::Voice::new(),
         info_sent: false,
         own_in_water: false,
+        in_bed: false,
+        bed_left: false,
         mining: None,
         destroy_delay: 0,
         use_delay: 0,
@@ -1109,6 +1182,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let (mx, my) = self.mouse;
         match self.screen {
             Screen::Chat => {
+                if self.in_bed && leave_bed_button(gui).hit(mx, my) {
+                    self.leave_bed(g)?;
+                    self.set_screen(Screen::Play);
+                    return Ok(false);
+                }
                 let shift = self.keys[K_LSHIFT] || self.keys[K_RSHIFT];
                 if let crate::chatui::Act::Close = self.chat_ui.click(g, gui, mx, my, button, shift, &self.v)? {
                     self.set_screen(Screen::Play);
@@ -1213,7 +1291,28 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
     }
 
     /// E: the creative inventory in creative mode, else the survival one.
-    fn open_inventory(&mut self, g: &Game, key: char) {
+    fn open_inventory(&mut self, g: &mut Game, key: char) -> Result<(), String> {
+        // LocalPlayer.sendOpenInventory: riding something with an inventory screen, the server
+        // opens it (PlayerCommand OPEN_INVENTORY, action 5).
+        if self.ride_has_inventory(g) {
+            return g.command(5);
+        }
+        self.open_inventory_screen(g, key);
+        Ok(())
+    }
+
+    /// HasCustomInventoryScreen: horses and kin, camels, nautiluses, chest boats.
+    fn ride_has_inventory(&self, g: &Game) -> bool {
+        let (Some(t), Some(v)) = (self.entities.as_ref(), g.riding.vehicle_of.get(&g.entity_id)) else { return false };
+        let Some(e) = g.entities.get(v) else { return false };
+        let name = t.types.get(e.kind as usize).map_or("", |x| x.name.as_str());
+        name.ends_with("_chest_boat") || name.ends_with("_chest_raft") || name.ends_with("nautilus") || {
+            use crate::riding::Kind;
+            matches!(crate::riding::kind_of(name), Kind::Horse | Kind::Camel | Kind::Llama)
+        }
+    }
+
+    fn open_inventory_screen(&mut self, g: &Game, key: char) {
         if g.game_mode == 1 {
             if let Some(d) = self.gui.as_ref().and_then(|x| x.creative.as_ref()) {
                 self.creative.open(d, g, key);
@@ -1276,6 +1375,16 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         Ok(())
     }
 
+    /// InBedChatScreen.sendWakeUp: PlayerCommand STOP_SLEEPING (action 0), once.
+    fn leave_bed(&mut self, g: &mut Game) -> Result<(), String> {
+        if self.in_bed {
+            self.in_bed = false;
+            self.bed_left = true;
+            g.command(0)?;
+        }
+        Ok(())
+    }
+
     fn set_screen(&mut self, s: Screen) {
         if self.screen == Screen::Options && s != Screen::Options {
             self.menu.close();
@@ -1293,6 +1402,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         match self.screen {
             Screen::Chat => {
                 if let crate::chatui::Act::Close = self.chat_ui.key(g, sc, &self.keys, &self.v)? {
+                    self.leave_bed(g)?;
                     self.set_screen(Screen::Play);
                 }
             }
@@ -1398,7 +1508,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 self.set_screen(Screen::Chat);
                 self.skip_text = self.bound_char(B::Command).map(|c| (c, sys::now_ms()));
             }
-            B::Inventory => self.open_inventory(g, 'e'),
+            B::Inventory => self.open_inventory(g, 'e')?,
             B::Drop => {
                 if g.held().is_some() {
                     // Drop Selected Item; with Ctrl the whole stack (ServerboundPlayerActionPacket).
@@ -1622,10 +1732,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.creative_action(g, act)?;
         } else if self.screen == Screen::Inventory && !self.container_screen && g.game_mode == 1 && self.gui.as_ref().map_or(false, |x| x.creative.is_some()) {
             // InventoryScreen.containerTick: in creative it becomes the creative screen.
-            self.open_inventory(g, '\0');
+            self.open_inventory_screen(g, '\0');
         }
-        if self.test_keys.contains('I') && self.screen == Screen::Play && g.loaded_sent {
-            self.open_inventory(g, 'i');
+        if self.test_keys.contains('I') && self.screen == Screen::Play && g.loaded_sent && g.menus.ticks >= self.test_keys.split(',').find_map(|t| t.strip_prefix("rt=")).and_then(|v| v.parse().ok()).unwrap_or(0) {
+            self.open_inventory(g, 'i')?;
             if let Some(gui) = self.gui.as_ref() {
                 self.mouse = (gui.width / 2.0 - 52.0, gui.height / 2.0 + 60.0);
             }
@@ -1887,6 +1997,20 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             self.equip = (self.equip - 0.4).max(0.0);
         }
         g.player.on_ground = self.mover.on_ground;
+        // ---- the in-bed screen (Minecraft.tick opens it while the player sleeps)
+        if !g.sleeping {
+            self.bed_left = false;
+            if self.in_bed {
+                self.in_bed = false;
+                if self.screen == Screen::Chat {
+                    self.set_screen(Screen::Play);
+                }
+            }
+        } else if !self.in_bed && !self.bed_left && self.screen == Screen::Play {
+            self.chat_ui.open(g, "");
+            self.in_bed = true;
+            self.set_screen(Screen::Chat);
+        }
         // ---- hands
         if self.destroy_delay > 0 {
             self.destroy_delay -= 1;
@@ -1921,36 +2045,55 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 self.use_delay = 4;
             }
         }
-        let held_name = g.held().and_then(|(i, _)| g.blocks.items.get(i as usize)).cloned().unwrap_or_default();
         if self.right_down && play && self.use_delay == 0 && self.using.is_none() {
             self.use_delay = 4;
-            let usable = use_duration(&held_name);
-            // Minecraft.startUseItem: the block first (useItemOn), then the item (useItem)
-            // when the block does nothing with it.
-            let block_used = match hit {
-                Some(h) => {
+            let sneak = self.sneaking();
+            let bname = hit.map(|h| g.blocks.of_state(g.world.get(h.pos[0], h.pos[1], h.pos[2])).name.clone());
+            // Minecraft.startUseItem: each hand in turn, the main hand first. A hand tries the
+            // block (useItemOn) and, when that passes, the item (useItem); a hand whose action
+            // is consumed ends the loop, a pass goes on to the off hand.
+            for hand in 0..2 {
+                let stack = g.hand_item(hand);
+                let name = stack.and_then(|(i, _)| g.blocks.items.get(i as usize)).cloned().unwrap_or_default();
+                if let (Some(h), Some(bn)) = (hit, bname.as_deref()) {
                     let c = [
                         (h.point[0] - h.pos[0] as f64) as f32,
                         (h.point[1] - h.pos[1] as f64) as f32,
                         (h.point[2] - h.pos[2] as f64) as f32,
                     ];
-                    g.place(h.pos[0], h.pos[1], h.pos[2], h.face, c, false)?;
-                    let name = g.blocks.of_state(g.world.get(h.pos[0], h.pos[1], h.pos[2])).name.clone();
-                    (usable.is_none() && !crate::books::used_in_air(&held_name)) || interactive(&name)
+                    g.place_with(hand, h.pos[0], h.pos[1], h.pos[2], h.face, c, false)?;
+                    // The result the client predicts: the block's own use (skipped when sneaking
+                    // with something in hand), then what the item does to the block.
+                    let consumed = (!(sneak && stack.is_some()) && interactive(bn)) || (stack.is_some() && use_on_consumes(g.blocks.blocks.iter().any(|b| b.name == name), &name, bn));
+                    if consumed {
+                        g.punch()?;
+                        if name == "brush" {
+                            self.using = Some((0, 0));
+                        }
+                        break;
+                    }
                 }
-                None => false,
-            };
-            if block_used {
-                g.punch()?;
-            } else if g.game_mode != crate::gamemode::SPECTATOR {
-                g.use_item()?;
+                if stack.is_none() || g.game_mode == crate::gamemode::SPECTATOR {
+                    continue;
+                }
+                g.use_item_with(hand)?;
+                let usable = use_duration(&name);
                 if let Some(d) = usable {
                     self.using = Some((0, d));
                 }
                 // WritableBookItem.use: the client opens its own edit screen.
-                if let Some(b) = crate::books::open_edit(g) {
-                    self.book = Some(b);
-                    self.set_screen(Screen::Book);
+                if hand == 0 {
+                    if let Some(b) = crate::books::open_edit(g) {
+                        self.book = Some(b);
+                        self.set_screen(Screen::Book);
+                    }
+                }
+                if usable.is_some() {
+                    break;
+                }
+                if use_acts(&name) {
+                    g.punch()?;
+                    break;
                 }
             }
         }
@@ -2508,6 +2651,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         let show_chat = self.screen != Screen::Inventory && self.screen != Screen::Creative && self.screen != Screen::Dead && self.screen != Screen::Book;
         crate::chatui::draw(&mut gui, g, &mut self.chat_ui, self.screen == Screen::Chat, show_chat, partial as f32, self.mouse.0, self.mouse.1);
+        if self.in_bed && self.screen == Screen::Chat {
+            leave_bed_button(&gui).draw(&mut gui, self.mouse.0, self.mouse.1);
+        }
         // The player list while Tab is held (PENRYN_TEST_INPUT "P" holds it).
         if self.screen == Screen::Play && (self.held(B::PlayerList) || self.test_keys.contains('P')) {
             crate::serverhud::tab_list(&mut gui, &self.v.gl, g);
@@ -2729,4 +2875,24 @@ fn ray_box(o: [f64; 3], d: [f64; 3], lo: [f64; 3], hi: [f64; 3]) -> Option<(f64,
         return None;
     }
     Some((tmin.max(0.0), face))
+}
+
+/// Checks: the right click's predicted results (which hand-loop packets follow) and the
+/// mounts that have an inventory screen.
+pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
+    let mut v = Vec::new();
+    let yn = |b: bool| if b { "yes" } else { "no" };
+    // On the ground (a grass block): a bucket, a pearl and a sword do not act on it, so UseItem follows.
+    v.push(("water bucket on ground sends UseItem", yn(!use_on_consumes(false, "water_bucket", "grass_block")).into(), "yes"));
+    v.push(("ender pearl on ground sends UseItem", yn(!use_on_consumes(false, "ender_pearl", "stone")).into(), "yes"));
+    v.push(("snowball in air acts", yn(use_acts("snowball")).into(), "yes"));
+    v.push(("bucket in air acts", yn(use_acts("lava_bucket")).into(), "yes"));
+    v.push(("sword use passes to the off hand", yn(!use_acts("iron_sword")).into(), "yes"));
+    v.push(("shield blocks", yn(use_duration("shield") == Some(0)).into(), "yes"));
+    v.push(("block item places", yn(use_on_consumes(true, "torch", "stone")).into(), "yes"));
+    v.push(("axe on stone passes (shield follows)", yn(!use_on_consumes(false, "iron_axe", "stone")).into(), "yes"));
+    v.push(("axe on log acts", yn(use_on_consumes(false, "iron_axe", "oak_log")).into(), "yes"));
+    v.push(("door is interactive", yn(interactive("oak_door")).into(), "yes"));
+    v.push(("lily pad is used, not placed on a block", yn(!use_on_consumes(true, "lily_pad", "water")).into(), "yes"));
+    v
 }
