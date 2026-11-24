@@ -441,7 +441,7 @@ fn selftest() -> Result<(), String> {
     for (what, got, want) in textedit::selftest() {
         check(what, got, want);
     }
-    for (what, got, want) in display::selftest() {
+    for (what, got, want) in display::selftest().into_iter().chain(screens::selftest()) {
         check(what, got, want);
     }
     for (what, got, want) in update::selftest() {

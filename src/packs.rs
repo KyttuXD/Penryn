@@ -899,6 +899,7 @@ fn prompt_lines(gui: &Gui, p: &Prompt) -> (String, Vec<(String, u32)>) {
         None => line2.clone(),
     };
     let mut first = true;
+    let mut carry = screens::Carry::default();
     for para in text.split('\n') {
         // The required line 2 is yellow and bold (bold is drawn as plain here).
         let c = if first && para.starts_with(line2.split('\n').next().unwrap_or("")) { colour } else { WHITE };
@@ -907,7 +908,7 @@ fn prompt_lines(gui: &Gui, p: &Prompt) -> (String, Vec<(String, u32)>) {
             lines.push((String::new(), c));
             continue;
         }
-        for l in screens::wrap(gui, para, width) {
+        for l in screens::wrap_from(gui, para, width, &mut carry) {
             lines.push((l, c));
         }
     }

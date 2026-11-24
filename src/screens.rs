@@ -505,23 +505,118 @@ pub fn skin_of(uuid: &[u8; 16]) -> (&'static str, String) {
     }
 }
 
+/// The formatting state at some point of a legacy-coded text: the colour, the formats since
+/// it and the font, so a wrapped line (or the next paragraph) starts with the same look.
+#[derive(Default, Clone)]
+pub struct Carry {
+    colour: String,
+    formats: String,
+    font: String,
+}
+
+impl Carry {
+    /// The codes that restore this state after a line break.
+    fn prefix(&self) -> String {
+        format!("{}{}{}", self.colour, self.formats, self.font)
+    }
+    fn apply(&mut self, code: &str) {
+        let mut it = code.chars();
+        it.next();
+        match it.next() {
+            Some('r') | Some('R') => *self = Carry::default(),
+            Some('#') => {
+                self.colour = String::from(code);
+                self.formats.clear();
+            }
+            Some(d) if d.is_ascii_hexdigit() => {
+                self.colour = String::from(code);
+                self.formats.clear();
+            }
+            Some(d) if (0xF800..0xF900).contains(&(d as u32)) => self.font = String::from(code),
+            Some(d) if matches!(d.to_ascii_lowercase(), 'k' | 'l' | 'm' | 'n' | 'o') => {
+                if !self.formats.contains(code) {
+                    self.formats.push_str(code);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn scan(&mut self, text: &str) {
+        for t in tokens(text) {
+            if t.starts_with('\u{a7}') && t.chars().count() > 1 {
+                self.apply(&t);
+            }
+        }
+    }
+}
+
+/// A text's characters, each formatting code ("§c", "§#RRGGBB") as one token.
+fn tokens(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        let mut t = String::from(c);
+        if c == '\u{a7}' {
+            match it.next() {
+                Some('#') => {
+                    t.push('#');
+                    let mut rest = it.clone();
+                    for _ in 0..6 {
+                        match rest.next() {
+                            Some(h) if h.is_ascii_hexdigit() => {
+                                t.push(h);
+                                it.next();
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                Some(d) => t.push(d),
+                None => {}
+            }
+        }
+        out.push(t);
+    }
+    out
+}
+
 /// Splits `s` into lines no wider than `width` (at spaces when it can).
 pub fn wrap(gui: &Gui, s: &str, width: f32) -> Vec<String> {
+    wrap_from(gui, s, width, &mut Carry::default())
+}
+
+/// `wrap` for a text with newlines: each paragraph wrapped, the style going on across them.
+pub fn wrap_paras(gui: &Gui, s: &str, width: f32) -> Vec<String> {
+    let mut carry = Carry::default();
+    let mut out = Vec::new();
+    for part in s.split('\n') {
+        if part.is_empty() {
+            out.push(String::new());
+        } else {
+            out.extend(wrap_from(gui, part, width, &mut carry));
+        }
+    }
+    out
+}
+
+/// `wrap` starting in `carry`'s style and leaving it in the style the text ends in.
+pub fn wrap_from(gui: &Gui, s: &str, width: f32, carry: &mut Carry) -> Vec<String> {
     let mut out = Vec::new();
     let mut line = String::new();
-    for word in s.split(' ') {
+    let text = format!("{}{}", carry.prefix(), s);
+    for word in text.split(' ') {
         let candidate = if line.is_empty() { String::from(word) } else { format!("{} {}", line, word) };
         if gui.text_width(&candidate) <= width || line.is_empty() {
             if gui.text_width(&candidate) > width {
-                // One word longer than the line: cut it.
+                // One word longer than the line: cut it (never inside a formatting code).
                 let mut part = String::new();
-                for ch in candidate.chars() {
+                for tok in tokens(&candidate) {
                     let mut t = part.clone();
-                    t.push(ch);
+                    t.push_str(&tok);
                     if gui.text_width(&t) > width && !part.is_empty() {
                         out.push(core::mem::take(&mut part));
                     }
-                    part.push(ch);
+                    part.push_str(&tok);
                 }
                 line = part;
             } else {
@@ -535,24 +630,43 @@ pub fn wrap(gui: &Gui, s: &str, width: f32) -> Vec<String> {
     if !line.is_empty() {
         out.push(line);
     }
-    // A colour set on one line goes on into the next (vanilla keeps the style when it wraps).
-    let mut last = String::new();
-    for l in out.iter_mut() {
-        if !last.is_empty() {
-            l.insert_str(0, &last);
+    carry_style(&mut out, carry);
+    out
+}
+
+/// The style at the end of a line goes on into the next (vanilla keeps it when it wraps); `carry` ends as the style
+/// of the last line. The first line already starts in the style it was given.
+fn carry_style(out: &mut Vec<String>, carry: &mut Carry) {
+    let mut st = Carry::default();
+    for (i, l) in out.iter_mut().enumerate() {
+        let orig = l.clone();
+        if i > 0 {
+            let p = st.prefix();
+            l.insert_str(0, &p);
         }
-        let b: Vec<char> = l.chars().collect();
-        for i in 0..b.len() {
-            if b[i] == '\u{a7}' && i + 1 < b.len() {
-                last = if b[i + 1] == 'r' {
-                    String::new()
-                } else if b[i + 1] == '#' {
-                    b[i..(i + 8).min(b.len())].iter().collect()
-                } else {
-                    b[i..i + 2].iter().collect()
-                };
-            }
-        }
+        st.scan(&orig);
     }
+    if !out.is_empty() {
+        *carry = st;
+    }
+}
+
+pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
+    let mut out = Vec::new();
+    let mut c = Carry::default();
+    let mut lines = alloc::vec![String::from("\u{a7}r\u{a7}c\u{a7}lone"), String::from("two"), String::from("\u{a7}rthree"), String::from("four")];
+    carry_style(&mut lines, &mut c);
+    out.push(("wrap carries colour and format", lines.join("|"), "\u{a7}r\u{a7}c\u{a7}lone|\u{a7}c\u{a7}ltwo|\u{a7}c\u{a7}l\u{a7}rthree|four"));
+    out.push(("wrap carry ends reset", c.prefix(), ""));
+    // A colour after a format drops it; the next paragraph starts in the style the last ended in.
+    let mut c = Carry::default();
+    let mut a = alloc::vec![String::from("\u{a7}l\u{a7}a\u{a7}ox"), String::from("y")];
+    carry_style(&mut a, &mut c);
+    out.push(("wrap carry across paragraphs", c.prefix(), "\u{a7}a\u{a7}o"));
+    let mut b = alloc::vec![format!("{}z", c.prefix())];
+    carry_style(&mut b, &mut c);
+    out.push(("wrap carry second paragraph", b.join("|"), "\u{a7}a\u{a7}oz"));
+    let t = tokens("a\u{a7}c\u{a7}#00ff00b\u{a7}");
+    out.push(("wrap tokens keep codes whole", t.join("|"), "a|\u{a7}c|\u{a7}#00ff00|b|\u{a7}"));
     out
 }

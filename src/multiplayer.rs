@@ -892,7 +892,7 @@ impl Mp {
                     let s = &self.list.servers[i];
                     let e = &self.entries[i];
                     gui.text(&s.name, cx0 + 35.0, cy + 1.0, WHITE);
-                    let lines: Vec<String> = e.motd.split('\n').flat_map(|part| screens::wrap(gui, part, ROW_W - 4.0 - 34.0)).collect();
+                    let lines: Vec<String> = screens::wrap_paras(gui, &e.motd, ROW_W - 4.0 - 34.0);
                     for (k, l) in lines.iter().take(2).enumerate() {
                         gui.text(l, cx0 + 35.0, cy + 12.0 + 9.0 * k as f32, GREY);
                     }

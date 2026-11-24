@@ -253,6 +253,14 @@ pub fn text_italic(r: &mut In) -> String {
     text_under(r, &st)
 }
 
+/// A component's plain text, without formatting (vanilla's getString: the anvil's name field).
+pub fn text_plain(r: &mut In) -> String {
+    match crate::text::read_tag(r) {
+        Some(t) => crate::text::component(&t).string(),
+        None => String::new(),
+    }
+}
+
 fn text_under(r: &mut In, parent: &crate::text::Style) -> String {
     let Some(t) = crate::text::read_tag(r) else { return String::new() };
     let rich = crate::text::component(&t);
