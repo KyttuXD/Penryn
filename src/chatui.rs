@@ -115,6 +115,12 @@ impl Default for ChatUi {
     }
 }
 
+/// The text from `start` to `cursor`, empty when the caret is before the start (a late reply after the caret moved).
+fn typed_between(text: &str, start: usize, cursor: usize) -> &str {
+    let (a, b) = (char_floor(text, start), char_floor(text, cursor));
+    if a > b { "" } else { &text[a..b] }
+}
+
 fn char_floor(s: &str, mut i: usize) -> usize {
     i = i.min(s.len());
     while i > 0 && !s.is_char_boundary(i) {
@@ -166,6 +172,8 @@ impl ChatUi {
         }
         self.usage.clear();
         self.formatted.clear();
+        // Any edit or caret move voids a suggestion request still in flight.
+        self.waiting = None;
         let cursor = self.ed.cursor;
         let text = self.ed.text.clone();
         if text.starts_with('/') && g.talk.tree.is_some() {
@@ -442,7 +450,14 @@ impl ChatUi {
         }
         if self.dragging {
             let at = self.index_at(gui, mx);
+            let before = self.ed.cursor;
             self.ed.click(at, true);
+            if self.ed.cursor != before {
+                // The caret moved without edited(): what was suggested or asked for is for the old caret.
+                self.waiting = None;
+                self.pending.clear();
+                self.usage.clear();
+            }
         }
     }
 
@@ -574,7 +589,7 @@ impl ChatUi {
                 self.pending.push(Suggestion { text: s.text, tooltip: s.tooltip, start, end });
             }
         }
-        let typed = &self.ed.text[char_floor(&self.ed.text, start)..char_floor(&self.ed.text, self.ed.cursor)];
+        let typed = typed_between(&self.ed.text, start, self.ed.cursor);
         let mut texts: Vec<String> = self.pending.iter().map(|p| p.text.clone()).collect();
         crate::commands::sort_suggestions(&mut texts, typed);
         let mut sorted = Vec::new();
@@ -1087,5 +1102,7 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     out.push(("chat word select", String::from(c.ed.selected()), "h\u{e9}llo"));
     c.ed.insert("\u{a7}x\ny");
     out.push(("chat input filter", c.ed.text.clone(), "say xy w\u{f6}rld"));
+    out.push(("chat late suggestion, caret before start", String::from(typed_between("/tp Ste", 4, 0)), ""));
+    out.push(("chat late suggestion, normal", String::from(typed_between("/tp Ste", 4, 7)), "Ste"));
     out
 }

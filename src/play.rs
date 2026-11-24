@@ -1044,7 +1044,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 } else if self.screen == Screen::Options {
                     self.menu.drag_to(self.mouse.0);
                 } else if let (Screen::Inventory, Some(gui)) = (&self.screen, self.gui.as_ref()) {
-                    crate::menus::drag(gui, g, self.mouse.0, self.mouse.1);
+                    crate::menus::drag(gui, g, self.mouse.0, self.mouse.1, self.mouse_held[0]);
                 } else if let (Screen::Sign, Some(gui)) = (&self.screen, self.gui.as_ref()) {
                     crate::signs::drag(g, gui, self.mouse.0, self.mouse_held.first().copied().unwrap_or(false));
                 } else if let (Screen::Book, Some(gui), Some(b)) = (&self.screen, self.gui.as_ref(), self.book.as_mut()) {
@@ -2563,6 +2563,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             }
             Screen::Creative => {
                 if let Some(d) = gui.creative.take() {
+                    self.creative.hold(self.mouse_held[0]);
                     self.creative.draw(&d, &mut gui, g, mx, my);
                     gui.creative = Some(d);
                 }
