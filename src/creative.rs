@@ -784,6 +784,7 @@ impl Screen {
         }
         self.carried = None;
         self.scrolling = false;
+        self.search_drag = false;
         self.ignore_text = Some((key, crate::sys::now_ms()));
         let prev = self.tab;
         self.tab = usize::MAX;
@@ -1352,6 +1353,11 @@ impl Screen {
     /// The screen as vanilla draws it: unselected tabs, the background, search box, scroll bar,
     /// the selected tab, the player (inventory tab), slots, labels, the cursor's stack and the
     /// tooltip.
+    /// The left button's state each frame: a search drag needs it held.
+    pub fn hold(&mut self, held: bool) {
+        self.search_drag &= held;
+    }
+
     pub fn draw(&mut self, d: &Data, gui: &mut Gui, g: &Game, mx: f32, my: f32) {
         self.op_cached = Self::op(g);
         if self.scrolling {

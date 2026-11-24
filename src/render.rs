@@ -145,6 +145,8 @@ impl Renderer {
 
     /// Uploads atlas.bin (16x16 tiles) with mipmaps made per tile, so tiles never bleed.
     pub fn load_atlas(&mut self, gl: &Gl, d: &[u8]) -> Result<(), String> {
+        // Whatever fails below, no animation may write into a texture that is gone or into another atlas.
+        self.anim = Default::default();
         if d.get(..4) != Some(b"PNA2") || d.len() < 8 {
             return Err(String::from("atlas.bin is damaged"));
         }

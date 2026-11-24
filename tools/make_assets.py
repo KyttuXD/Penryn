@@ -38,7 +38,7 @@ blocks.bin (little-endian), "PNBD":
 kind: 0 air, 1 solid, 2 cutout, 3 plant (no collision), 4 water, 5 lava, 6 invisible solid
 
 atlas.bin: "PNA2", u16 width, u16 height, then width x height RGBA (16x16 tiles).
-animations.bin: "PNAM", see write_animations (the .mcmeta animations of the atlas' textures).
+animations.bin: "PNAS", see write_animations (the .mcmeta animations of the atlas' textures).
 items.bin: see the writer in main (the packs' item definitions, keyed by ns:path).
 """
 import json
@@ -479,6 +479,9 @@ def anim_frames(img, anim, k=1):
     fw, fh = min(fw, w), min(fh, h)
     cols, rows = max(1, w // fw), max(1, h // fh)
     count = cols * rows
+    if count > 65535:
+        print("animations.bin: a texture with %d frames is left still (more than 65535)" % count)
+        return None
     try:
         default = max(1, int(anim.get("frametime", 1)))
     except (TypeError, ValueError):
@@ -496,6 +499,9 @@ def anim_frames(img, anim, k=1):
                 continue
             if 0 <= idx < count:
                 seq.append((idx, min(t, 65535)))
+                if len(seq) > 65535:
+                    print("animations.bin: a frame list of more than 65535 entries is left still")
+                    return None
     else:
         seq = [(i, default) for i in range(count)]
     if len({i for i, _ in seq}) < 2:
@@ -644,9 +650,10 @@ def resample(frame, w, h):
     return bytes(out)
 
 
-def write_animations(out_dir, anim_list, tile_cell, hd_rects, width, height):
-    """animations.bin, "PNAM" (little-endian), the animated textures of atlas.bin: u16 atlas width, u16 atlas height,
-    u32 count, then per animation u16 x, y, w, h (its place in the atlas), u8 flags (1 interpolate), u16 frames, u16
+def write_animations(out_dir, anim_list, tile_cell, hd_rects, width, height, atlas_rgba=b""):
+    """animations.bin, "PNAS" (little-endian), the animated textures of atlas.bin: u16 atlas width, u16 atlas height,
+    u32 count, u32 stamp (the CRC-32 of atlas.bin's width x height RGBA pixels: the client only animates an atlas whose
+    stamp is the same, so files from different bakes never write frames over the wrong tiles), then per animation u16 x, y, w, h (its place in the atlas), u8 flags (1 interpolate), u16 frames, u16
     sequence length, the sequence as (u16 frame, u16 ticks), and every distinct frame as w x h RGBA (cut to the
     atlas region the way tile_of / hd_layout cut the first one). Always written (a pack stack's atlas without
     animations says so)."""
@@ -669,7 +676,7 @@ def write_animations(out_dir, anim_list, tile_cell, hd_rects, width, height):
             data = [resample(f, w, h) for f in frames]
         recs.append((x, y, w, h, interp, seq, data))
     with open(os.path.join(out_dir, "animations.bin"), "wb") as f:
-        f.write(b"PNAM" + struct.pack("<HHI", width, height, len(recs)))
+        f.write(b"PNAS" + struct.pack("<HHII", width, height, len(recs), zlib.crc32(bytes(atlas_rgba)) & 0xFFFFFFFF))
         for x, y, w, h, interp, seq, data in recs:
             f.write(struct.pack("<HHHHBHH", x, y, w, h, 1 if interp else 0, len(data), len(seq)))
             for fr, t in seq:
@@ -2156,7 +2163,7 @@ def main():
     with open(os.path.join(out_dir, "atlas.bin"), "wb") as f:
         f.write(b"PNA2" + struct.pack("<HH", width, height) + bytes(atlas))
     write_animations(out_dir, anim_list, tile_cell=lambda slot: ((slot % 64) * TILE, (slot // 64) * TILE),
-                     hd_rects=[(hx, hd_y0 + hy, hw, hh) for hx, hy, hw, hh, _ in hd_place[0]], width=width, height=height)
+                     hd_rects=[(hx, hd_y0 + hy, hw, hh) for hx, hy, hw, hh, _ in hd_place[0]], width=width, height=height, atlas_rgba=atlas)
     make_particles(assets, res, out_dir, particle_tiles, width, height)
 
     # ---- the GUI: vanilla's sprites, the font, the item icons

@@ -450,6 +450,7 @@ impl State {
         self.beacon_synced = (-1, -1);
         self.scroll = 0.0;
         self.dragging = false;
+        self.name_drag = false;
     }
 
     fn ids(&mut self, g_items: &[String]) -> Ids {
@@ -1741,7 +1742,13 @@ pub fn wheel(gui: &Gui, g: &mut Game, y: i32) {
 }
 
 /// The mouse moved with a button held: drags the scroll bar.
-pub fn drag(gui: &Gui, g: &mut Game, mx: f32, my: f32) {
+pub fn drag(gui: &Gui, g: &mut Game, mx: f32, my: f32, held: bool) {
+    if !held {
+        // The press was lost (the screen closed under the mouse): no button, no drag.
+        g.menus.name_drag = false;
+        g.menus.dragging = false;
+        return;
+    }
     if g.menus.name_drag {
         if let Some(win) = g.container.as_ref().and_then(|c| window(g, c)) {
             let (left, _) = screens::window_origin(gui, &win);
@@ -1913,7 +1920,7 @@ pub fn click(gui: &Gui, g: &mut Game, win: &Window, mx: f32, my: f32, button_no:
             let (sx, sy) = (left + 119.0, top + 9.0);
             if hit(mx, my, sx, sy, 12.0, if menu == LOOM { 56.0 } else { 54.0 }) && ((total + 3) / 4) > rows {
                 g.menus.dragging = true;
-                drag(gui, g, mx, my);
+                drag(gui, g, mx, my, true);
                 return Ok(true);
             }
         }
@@ -1936,7 +1943,7 @@ pub fn click(gui: &Gui, g: &mut Game, win: &Window, mx: f32, my: f32, button_no:
             }
             if n > 7 && hit(mx, my, left + 94.0, top + 18.0, 6.0, 139.0 + 1.0) {
                 g.menus.dragging = true;
-                drag(gui, g, mx, my);
+                drag(gui, g, mx, my, true);
                 return Ok(true);
             }
         }

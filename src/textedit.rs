@@ -1,7 +1,8 @@
 //! A text field's editing, shared by every box the player types in (chat, the anvil's name, the creative search, the
 //! sign and book editors, the multiplayer fields, the name screen): the cursor and a selection (shift with the arrows,
 //! Home and End, select all, a click or a drag, a double click for a word), Backspace and Delete by character or word,
-//! and the clipboard: copy and cut take the selection (the whole text when nothing is selected, as before), paste
+//! and the clipboard: copy takes the selection (the whole text when nothing is selected, a deliberate convenience kept from
+//! before selections existed), cut takes only a selection (as vanilla: with nothing selected it does nothing), paste
 //! replaces it. Pure logic over a `String` and byte offsets on character boundaries, so it is tested without a window.
 //!
 //! Keys are SDL scancodes. The "command" key is Control, and on macOS also Command (the GUI keys): `command(keys)`.
@@ -75,12 +76,21 @@ fn next_char(s: &str, i: usize) -> usize {
     s[i..].chars().next().map_or(s.len(), |c| i + c.len_utf8())
 }
 
+/// Whitespace (a line break in a multi-line field too, as Character.isWhitespace) ends / starts at `i`.
+fn ends_space(s: &str, i: usize) -> bool {
+    s[..i].chars().next_back().is_some_and(|c| c.is_whitespace())
+}
+
+fn starts_space(s: &str, i: usize) -> bool {
+    s[i..].chars().next().is_some_and(|c| c.is_whitespace())
+}
+
 /// StringUtil / EditBox.getWordPosition: the start of the word before `i` (skipping spaces, then the word).
 fn word_left(s: &str, mut i: usize) -> usize {
-    while i > 0 && s[..i].ends_with(' ') {
+    while i > 0 && ends_space(s, i) {
         i = prev_char(s, i);
     }
-    while i > 0 && !s[..i].ends_with(' ') {
+    while i > 0 && !ends_space(s, i) {
         i = prev_char(s, i);
     }
     i
@@ -88,10 +98,10 @@ fn word_left(s: &str, mut i: usize) -> usize {
 
 /// The end of the word after `i` (EditBox: the word, then the spaces after it).
 fn word_right(s: &str, mut i: usize) -> usize {
-    while i < s.len() && !s[i..].starts_with(' ') {
+    while i < s.len() && !starts_space(s, i) {
         i = next_char(s, i);
     }
-    while i < s.len() && s[i..].starts_with(' ') {
+    while i < s.len() && starts_space(s, i) {
         i = next_char(s, i);
     }
     i
@@ -256,11 +266,11 @@ impl Edit {
     pub fn select_word(&mut self, at: usize) {
         let at = floor(&self.text, at);
         let mut a = at;
-        while a > 0 && !self.text[..a].ends_with(' ') {
+        while a > 0 && !ends_space(&self.text, a) {
             a = prev_char(&self.text, a);
         }
         let mut b = at;
-        while b < self.text.len() && !self.text[b..].starts_with(' ') {
+        while b < self.text.len() && !starts_space(&self.text, b) {
             b = next_char(&self.text, b);
         }
         self.anchor = a;
@@ -276,15 +286,15 @@ impl Edit {
         }
     }
 
-    /// What cut puts on the clipboard; the selection (else everything) is removed.
-    pub fn cut(&mut self) -> String {
-        let s = self.copy();
-        if !self.delete_selection() {
-            self.text.clear();
-            self.cursor = 0;
-            self.anchor = 0;
+    /// What cut puts on the clipboard; the selection is removed. With nothing selected it is a no-op (as vanilla), so an
+    /// accidental Ctrl+X never wipes a page; None then (the clipboard stays as it was).
+    pub fn cut(&mut self) -> Option<String> {
+        if !self.has_selection() {
+            return None;
         }
-        s
+        let s = self.copy();
+        self.delete_selection();
+        Some(s)
     }
 
     /// An editing key: the arrows, Home, End, Backspace, Delete, and with the command key A, C, X and V. `clip` reads the
@@ -304,8 +314,9 @@ impl Edit {
                 put(&s);
             }
             SC_X if command => {
-                let s = self.cut();
-                put(&s);
+                if let Some(s) = self.cut() {
+                    put(&s);
+                }
             }
             SC_V if command => {
                 let s = clip();
@@ -373,6 +384,19 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
         e.anchor = e.cursor;
         e.copy()
     }, "alpha onetwoc"));
+    // Cut with nothing selected does nothing.
+    let mut e = Edit::new(64, Filter::Line);
+    e.set("keep me");
+    let mut put = String::from("untouched");
+    e.key(SC_X, true, false, &mut none, &mut |s| put = String::from(s));
+    out.push(("textedit cut with no selection is a no-op", alloc::format!("{} {}", e.text, put), "keep me untouched"));
+    // A line break separates words in a multi-line field.
+    let mut m = Edit::new(256, Filter::Multi);
+    m.set("hello\nworld");
+    out.push(("textedit word left stops at a line break", alloc::format!("{}", word_left(&m.text, m.text.len())), "6"));
+    out.push(("textedit word right stops after a line break", alloc::format!("{}", word_right(&m.text, 0)), "6"));
+    m.select_word(8);
+    out.push(("textedit double click stops at a line break", String::from(m.selected()), "world"));
     // A multi-line field keeps line breaks.
     let mut m = Edit::new(256, Filter::Multi);
     m.insert("a\r\nb\rc");

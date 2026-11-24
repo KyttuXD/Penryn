@@ -1,4 +1,4 @@
-//! Animated textures (animations.bin, "PNAM", made by make_assets.py from the .mcmeta animations):
+//! Animated textures (animations.bin, "PNAS", made by make_assets.py from the .mcmeta animations):
 //! every game tick each animation steps along its frame order, and once a frame the ones that
 //! changed are written into the atlas texture (glTexSubImage2D, like vanilla's
 //! TextureAtlasSprite.Ticker.tickAndUpload), mip levels 1 to 4 included, made with the same
@@ -14,7 +14,25 @@ use core::ffi::c_void;
 const MAX_PER_FRAME: usize = 48;
 /// ... and this many atlas pixels (an animation always gets through when it is the first of the frame).
 const MAX_PIXELS: usize = 262144;
-pub const MAGIC: &[u8; 4] = b"PNAM";
+pub const MAGIC: &[u8; 4] = b"PNAS";
+
+/// The CRC-32 (zlib's) of the atlas' pixels: the stamp the baker puts in animations.bin, so the file is only used with
+/// the atlas it was baked for (an older atlas.bin has other pixels, so its animations are none, never garbage).
+pub fn stamp(px: &[u8]) -> u32 {
+    let mut table = [0u32; 256];
+    for (i, t) in table.iter_mut().enumerate() {
+        let mut c = i as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 };
+        }
+        *t = c;
+    }
+    let mut c = !0u32;
+    for &b in px {
+        c = table[((c ^ b as u32) & 0xff) as usize] ^ (c >> 8);
+    }
+    !c
+}
 
 struct Item {
     x: usize,
@@ -96,7 +114,10 @@ impl Anim {
             return None;
         }
         let count = u32::from_le_bytes(d.get(8..12)?.try_into().ok()?) as usize;
-        let mut p = 12;
+        if u32::from_le_bytes(d.get(12..16)?.try_into().ok()?) != stamp(atlas.get(..w * h * 4)?) {
+            return None; // baked for another atlas.bin
+        }
+        let mut p = 16;
         let mut list = Vec::new();
         for _ in 0..count.min(100000) {
             let (x, y, iw, ih) = (u16_at(d, p)?, u16_at(d, p + 2)?, u16_at(d, p + 4)?, u16_at(d, p + 6)?);
@@ -273,11 +294,12 @@ fn put(v: &mut Vec<u8>, a: usize) {
 type Rect<'a> = (usize, usize, usize, usize, bool, &'a [(usize, usize)], &'a [u8]);
 
 /// A file of animations at (x, y, w, h), interpolate, the order (frame, ticks), and the colour of each frame.
-fn make_file(aw: usize, ah: usize, rects: &[Rect]) -> Vec<u8> {
+fn make_file(aw: usize, ah: usize, rects: &[Rect], atlas: &[u8]) -> Vec<u8> {
     let mut v = Vec::from(&MAGIC[..]);
     put(&mut v, aw);
     put(&mut v, ah);
     v.extend_from_slice(&(rects.len() as u32).to_le_bytes());
+    v.extend_from_slice(&stamp(atlas).to_le_bytes());
     for &(x, y, w, h, interp, seq, colors) in rects {
         for a in [x, y, w, h] {
             put(&mut v, a);
@@ -303,9 +325,13 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     let mut out = Vec::new();
     let (aw, ah) = (64usize, 64usize);
     let atlas = alloc::vec![7u8; aw * ah * 4];
-    let f = make_file(aw, ah, &[(16, 16, 16, 16, false, &[(0, 2), (1, 2)], &[10, 200]), (20, 17, 5, 3, false, &[(0, 1), (1, 3)], &[100, 50])]);
+    let f = make_file(aw, ah, &[(16, 16, 16, 16, false, &[(0, 2), (1, 2)], &[10, 200]), (20, 17, 5, 3, false, &[(0, 1), (1, 3)], &[100, 50])], &atlas);
     let mut a = Anim::parse(&f, &atlas, aw, ah);
     out.push(("anim parse", format!("{}", a.len()), "2"));
+    let mut other = atlas.clone();
+    other[100] ^= 1;
+    out.push(("anim other bake of the atlas", format!("{}", Anim::parse(&f, &other, aw, ah).len()), "0"));
+    out.push(("anim crc32", format!("{:08x}", stamp(b"123456789")), "cbf43926"));
     out.push(("anim damaged", format!("{}", Anim::parse(&f[..f.len() - 5], &atlas, aw, ah).len()), "0"));
     out.push(("anim other atlas", format!("{}", Anim::parse(&f, &atlas, 32, 64).len()), "0"));
     out.push(("anim nothing before the first tick", format!("{}", a.changes().len()), "0"));
@@ -329,7 +355,7 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     out.push(("anim idle", format!("{}", a.changes().len()), "0"));
     out.push(("anim halve", format!("{:?}", &halve(&[10, 20, 30, 255, 30, 40, 50, 255, 0, 0, 0, 0, 0, 0, 0, 0], 2, 2)[..4]), "[20, 30, 40, 127]"));
     // Interpolation: 0 -> 100 over 4 ticks.
-    let f = make_file(aw, ah, &[(0, 0, 16, 16, true, &[(0, 4), (1, 4)], &[0, 100])]);
+    let f = make_file(aw, ah, &[(0, 0, 16, 16, true, &[(0, 4), (1, 4)], &[0, 100])], &atlas);
     let mut a = Anim::parse(&f, &atlas, aw, ah);
     let mut seen = Vec::new();
     for _ in 0..8 {
@@ -340,7 +366,7 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     // Round robin: 60 animations, MAX_PER_FRAME a frame, the rest next frame.
     let rects: Vec<Rect> = (0..60).map(|i| ((i % 4) * 16, (i / 4) * 16 % 128, 16, 16, false, &[(0usize, 1usize), (1, 1)][..], &[1u8, 2][..])).collect();
     let big = alloc::vec![0u8; 128 * 128 * 4];
-    let f = make_file(128, 128, &rects);
+    let f = make_file(128, 128, &rects, &big);
     let mut a = Anim::parse(&f, &big, 128, 128);
     a.advance();
     let n1 = a.changes().len();
@@ -353,8 +379,9 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
         if at.len() > 8 && f.len() >= 12 {
             let (w, h) = (u16::from_le_bytes([at[4], at[5]]) as usize, u16::from_le_bytes([at[6], at[7]]) as usize);
             let want = u32::from_le_bytes([f[8], f[9], f[10], f[11]]) as usize;
+            let stamped = f.len() >= 16 && u32::from_le_bytes([f[12], f[13], f[14], f[15]]) == stamp(&at[8..]);
             let got = Anim::parse(&f, &at[8..], w, h).len();
-            out.push(("anim animations.bin parses", format!("{}", got == want && want > 0), "true"));
+            out.push(("anim animations.bin parses", format!("{}", !stamped || (got == want && want > 0)), "true"));
         }
     }
     out
