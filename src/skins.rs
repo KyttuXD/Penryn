@@ -497,6 +497,18 @@ fn skip_actions(r: &mut In, actions: u8) -> bool {
     ok().is_some()
 }
 
+/// A new level: the capes' motion state is by entity id, and ids start over.
+pub fn forget_entities() {
+    st().cloaks.clear();
+}
+
+/// A new listener: no player of the old session has a profile any more (the downloaded
+/// textures stay cached by hash).
+pub fn forget_profiles() {
+    st().profiles.clear();
+    st().cloaks.clear();
+}
+
 /// ClientboundPlayerInfoRemovePacket.
 pub fn player_remove(r: &mut In) {
     let n = r.varint().unwrap_or(0);

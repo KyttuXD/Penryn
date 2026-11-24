@@ -129,7 +129,7 @@ impl Entity {
             death_time: 0,
             villager: [0, 0, 1],
             variant: -1,
-            version: 0,
+            version: NEXT_VERSION.fetch_add(1 << 14, core::sync::atomic::Ordering::Relaxed),
             anim: crate::mobanim::Anim::new(),
         }
     }
@@ -377,6 +377,10 @@ pub struct Draw {
     /// Drawn on an invisible entity too (armour).
     pub worn: bool,
 }
+
+/// Each new entity starts its `version` far from every other's, so the looks cache (by entity
+/// id) cannot take a stale entry of a reused id for the new entity's own.
+static NEXT_VERSION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 pub struct EntityTable {
     tex: u32,
@@ -1363,7 +1367,18 @@ pub fn selftest() -> alloc::vec::Vec<(&'static str, alloc::string::String, &'sta
     for _ in 0..6 {
         s.tick();
     }
+    // A reused entity id must not match a stale looks-cache entry: versions differ.
+    let (va, vb) = (Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0).version, Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0).version);
+    // A respawn or reconfiguration drops every entity and riding link.
+    let mut table = alloc::collections::BTreeMap::new();
+    table.insert(7, Entity::new(0, [1; 16], [0.0; 3], 0.0, 0.0, 0.0));
+    let mut links = crate::riding::Links::default();
+    links.vehicle_of.insert(7, 8);
+    links.passengers.insert(8, alloc::vec![7]);
+    crate::client::clear_entities(&mut table, &mut links);
     alloc::vec![
+        ("entity versions differ", alloc::format!("{}", va != vb), "true"),
+        ("entities cleared", alloc::format!("{} {} {}", table.len(), links.vehicle_of.len(), links.passengers.len()), "0 0 0"),
         ("entity glides in equal steps", alloc::format!("{}", even), "true"),
         ("entity stops on its target", alloc::format!("{}", f.pos[0] == 1.0 && f.steps == 0), "true"),
         ("frame draws from the tick's start to its end", alloc::format!("{}", glided && (half - 0.25).abs() < 1e-6), "true"),
