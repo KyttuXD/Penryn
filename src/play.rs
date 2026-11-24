@@ -989,7 +989,12 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     }
                 }
                 if down && repeat && self.screen == Screen::Sign && sc != K_ESC {
-                    crate::signs::key(g, sc)?;
+                    if let Some(gui) = self.gui.as_ref().filter(|_| !matches!(sc, 4 | 6 | 25 | 27)) {
+                        crate::signs::key(g, gui, sc, &self.keys, &self.v)?;
+                    }
+                }
+                if down && repeat && self.screen == Screen::Book && matches!(sc, 40 | 76 | 79 | 80 | 81 | 82) {
+                    return self.key(g, sc);
                 }
                 if down && repeat && sc == K_BACKSPACE && (self.screen == Screen::Inventory || self.screen == Screen::Book) {
                     return self.key(g, sc);
@@ -1036,6 +1041,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     self.menu.drag_to(self.mouse.0);
                 } else if let (Screen::Inventory, Some(gui)) = (&self.screen, self.gui.as_ref()) {
                     crate::menus::drag(gui, g, self.mouse.0, self.mouse.1);
+                } else if let (Screen::Sign, Some(gui)) = (&self.screen, self.gui.as_ref()) {
+                    crate::signs::drag(g, gui, self.mouse.0, self.mouse_held.first().copied().unwrap_or(false));
+                } else if let (Screen::Book, Some(gui), Some(b)) = (&self.screen, self.gui.as_ref(), self.book.as_mut()) {
+                    crate::books::drag(gui, b, self.mouse.0, self.mouse.1, self.mouse_held.first().copied().unwrap_or(false));
                 }
             }
             sdl::EV_MOUSEDOWN | sdl::EV_MOUSEUP => {
@@ -1167,6 +1176,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     self.ui_click();
                     crate::signs::close(g)?;
                     self.set_screen(Screen::Play);
+                } else {
+                    crate::signs::click(g, gui, mx, my);
                 }
             }
             Screen::Book if button == 1 => {
@@ -1282,8 +1293,10 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
             }
             Screen::Sign => {
-                if crate::signs::key(g, sc)? {
-                    self.set_screen(Screen::Play);
+                if let Some(gui) = self.gui.as_ref() {
+                    if crate::signs::key(g, gui, sc, &self.keys, &self.v)? {
+                        self.set_screen(Screen::Play);
+                    }
                 }
             }
             Screen::Options => {
@@ -1304,8 +1317,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 _ => {}
             },
             Screen::Book => {
-                if let Some(b) = self.book.as_mut() {
-                    if crate::books::key(g, b, sc)? {
+                if let (Some(b), Some(gui)) = (self.book.as_mut(), self.gui.as_ref()) {
+                    if crate::books::key(g, gui, b, sc, &self.keys, &self.v)? {
                         self.book = None;
                         self.set_screen(Screen::Play);
                     }
