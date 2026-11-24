@@ -336,6 +336,16 @@ python3 tools/relay.py --build-assets ~/.local/share/penryn
 penryn --offline localhost:25565
 ```
 
+## High-resolution textures
+
+Textures larger than 16 px (a 32x or 64x pack's blocks, vanilla's 32 px shelves and signs, and above all ModelEngine's
+one 64 to 512 px sheet per model) keep their size: `make_assets.py` places them below the 16x16 tiles in the atlas
+(`atlas.bin` grows to 1024 x 2048..8192) and bakes the model faces that use them with their own UVs. The area is
+limited (7 million pixels): when a pack has more, the longer side of its big textures is cut by halves (never below 16),
+other packs' custom items first, then ModelEngine's models, vanilla last. Flat sprite icons (generated items) and
+particles still use one 16x16 tile each. A GPU whose largest texture is smaller than the atlas height cannot show a
+big pack.
+
 ## Display entities
 
 `block_display` and `item_display` entities are drawn with the transformation the server sends (translation, scale,

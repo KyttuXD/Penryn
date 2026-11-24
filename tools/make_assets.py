@@ -544,6 +544,73 @@ def tile_of(img):
     return bytes(out)
 
 
+HD_BUDGET = 7_000_000  # pixels of big textures in the atlas (1024 wide: about 8192 high at most)
+
+
+def hd_layout(hd_list, width):
+    """Shares out the atlas area to the big textures: ([(x, y, w, h, rgba)] by number, the height used). Each is cut to a
+    cap on its longer side (nearest); the caps start at 256 and go down by halves, for the namespaces that matter least
+    first (other packs' custom items, then ModelEngine's models, never below 16, and vanilla's own last), until the area
+    fits HD_BUDGET."""
+    def ns_of(path):
+        return path.split(":", 1)[0] if ":" in path else "minecraft"
+    spaces = sorted({ns_of(p) for p, *_ in hd_list})
+    caps = {ns: 256 for ns in spaces}
+
+    def size(w, h, cap):
+        m = max(w, h)
+        if m <= cap:
+            return w, h
+        return max(1, (w * cap + m // 2) // m), max(1, (h * cap + m // 2) // m)
+
+    def total():
+        return sum(size(w, h, caps[ns_of(p)])[0] * size(w, h, caps[ns_of(p)])[1] for p, w, h, _, _ in hd_list)
+
+    rank = {"minecraft": 2, "modelengine": 1}
+    while total() > HD_BUDGET:
+        cands = [ns for ns in spaces if caps[ns] > 16]
+        if not cands:
+            break
+        # the least important namespace, and of those the one holding the most area
+        low = min(rank.get(ns, 0) for ns in cands)
+        cands = [ns for ns in cands if rank.get(ns, 0) == low]
+        ns = max(cands, key=lambda n: sum(size(w, h, caps[n])[0] * size(w, h, caps[n])[1]
+                                          for p, w, h, _, _ in hd_list if ns_of(p) == n))
+        caps[ns] //= 2
+    sizes = [size(w, h, caps[ns_of(p)]) for p, w, h, _, _ in hd_list]
+    if os.environ.get("MAKE_ASSETS_HD_LIST"):
+        for (p, w, h, _, _), (tw, th) in zip(hd_list, sizes):
+            print("  big texture %s %dx%d -> %dx%d" % (p, w, h, tw, th))
+    print("big textures: %d, caps %s, %d pixels" % (len(hd_list), {n: c for n, c in caps.items() if c < 256} or "none", total()))
+    # Shelves, tallest first, the atlas wide.
+    order = sorted(range(len(hd_list)), key=lambda i: (-sizes[i][1], -sizes[i][0]))
+    placed = [None] * len(hd_list)
+    x = y = shelf = 0
+    for i in order:
+        w, h = sizes[i]
+        if x + w > width:
+            x, y, shelf = 0, y + shelf, 0
+        placed[i] = (x, y, w, h)
+        x += w
+        shelf = max(shelf, h)
+    used = y + shelf
+    out = []
+    for i, (px_, py_, w, h) in enumerate(placed):
+        _, sw, sh, spx, _ = hd_list[i]
+        if (w, h) == (sw, sh):
+            rgba = spx
+        else:
+            cols = [(xx * sw // w) * 4 for xx in range(w)]
+            rgba = bytearray()
+            for yy in range(h):
+                o = (yy * sh // h) * sw * 4
+                for c in cols:
+                    rgba += spx[o + c:o + c + 4]
+            rgba = bytes(rgba)
+        out.append((px_, py_, w, h, rgba))
+    return out, used
+
+
 # ------------------------------------------------------------------ blocks
 
 PLANT_CLASSES = {
@@ -1375,6 +1442,32 @@ def main():
         big[path] = (x, y, w, h, px)
         return big[path]
 
+    # Textures bigger than 16 px (a high-resolution pack's blocks, ModelEngine's models: one 64 to 512 px sheet a model)
+    # keep their size in the atlas, below the tiles: a model face that uses one is baked with a placeholder (flag 1 in the
+    # quad's spare byte, the texture's number in its spare int, u and v as fractions of the whole texture) and the
+    # placeholders are made real once every texture is known and the area is shared out (hd_layout).
+    hd_ids = {}    # path -> number
+    hd_list = []   # (path, w, h, rgba, alpha class)
+
+    def hd_texture(path):
+        """(number, alpha class) of a texture larger than 16 px in either direction, else None."""
+        if path in hd_ids:
+            i = hd_ids[path]
+            return i, hd_list[i][4]
+        if path in tile_index:
+            return None
+        img = assets.image(("textures/" + path + ".png"))
+        if img is None:
+            return None
+        w, h, px = img
+        if w <= TILE and h <= TILE:
+            return None
+        alphas = px[3::4]
+        cls = 2 if any(0 < a < 255 for a in alphas) else (1 if any(a == 0 for a in alphas) else 0)
+        hd_ids[path] = len(hd_list)
+        hd_list.append((path, w, h, px, cls))
+        return hd_ids[path], cls
+
     CHEST_TEX = {"chest": "normal", "trapped_chest": "trapped", "ender_chest": "ender"}
     for stage in ("", "exposed_", "weathered_", "oxidized_"):
         for wax in ("", "waxed_"):
@@ -1460,7 +1553,8 @@ def main():
                     path = resolve_tex(tex, face.get("texture"))
                     if not path:
                         continue
-                    ti, alpha = texture(path)
+                    hd = hd_texture(path)
+                    ti, alpha = (0, hd[1]) if hd else texture(path)
                     uv = face.get("uv") or default_uv(d, f, t)
                     corners = face_corners(d, f, t)
                     frot = (int(face.get("rotation", 0)) // 90) % 4
@@ -1491,12 +1585,18 @@ def main():
                     col, row = ti % 64, ti // 64
                     q = bytearray()
                     for p, u, v in verts:
-                        au = (col * TILE + max(0.0, min(16.0, u))) / (64 * TILE)
-                        # v in atlas pixels x16 for now: made a fraction once the height is known
-                        av16 = int(round((row * TILE + max(0.0, min(16.0, v))) * 16))
+                        if hd:
+                            # fractions of the whole texture; the atlas place is not known yet (hd_layout)
+                            au16 = int(round(max(0.0, min(16.0, u)) / 16 * 65535))
+                            av16 = int(round(max(0.0, min(16.0, v)) / 16 * 65535))
+                        else:
+                            au = (col * TILE + max(0.0, min(16.0, u))) / (64 * TILE)
+                            au16 = int(round(au * 65535))
+                            # v in atlas pixels x16 for now: made a fraction once the height is known
+                            av16 = min(65535, int(round((row * TILE + max(0.0, min(16.0, v))) * 16)))
                         q += struct.pack("<hhhHH", int(round(p[0] * 64)), int(round(p[1] * 64)),
-                                         int(round(p[2] * 64)), int(round(au * 65535)), min(65535, av16))
-                    q += struct.pack("<BBBBi", cull, flags, light, 0, 0)
+                                         int(round(p[2] * 64)), au16, av16)
+                    q += struct.pack("<BBBBi", cull, flags, light, 1 if hd else 0, hd[0] if hd else 0)
                     out.append(bytes(q))
         return out
 
@@ -1832,12 +1932,14 @@ def main():
         biome_rows.append(("minecraft:" + fn[:-5], (grass, foliage, water, sky)))
 
     particle_tiles = block_particle_tiles(names, states, assets, models, texture)
-    # ---- atlas: 64 tiles a row, height a power of two
+    # ---- atlas: 64 tiles a row, then the big textures, height a power of two
     rows = (len(tiles) + RESERVED + 63) // 64
-    height = 1
-    while height < rows * TILE:
-        height *= 2
     width = 64 * TILE
+    hd_place = hd_layout(hd_list, width)
+    hd_y0 = rows * TILE
+    height = 1
+    while height < hd_y0 + hd_place[1]:
+        height *= 2
     atlas = bytearray(width * height * 4)
     for i, t in enumerate(tiles):
         slot = i + RESERVED
@@ -1849,14 +1951,30 @@ def main():
         for y in range(bh_):
             o = ((by_ + y) * width + bx_) * 4
             atlas[o:o + bw_ * 4] = bpx[y * bw_ * 4:(y + 1) * bw_ * 4]
-    # v was stored in atlas pixels x16; make it a fraction of the height.
+    for i, (hx, hy, hw, hh, hpx) in enumerate(hd_place[0]):
+        for y in range(hh):
+            o = ((hd_y0 + hy + y) * width + hx) * 4
+            atlas[o:o + hw * 4] = hpx[y * hw * 4:(y + 1) * hw * 4]
+    # v was stored in atlas pixels x16; make it a fraction of the height. A big texture's face holds fractions of the
+    # texture: now its place in the atlas.
     fixed = []
     for q in quads:
         q = bytearray(q)
-        for k in range(4):
-            o = k * 10 + 8
-            px16 = struct.unpack("<H", q[o:o + 2])[0]
-            q[o:o + 2] = struct.pack("<H", min(65535, int(round(px16 / 16 / height * 65535))))
+        if q[43] == 1:
+            hx, hy, hw, hh, _ = hd_place[0][struct.unpack("<i", q[44:48])[0]]
+            for k in range(4):
+                o = k * 10 + 6
+                fu, fv = struct.unpack("<HH", q[o:o + 4])
+                au = (hx + fu / 65535 * hw) / width
+                av = (hd_y0 + hy + fv / 65535 * hh) / height
+                q[o:o + 4] = struct.pack("<HH", min(65535, int(round(au * 65535))), min(65535, int(round(av * 65535))))
+            q[43] = 0
+            q[44:48] = b"\0\0\0\0"
+        else:
+            for k in range(4):
+                o = k * 10 + 8
+                px16 = struct.unpack("<H", q[o:o + 2])[0]
+                q[o:o + 2] = struct.pack("<H", min(65535, int(round(px16 / 16 / height * 65535))))
         fixed.append(bytes(q))
     quads = fixed
 
