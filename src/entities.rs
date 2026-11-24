@@ -63,6 +63,8 @@ pub struct Entity {
     pub equipment: [Option<(i32, i32)>; 8],
     /// DATA_CUSTOM_NAME, as plain text.
     pub custom_name: Option<String>,
+    /// A text display's text (Display.TextDisplay.DATA_TEXT_ID), styled (display.rs).
+    pub disp_text: Option<crate::text::Rich>,
     /// DATA_HEALTH_ID once the server sends it (a full-health mob's is never sent).
     pub health: Option<f32>,
     /// LivingEntity.deathTime: ticks since its health reached 0.
@@ -125,6 +127,7 @@ impl Entity {
             disp_dur: 0,
             equipment: [None; 8],
             custom_name: None,
+            disp_text: None,
             health: None,
             death_time: 0,
             villager: [0, 0, 1],

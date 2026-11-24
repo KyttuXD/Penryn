@@ -1545,6 +1545,10 @@ pub(crate) fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option
             }
             3 => {
                 let v = f32::from_bits(r.i32()? as u32);
+                // Display.DATA_VIEW_RANGE_ID (display.rs reads it back as bits).
+                if index == 17 {
+                    e.data.insert(index, v.to_bits() as i64);
+                }
                 // LivingEntity.DATA_HEALTH_ID.
                 if index == 9 && e.item.is_none() {
                     e.health = Some(v);
@@ -1553,7 +1557,14 @@ pub(crate) fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option
             4 => {
                 r.string()?;
             }
-            5 => nbt::skip_root(r)?,
+            5 => {
+                // Display.TextDisplay.DATA_TEXT_ID: kept, styled (display.rs).
+                let start = r.pos;
+                nbt::skip_root(r)?;
+                if index == 23 {
+                    e.disp_text = Some(crate::text::read(&mut crate::wire::In::new(&r.b[start..r.pos])));
+                }
+            }
             6 => {
                 // Entity.DATA_CUSTOM_NAME.
                 let name = if r.bool()? { Some(nbt::text(r)) } else { None };
