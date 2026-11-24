@@ -100,6 +100,8 @@ pub struct Game {
     /// abilities' flying speed.
     pub move_speed: f64,
     pub jump_strength: f64,
+    /// The mining attributes: mining_efficiency (0), block_break_speed (1), submerged_mining_speed (0.2).
+    pub mining_attrs: [f64; 3],
     pub fly_speed: f32,
     /// The rain and thunder levels (ClientboundGameEventPacket 1, 2, 7 and 8).
     pub rain_level: f32,
@@ -422,6 +424,7 @@ impl Game {
             placing: None,
             move_speed: 0.1f32 as f64,
             jump_strength: 0.42f32 as f64,
+            mining_attrs: [0.0, 1.0, 0.2],
             fly_speed: 0.05,
             rain_level: 0.0,
             thunder_level: 0.0,
@@ -696,6 +699,9 @@ impl Game {
                         match attr {
                             26 => self.move_speed = v.clamp(0.0, 1024.0),
                             19 => self.jump_strength = v.clamp(0.0, 32.0),
+                            24 => self.mining_attrs[0] = v.clamp(0.0, 1024.0),
+                            7 => self.mining_attrs[1] = v.clamp(0.0, 1024.0),
+                            34 => self.mining_attrs[2] = v.clamp(0.0, 20.0),
                             1 => self.armor = v.clamp(0.0, 30.0),
                             23 => self.max_health = v.clamp(1.0, 1024.0),
                             _ => {}
