@@ -7,6 +7,7 @@ use crate::gui::Gui;
 use crate::lang;
 use crate::math::FloorExt;
 use crate::screens::{self, Button};
+use crate::textedit::{self, Filter, Edit as TEdit};
 use crate::wire::{In, Out};
 use alloc::format;
 use alloc::string::String;
@@ -18,6 +19,7 @@ pub const S_EDIT_BOOK: i32 = 24;
 const BLACK: u32 = 0xFF00_0000;
 const PAGE_W: f32 = 114.0;
 const PAGE_LINES: usize = 14;
+const PAGE_CHARS: usize = 1024;
 
 pub struct Book {
     pub pages: Vec<String>,
@@ -32,6 +34,13 @@ pub struct Edit {
     pub signing: bool,
     pub title: String,
     pub changed: bool,
+    /// The page being written as a text field (cursor, selection; `ed_page` is the page it holds), the title likewise.
+    pub ed: TEdit,
+    pub ed_page: usize,
+    pub ted: TEdit,
+    /// A mouse drag is going on: 1 in the page, 2 in the title. The time and place of the last click (a double click).
+    pub drag: u8,
+    pub last_click: (u64, usize),
 }
 
 /// WritableBookContent: pages of raw text (each a Filterable string).
@@ -96,7 +105,7 @@ pub fn open_edit(g: &Game) -> Option<Book> {
     if pages.is_empty() {
         pages.push(String::new());
     }
-    Some(Book { pages, page: 0, edit: Some(Edit { slot: g.selected, signing: false, title: String::new(), changed: false }) })
+    Some(Book { pages, page: 0, edit: Some(Edit { slot: g.selected, signing: false, title: String::new(), changed: false, ed: TEdit::new(PAGE_CHARS, Filter::Multi), ed_page: usize::MAX, ted: TEdit::new(15, Filter::Line), drag: 0, last_click: (0, usize::MAX) }) })
 }
 
 /// Items a right click opens even when it hits a block (they have no block use).
@@ -115,6 +124,113 @@ fn lines(gui: &Gui, text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// The byte range of each line `lines` shows, in the page's text (the wrapped lines are pieces of it, a space where
+/// they were split is not in either).
+fn spans(gui: &Gui, text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut off = 0;
+    for part in text.split('\n') {
+        if part.is_empty() {
+            out.push((off, off));
+        } else {
+            let mut pos = 0;
+            for l in screens::wrap(gui, part, PAGE_W) {
+                match part[pos..].find(l.as_str()) {
+                    Some(i) => {
+                        out.push((off + pos + i, off + pos + i + l.len()));
+                        pos += i + l.len();
+                    }
+                    None => out.push((off + pos, off + pos)),
+                }
+            }
+        }
+        off += part.len() + 1;
+    }
+    out
+}
+
+/// The line the caret at byte `c` is on.
+fn caret_line(sp: &[(usize, usize)], c: usize) -> usize {
+    sp.iter().rposition(|s| s.0 <= c).unwrap_or(0)
+}
+
+/// The caret a line up (`dir` -1) or down (1) from `c`, at the same x; None on the first or last line.
+fn vertical(text: &str, sp: &[(usize, usize)], c: usize, dir: i32, width: &dyn Fn(&str) -> f32) -> Option<usize> {
+    let i = caret_line(sp, c);
+    let (s, e) = *sp.get(i)?;
+    let x = width(&text[s..c.clamp(s, e)]);
+    let j = if dir < 0 { i.checked_sub(1)? } else { i + 1 };
+    let (s2, e2) = *sp.get(j)?;
+    Some(s2 + textedit::index_at(&text[s2..e2], x, width))
+}
+
+/// Types or pastes into the page: what is allowed (the Edit's limit of 1024, its filter), and as much of it as keeps the
+/// page within its lines (`fits` says whether a page text does); the rest is dropped, the selection is replaced.
+fn insert_fit(e: &mut TEdit, s: &str, fits: &dyn Fn(&str) -> bool) {
+    let clean: Vec<char> = e.clean(&s.replace("\r\n", "\n").replace('\r', "\n")).chars().take(PAGE_CHARS).collect();
+    let try_n = |e: &TEdit, n: usize| -> Option<TEdit> {
+        let mut t = TEdit::new(e.max, e.filter);
+        t.text = e.text.clone();
+        t.cursor = e.cursor;
+        t.anchor = e.anchor;
+        let part: String = clean[..n].iter().collect();
+        t.insert(&part);
+        if fits(&t.text) {
+            Some(t)
+        } else {
+            None
+        }
+    };
+    if clean.is_empty() {
+        return;
+    }
+    if let Some(t) = try_n(e, clean.len()) {
+        *e = t;
+        return;
+    }
+    // The longest prefix that fits (more text never needs fewer lines).
+    let (mut lo, mut hi) = (0, clean.len());
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        if try_n(e, mid).is_some() {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo > 0 {
+        if let Some(t) = try_n(e, lo) {
+            *e = t;
+        }
+    }
+}
+
+/// The page's field holds the current page's text (a page turned to starts with the caret at its end).
+fn sync(b: &mut Book) {
+    let Some(e) = b.edit.as_mut() else { return };
+    let Some(page) = b.pages.get(b.page) else { return };
+    if e.ed_page != b.page || e.ed.text != *page {
+        e.ed.set(page);
+        e.ed_page = b.page;
+    }
+    if e.ted.text != e.title {
+        e.ted.set(&e.title);
+    }
+}
+
+/// The field's text back into the page (and the title).
+fn commit(b: &mut Book) {
+    let Some(e) = b.edit.as_mut() else { return };
+    if e.signing {
+        e.title = e.ted.text.clone();
+    } else if let Some(p) = b.pages.get_mut(b.page) {
+        if *p != e.ed.text {
+            *p = e.ed.text.clone();
+            e.changed = true;
+        }
+    }
 }
 
 fn left(gui: &Gui) -> f32 {
@@ -148,7 +264,8 @@ fn page_hit(gui: &Gui, page: usize, pages: usize, can_add: bool, mx: f32, my: f3
 }
 
 /// The book's background, page number and text.
-fn draw_book(gui: &mut Gui, pages: &[String], page: usize, cursor: bool, dim: bool) {
+/// `caret`: the editor's cursor, anchor (byte offsets in the page) and whether the caret is lit.
+fn draw_book(gui: &mut Gui, pages: &[String], page: usize, caret: Option<(usize, usize, bool)>, dim: bool) {
     let i = left(gui);
     if dim {
         screens::dim(gui);
@@ -161,17 +278,33 @@ fn draw_book(gui: &mut Gui, pages: &[String], page: usize, cursor: bool, dim: bo
     gui.text_plain(&ind, i - w + 192.0 - 44.0, 18.0, BLACK);
     let text = pages.get(page).map(|s| s.as_str()).unwrap_or("");
     let ls = lines(gui, text);
+    let sp = spans(gui, text);
+    if let Some((c, an, _)) = caret {
+        let (c, an) = (c.min(text.len()), an.min(text.len()));
+        // The selection: a light blue band behind each line's selected part.
+        let (sa, sb) = (c.min(an), c.max(an));
+        for (k, &(s, e)) in sp.iter().take(PAGE_LINES).enumerate() {
+            let (a, b) = (sa.max(s), sb.min(e));
+            if a < b {
+                let y = 32.0 + k as f32 * 9.0;
+                gui.fill(i + 36.0 + gui.text_width(&text[s..a]), y - 1.0, i + 36.0 + gui.text_width(&text[s..b]), y + 9.0, 0xFF99_CCFF);
+            }
+        }
+    }
     for (k, l) in ls.iter().take(PAGE_LINES).enumerate() {
         gui.text_plain(l, i + 36.0, 32.0 + k as f32 * 9.0, BLACK);
     }
-    if cursor {
-        let k = ls.len().saturating_sub(1).min(PAGE_LINES - 1);
-        let x = ls.last().map_or(0.0, |l| gui.text_width(l));
+    if let Some((c, _, true)) = caret {
+        let c = c.min(text.len());
+        let k = caret_line(&sp, c).min(PAGE_LINES - 1);
+        let (s, e) = sp.get(k).copied().unwrap_or((0, 0));
+        let hi = if c >= text.len() { text.len().max(s) } else { c.clamp(s, e) };
+        let x = gui.text_width(&text[s..hi]);
         let y = 32.0 + k as f32 * 9.0;
-        if text.ends_with('\n') {
-            gui.text_plain("_", i + 36.0, y + 9.0, BLACK);
-        } else {
+        if c >= text.len() {
             gui.text_plain("_", i + 36.0 + x, y, BLACK);
+        } else {
+            gui.fill(i + 36.0 + x, y - 1.0, i + 36.0 + x + 1.0, y + 9.0, BLACK);
         }
     }
 }
@@ -203,11 +336,21 @@ pub fn draw(gui: &mut Gui, b: &Book, mx: f32, my: f32, blink: bool) {
         let head = lang::get("book.editTitle");
         let cx = i + 96.0;
         gui.text_plain(&head, cx - gui.text_width(&head) / 2.0, 34.0, BLACK);
-        let mut t = e.title.clone();
-        if blink {
-            t.push('_');
+        let tx = cx - gui.text_width(&e.title) / 2.0;
+        let (c, an) = if e.ted.text == e.title { (e.ted.cursor, e.ted.anchor) } else { (e.title.len(), e.title.len()) };
+        if c != an {
+            let (a, b) = (c.min(an), c.max(an));
+            gui.fill(tx + gui.text_width(&e.title[..a]), 49.0, tx + gui.text_width(&e.title[..b]), 59.0, 0xFF99_CCFF);
         }
-        gui.text_plain(&t, cx - gui.text_width(&e.title) / 2.0, 50.0, BLACK);
+        gui.text_plain(&e.title, tx, 50.0, BLACK);
+        if blink {
+            if c >= e.title.len() {
+                gui.text_plain("_", tx + gui.text_width(&e.title), 50.0, BLACK);
+            } else {
+                let x = tx + gui.text_width(&e.title[..c]);
+                gui.fill(x, 49.0, x + 1.0, 59.0, BLACK);
+            }
+        }
         let by = lang::format("book.byAuthor", &[String::new()]);
         gui.text_plain(&by, cx - gui.text_width(&by) / 2.0, 60.0, 0xFF80_8080);
         for (k, l) in screens::wrap(gui, &lang::get("book.finalizeWarning"), PAGE_W).iter().enumerate() {
@@ -218,7 +361,8 @@ pub fn draw(gui: &mut Gui, b: &Book, mx: f32, my: f32, blink: bool) {
         }
         return;
     }
-    draw_book(gui, &b.pages, b.page, b.edit.is_some() && blink, true);
+    let caret = b.edit.as_ref().map(|e| if e.ed_page == b.page { (e.ed.cursor, e.ed.anchor, blink) } else { (usize::MAX, usize::MAX, blink) });
+    draw_book(gui, &b.pages, b.page, caret, true);
     draw_page_buttons(gui, b.page, b.pages.len(), b.edit.is_some() && b.pages.len() < 100, mx, my);
     for bt in buttons(gui, b.edit.is_some()).iter().filter(|b| b.w > 0.0) {
         bt.draw(gui, mx, my);
@@ -309,7 +453,12 @@ pub fn click(gui: &Gui, g: &mut Game, b: &mut Book, mx: f32, my: f32) -> Result<
         if bs[1].hit(mx, my) {
             ui_click(g);
             e.signing = false;
+        } else {
+            click_text(gui, b, mx, my);
         }
+        return Ok(false);
+    }
+    if click_text(gui, b, mx, my) {
         return Ok(false);
     }
     if let Some(fwd) = page_hit(gui, b.page, b.pages.len(), b.edit.is_some() && b.pages.len() < 100, mx, my) {
@@ -333,13 +482,15 @@ pub fn click(gui: &Gui, g: &mut Game, b: &mut Book, mx: f32, my: f32) -> Result<
     Ok(false)
 }
 
-/// A key; true when the book closes (Escape saves first, as vanilla's onClose).
-pub fn key(g: &mut Game, b: &mut Book, sc: usize) -> Result<bool, String> {
+/// A key; true when the book closes (Escape saves first, as vanilla's onClose). `keys` are the held keys (the command
+/// key, shift), `v` the clipboard.
+pub fn key(g: &mut Game, gui: &Gui, b: &mut Book, sc: usize, keys: &[bool], v: &crate::sdl::Video) -> Result<bool, String> {
     const K_RETURN: usize = 40;
     const K_ESC: usize = 41;
-    const K_BACKSPACE: usize = 42;
     const K_PAGE_UP: usize = 75;
     const K_PAGE_DOWN: usize = 78;
+    const K_DOWN: usize = 81;
+    const K_UP: usize = 82;
     if sc == K_ESC {
         if let Some(e) = b.edit.as_mut().filter(|e| e.signing) {
             e.signing = false;
@@ -353,53 +504,124 @@ pub fn key(g: &mut Game, b: &mut Book, sc: usize) -> Result<bool, String> {
         K_PAGE_DOWN => turn(g, b, true),
         _ => {}
     }
+    sync(b);
+    let (command, shift) = (textedit::command(keys), textedit::shift(keys));
     let Some(e) = b.edit.as_mut() else { return Ok(false) };
     if e.signing {
-        if sc == K_BACKSPACE {
-            e.title.pop();
-        } else if sc == K_RETURN && !e.title.trim().is_empty() {
+        if sc == K_RETURN && !e.title.trim().is_empty() {
             save(g, b, true)?;
             return Ok(true);
         }
+        e.ted.key(sc, command, shift, &mut || v.clipboard(), &mut |s| v.set_clipboard(s));
+        commit(b);
         return Ok(false);
     }
-    let page = &mut b.pages[b.page];
+    let width = |t: &str| gui.text_width(t);
+    let fits = |t: &str| lines(gui, t).len() <= PAGE_LINES;
+    let text = e.ed.text.clone();
+    let c = e.ed.cursor;
     match sc {
-        K_BACKSPACE => {
-            if page.pop().is_some() {
-                e.changed = true;
+        K_RETURN => insert_fit(&mut e.ed, "\n", &fits),
+        K_UP | K_DOWN => {
+            let sp = spans(gui, &text);
+            if let Some(to) = vertical(&text, &sp, c, if sc == K_UP { -1 } else { 1 }, &width) {
+                e.ed.click(to, shift);
             }
         }
-        K_RETURN => {
-            page.push('\n');
-            e.changed = true;
+        textedit::SC_HOME | textedit::SC_END => {
+            let sp = spans(gui, &text);
+            let (s0, e0) = sp.get(caret_line(&sp, c)).copied().unwrap_or((0, 0));
+            let to = match (sc == textedit::SC_HOME, command) {
+                (true, true) => 0,
+                (false, true) => text.len(),
+                (true, false) => s0,
+                (false, false) => e0,
+            };
+            e.ed.click(to, shift);
         }
-        _ => {}
+        textedit::SC_V if command => insert_fit(&mut e.ed, &v.clipboard(), &fits),
+        _ => {
+            e.ed.key(sc, command, shift, &mut || String::new(), &mut |s| v.set_clipboard(s));
+        }
     }
+    commit(b);
     Ok(false)
 }
 
-/// Typed text: into the title while signing (15 characters, BookSignScreen's box), else the page, while it still
-/// fits on the page (1024 characters, 14 lines).
+/// Typed text: into the title while signing (15 characters, BookSignScreen's box), else the page, as much as still fits
+/// on the page (1024 characters, 14 lines).
 pub fn text(gui: &Gui, b: &mut Book, s: &str) {
+    sync(b);
     let Some(e) = b.edit.as_mut() else { return };
-    for ch in s.chars().filter(|c| *c >= ' ' && *c != '\u{a7}' && *c != '\u{7f}') {
-        if e.signing {
-            if e.title.chars().count() < 15 {
-                e.title.push(ch);
+    if e.signing {
+        e.ted.insert(s);
+    } else {
+        insert_fit(&mut e.ed, s, &|t: &str| lines(gui, t).len() <= PAGE_LINES);
+    }
+    commit(b);
+}
+
+/// The caret in the page for a mouse position (GUI units): the nearest character boundary of the line there.
+fn page_caret(gui: &Gui, text: &str, mx: f32, my: f32) -> Option<usize> {
+    let sp = spans(gui, text);
+    let k = (((my - 32.0) / 9.0).floor().max(0.0) as usize).min(sp.len().checked_sub(1)?).min(PAGE_LINES - 1);
+    let (s, e) = sp[k];
+    Some(s + textedit::index_at(&text[s..e], mx - (left(gui) + 36.0), &|t: &str| gui.text_width(t)))
+}
+
+/// The caret in the title for a mouse x.
+fn title_caret(gui: &Gui, title: &str, mx: f32) -> usize {
+    let tx = left(gui) + 96.0 - gui.text_width(title) / 2.0;
+    textedit::index_at(title, mx - tx, &|t: &str| gui.text_width(t))
+}
+
+/// A left click on the page text or the title: the caret goes to the nearest character boundary, a double click
+/// selects the word, and a drag selects on (`drag`). True when it hit the text.
+fn click_text(gui: &Gui, b: &mut Book, mx: f32, my: f32) -> bool {
+    sync(b);
+    let page = b.page;
+    let Some(e) = b.edit.as_mut() else { return false };
+    let i = left(gui);
+    let (area, which) = if e.signing {
+        (mx >= i + 20.0 && mx < i + 172.0 && my >= 47.0 && my < 60.0, 2)
+    } else {
+        (mx >= i + 36.0 && mx < i + 36.0 + PAGE_W && my >= 32.0 && my < 32.0 + PAGE_LINES as f32 * 9.0, 1)
+    };
+    if !area {
+        return false;
+    }
+    let now = crate::sys::now_ms();
+    let double = e.last_click.1 == which + page * 4 && now < e.last_click.0 + 400;
+    let field = if which == 2 { &mut e.ted } else { &mut e.ed };
+    let at = if which == 2 { title_caret(gui, &field.text, mx) } else { page_caret(gui, &field.text, mx, my).unwrap_or(field.text.len()) };
+    if double {
+        field.select_word(at);
+        e.last_click = (0, usize::MAX);
+    } else {
+        field.click(at, false);
+        e.last_click = (now, which + page * 4);
+    }
+    e.drag = which as u8;
+    true
+}
+
+/// The mouse moved with the left button `held`: a drag that began in the text selects on.
+pub fn drag(gui: &Gui, b: &mut Book, mx: f32, my: f32, held: bool) {
+    let Some(e) = b.edit.as_mut() else { return };
+    if !held {
+        e.drag = 0;
+    }
+    match e.drag {
+        1 => {
+            if let Some(at) = page_caret(gui, &e.ed.text, mx, my) {
+                e.ed.click(at, true);
             }
-            continue;
         }
-        let page = &mut b.pages[b.page];
-        if page.chars().count() >= 1024 {
-            break;
+        2 => {
+            let at = title_caret(gui, &e.ted.text, mx);
+            e.ted.click(at, true);
         }
-        page.push(ch);
-        if lines(gui, page).len() > PAGE_LINES {
-            page.pop();
-            break;
-        }
-        e.changed = true;
+        _ => {}
     }
 }
 
@@ -421,7 +643,7 @@ fn lectern_buttons(gui: &Gui, g: &Game) -> [Button; 2] {
 pub fn draw_lectern(gui: &mut Gui, g: &Game, c: &Container, mx: f32, my: f32) {
     let pages = lectern_pages(c);
     let page = (g.menus.data[0].max(0) as usize).min(pages.len().saturating_sub(1));
-    draw_book(gui, &pages, page, false, false);
+    draw_book(gui, &pages, page, None, false);
     draw_page_buttons(gui, page, pages.len(), false, mx, my);
     for b in lectern_buttons(gui, g).iter().filter(|b| b.w > 0.0) {
         b.draw(gui, mx, my);
@@ -464,6 +686,25 @@ pub fn lectern_key(g: &mut Game, sc: usize) -> Result<bool, String> {
 
 pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     let mut v = Vec::new();
+    // Pasting into a page: cut where the page's lines run out (here 3 lines), the rest dropped; the limit is in UTF-16.
+    let fits = |t: &str| t.split('\n').count() <= 3;
+    let mut e = TEdit::new(PAGE_CHARS, Filter::Multi);
+    insert_fit(&mut e, "one\r\ntwo\nthree\nfour\nfive", &fits);
+    v.push(("book paste is cut at the line limit", e.text.replace('\n', "|"), "one|two|three"));
+    let mut e = TEdit::new(PAGE_CHARS, Filter::Multi);
+    e.set("ab");
+    insert_fit(&mut e, "\n\n\n\n", &fits);
+    v.push(("book enter past the last line does nothing more", e.text.replace('\n', "|"), "ab||"));
+    let mut e = TEdit::new(5, Filter::Multi);
+    insert_fit(&mut e, "ab\u{1F600}cdef", &fits);
+    v.push(("book paste is cut at the character limit", e.text.clone(), "ab\u{1F600}c"));
+    // Up and down keep the x (every character 6 px), a wrapped line is a span of the text.
+    let w6 = |t: &str| t.chars().count() as f32 * 6.0;
+    let text = "hello wor ld\n\nxy";
+    let sp = [(0usize, 9usize), (10, 12), (13, 13), (14, 16)];
+    v.push(("book caret down keeps x", format!("{:?}", vertical(text, &sp, 4, 1, &w6)), "Some(12)"));
+    v.push(("book caret down onto a short line", format!("{:?} {:?}", vertical(text, &sp, 8, 1, &w6), vertical(text, &sp, 8, -1, &w6)), "Some(12) None"));
+    v.push(("book caret line", format!("{} {} {}", caret_line(&sp, 0), caret_line(&sp, 11), caret_line(&sp, 15)), "0 1 3"));
     let mut o = Out::new();
     o.varint(2).string("Hello").bool(false).string("World").bool(true).string("W*rld");
     v.push(("writable book pages", format!("{:?}", writable_pages(&o.b)), "Some([\"Hello\", \"World\"])"));

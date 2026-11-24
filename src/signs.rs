@@ -69,8 +69,13 @@ pub struct Editor {
     pub front: bool,
     pub lines: [String; 4],
     pub line: usize,
-    /// The cursor in the line, in characters (TextFieldHelper's cursor; no selection).
+    /// The cursor in the line, in characters (TextFieldHelper's cursor).
     pub cursor: usize,
+    /// The other end of the selection in the line, in characters (the cursor's value: nothing selected).
+    pub anchor: usize,
+    /// A mouse drag that started on a line is going on; the time and line of the last click (a double click).
+    pub drag: bool,
+    pub last_click: (u64, usize),
     pub opened: u64,
     pub hanging: bool,
     pub wall: bool,
@@ -628,7 +633,7 @@ pub fn open_editor(g: &mut Game, pos: [i32; 3], front: bool) -> bool {
     let lines = [plain(&t.lines[0]), plain(&t.lines[1]), plain(&t.lines[2]), plain(&t.lines[3])];
     let cursor = lines[0].chars().count();
     be.version += 1;
-    be.editor = Some(Editor { pos, front, lines, line: 0, cursor, opened: crate::sys::now_ms(), hanging, wall, wood, color });
+    be.editor = Some(Editor { pos, front, lines, line: 0, cursor, anchor: cursor, drag: false, last_click: (0, 9), opened: crate::sys::now_ms(), hanging, wall, wood, color });
     true
 }
 
@@ -653,42 +658,65 @@ pub fn editor_valid(g: &Game) -> bool {
     g.block_entities.editor.as_ref().map_or(false, |ed| sign_kind(&g.blocks, g.world.get(ed.pos[0], ed.pos[1], ed.pos[2])).is_some())
 }
 
+/// The current line as a text field (cursor and selection as byte offsets); the sign's own limit is the width.
+fn line_edit(ed: &Editor) -> crate::textedit::Edit {
+    let mut e = crate::textedit::Edit::new(usize::MAX, crate::textedit::Filter::Line);
+    e.text = ed.lines[ed.line].clone();
+    e.cursor = byte_at(&e.text, ed.cursor);
+    e.anchor = byte_at(&e.text, ed.anchor);
+    e
+}
+
+fn store_edit(ed: &mut Editor, e: &crate::textedit::Edit) {
+    let chars = |b: usize| e.text[..b.min(e.text.len())].chars().count();
+    ed.cursor = chars(e.cursor);
+    ed.anchor = chars(e.anchor);
+    ed.lines[ed.line] = e.text.clone();
+}
+
+fn dup(e: &crate::textedit::Edit) -> crate::textedit::Edit {
+    let mut d = crate::textedit::Edit::new(e.max, e.filter);
+    d.text = e.text.clone();
+    d.cursor = e.cursor;
+    d.anchor = e.anchor;
+    d
+}
+
+/// Types or pastes `s` into the field, as many of its characters as keep the line within the sign's width
+/// (and 384 bytes); the selection is replaced.
+fn insert_fit(width: &dyn Fn(&str) -> f32, e: &mut crate::textedit::Edit, s: &str, max: f32) {
+    let clean: Vec<char> = e.clean(s).chars().take(200).collect();
+    for n in (1..=clean.len()).rev() {
+        let mut t = dup(e);
+        let part: String = clean[..n].iter().collect();
+        t.insert(&part);
+        if width(&t.text) <= max && t.text.len() <= 384 {
+            *e = t;
+            return;
+        }
+    }
+}
+
 /// Typed text into the current line, as far as it fits the sign
 /// (SharedConstants.isAllowedChatCharacter, and the sign's widest line).
 pub fn type_text(g: &mut Game, gui: &Gui, s: &str) {
     let Some(ed) = g.block_entities.editor.as_mut() else { return };
     let (_, max) = metrics(ed.hanging);
-    for c in s.chars() {
-        if c == '\u{a7}' || (c as u32) < 32 || c as u32 == 127 {
-            continue;
-        }
-        let line = &mut ed.lines[ed.line];
-        let at = byte_at(line, ed.cursor);
-        line.insert(at, c);
-        if gui.text_width(line) > max || line.len() > 384 {
-            line.remove(at);
-        } else {
-            ed.cursor += 1;
-        }
-    }
+    let mut e = line_edit(ed);
+    insert_fit(&|t: &str| gui.text_width(t), &mut e, s, max);
+    store_edit(ed, &e);
     show_in_world(&mut g.block_entities);
 }
 
-/// A key on the editor; true when it closes (Escape, or the Done button by keyboard).
-pub fn key(g: &mut Game, sc: usize) -> Result<bool, String> {
+/// A key on the editor; true when it closes (Escape, or the Done button by keyboard). `keys` is the held keys (the
+/// command key and shift), `v` the clipboard.
+pub fn key(g: &mut Game, gui: &Gui, sc: usize, keys: &[bool], v: &Video) -> Result<bool, String> {
     const K_RETURN: usize = 40;
     const K_ESC: usize = 41;
-    const K_BACKSPACE: usize = 42;
     const K_DOWN: usize = 81;
     const K_UP: usize = 82;
     const K_KP_ENTER: usize = 88;
-    const K_DELETE: usize = 76;
-    const K_HOME: usize = 74;
-    const K_END: usize = 77;
-    const K_RIGHT: usize = 79;
-    const K_LEFT: usize = 80;
     let Some(ed) = g.block_entities.editor.as_mut() else { return Ok(true) };
-    let len = ed.lines[ed.line].chars().count();
     match sc {
         K_ESC => {
             close(g)?;
@@ -698,24 +726,68 @@ pub fn key(g: &mut Game, sc: usize) -> Result<bool, String> {
         K_UP | K_DOWN | K_RETURN | K_KP_ENTER => {
             ed.line = if sc == K_UP { (ed.line + 3) & 3 } else { (ed.line + 1) & 3 };
             ed.cursor = ed.lines[ed.line].chars().count();
+            ed.anchor = ed.cursor;
         }
-        K_LEFT => ed.cursor = ed.cursor.saturating_sub(1),
-        K_RIGHT => ed.cursor = (ed.cursor + 1).min(len),
-        K_HOME => ed.cursor = 0,
-        K_END => ed.cursor = len,
-        K_BACKSPACE | K_DELETE => {
-            let at = if sc == K_BACKSPACE { ed.cursor.checked_sub(1) } else { Some(ed.cursor).filter(|c| *c < len) };
-            if let Some(at) = at {
-                let line = &mut ed.lines[ed.line];
-                let b = byte_at(line, at);
-                line.remove(b);
-                ed.cursor = at;
-                show_in_world(&mut g.block_entities);
+        _ => {
+            let (command, shift) = (crate::textedit::command(keys), crate::textedit::shift(keys));
+            let mut e = line_edit(ed);
+            if command && sc == crate::textedit::SC_V {
+                insert_fit(&|t: &str| gui.text_width(t), &mut e, &v.clipboard(), metrics(ed.hanging).1);
+            } else if !e.key(sc, command, shift, &mut || String::new(), &mut |s| v.set_clipboard(s)) {
+                return Ok(false);
             }
+            store_edit(ed, &e);
+            show_in_world(&mut g.block_entities);
         }
-        _ => {}
     }
     Ok(false)
+}
+
+/// Where the screen puts the sign's centre and each line (x of its left edge, y of its top).
+fn line_pos(gui: &Gui, ed: &Editor, i: usize) -> (f32, f32) {
+    let cx = gui.width / 2.0;
+    let cy = if ed.hanging { 125.0 } else { 90.0 };
+    let (lh, _) = metrics(ed.hanging);
+    let lw = gui.text_width(&ed.lines[i]);
+    (cx + (-(lw as i32) / 2) as f32, cy + i as f32 * lh as f32 - (4 * lh / 2) as f32)
+}
+
+/// A left click on the lines: the caret goes to the nearest character boundary of that line, a double click selects
+/// the word, and a drag selects on (see `drag`).
+pub fn click(g: &mut Game, gui: &Gui, mx: f32, my: f32) {
+    let Some(ed) = g.block_entities.editor.as_mut() else { return };
+    let (lh, _) = metrics(ed.hanging);
+    let Some(i) = (0..4).find(|&i| my >= line_pos(gui, ed, i).1 && my < line_pos(gui, ed, i).1 + lh as f32) else { return };
+    let (x, _) = line_pos(gui, ed, i);
+    ed.line = i;
+    let mut e = line_edit(ed);
+    let at = crate::textedit::index_at(&e.text, mx - x, &|s: &str| gui.text_width(s));
+    let now = crate::sys::now_ms();
+    if ed.last_click.1 == i && now < ed.last_click.0 + 400 {
+        e.select_word(at);
+        ed.last_click = (0, 9);
+    } else {
+        e.click(at, false);
+        ed.last_click = (now, i);
+    }
+    ed.drag = true;
+    store_edit(ed, &e);
+}
+
+/// The mouse moved with the left button `held`: a drag that began on a line selects within it.
+pub fn drag(g: &mut Game, gui: &Gui, mx: f32, held: bool) {
+    let Some(ed) = g.block_entities.editor.as_mut() else { return };
+    if !held {
+        ed.drag = false;
+    }
+    if !ed.drag {
+        return;
+    }
+    let (x, _) = line_pos(gui, ed, ed.line);
+    let mut e = line_edit(ed);
+    let at = crate::textedit::index_at(&e.text, mx - x, &|s: &str| gui.text_width(s));
+    e.click(at, true);
+    store_edit(ed, &e);
 }
 
 /// Closes the editor and sends the text (AbstractSignEditScreen.removed:
@@ -850,6 +922,11 @@ pub fn draw_editor(gui: &mut Gui, gl: &Gl, w: i32, h: i32, g: &mut Game, mx: f32
         let lw = gui.text_width(line);
         let x = cx + (-(lw as i32) / 2) as f32;
         let y = cy + i as f32 * lh as f32 - top;
+        if i == ed.line && ed.cursor != ed.anchor {
+            // The selection: a light blue band behind the text, from the same widths the text is drawn with.
+            let (a, b) = (byte_at(line, ed.cursor.min(ed.anchor)), byte_at(line, ed.cursor.max(ed.anchor)));
+            gui.fill(x + gui.text_width(&line[..a]), y - 1.0, x + gui.text_width(&line[..b]), y + lh as f32 - 1.0, 0xFF99_CCFF);
+        }
         gui.text_plain(line, x, y, color);
         if i == ed.line && blink {
             let at = byte_at(line, ed.cursor);
@@ -875,12 +952,14 @@ pub fn test_type(g: &mut Game, gui: &Gui, close_after: bool) -> Result<bool, Str
             if let Some(ed) = g.block_entities.editor.as_mut() {
                 ed.line = i;
                 ed.cursor = 0;
+                ed.anchor = 0;
             }
             type_text(g, gui, s);
         }
         if let Some(ed) = g.block_entities.editor.as_mut() {
             ed.line = 0;
             ed.cursor = 3;
+            ed.anchor = 3;
         }
     }
     let opened = g.block_entities.editor.as_ref().map_or(0, |e| e.opened);
@@ -894,6 +973,27 @@ pub fn test_type(g: &mut Game, gui: &Gui, close_after: bool) -> Result<bool, Str
 /// Selftest: a sign's data as the server sends it, read back, and the text placement.
 pub fn selftest(blocks: Option<&Blocks>) -> Vec<(&'static str, String, &'static str)> {
     let mut out = Vec::new();
+    // Pasting into a line: cut at the sign's width (every character 6 px, 90 px: 15 characters), a line break dropped,
+    // the selection replaced.
+    let w6 = |t: &str| t.chars().count() as f32 * 6.0;
+    let mut e = crate::textedit::Edit::new(usize::MAX, crate::textedit::Filter::Line);
+    insert_fit(&w6, &mut e, "hello\nworld and a long paste", 90.0);
+    out.push(("sign paste fits the width", alloc::format!("{} {}", e.text, e.cursor), "helloworld and  15"));
+    e.select_all();
+    insert_fit(&w6, &mut e, "ab", 90.0);
+    out.push(("sign paste replaces the selection", e.text.clone(), "ab"));
+    e.set("abcdefghijklmno");
+    e.select_all();
+    e.anchor = 3;
+    insert_fit(&w6, &mut e, "xyz", 90.0);
+    out.push(("sign typing into a full line with a selection", e.text.clone(), "abcxyz"));
+    let mut e = crate::textedit::Edit::new(usize::MAX, crate::textedit::Filter::Line);
+    e.set("h\u{e9}llo w\u{f6}rld");
+    e.cursor = 3;
+    e.anchor = 3;
+    insert_fit(&w6, &mut e, "\u{1F600}", 90.0);
+    out.push(("sign paste on a multi-byte boundary", e.text.clone(), "h\u{e9}\u{1F600}llo w\u{f6}rld"));
+
     // {front_text:{messages:["Hi",{text:"Red",color:"red"},"",""],color:"blue",has_glowing_text:1b},is_waxed:1b}
     let mut d: Vec<u8> = Vec::new();
     let s = |d: &mut Vec<u8>, v: &str| {
