@@ -1231,7 +1231,7 @@ impl Front {
     /// DisconnectedScreen's column (cells padded 10, the button 2): title, reason lines,
     /// button, centred on the screen.
     fn disconnected_layout(gui: &Gui, reason: &str, to_list: bool) -> (f32, Vec<String>, Button) {
-        let lines: Vec<String> = reason.split('\n').flat_map(|p| screens::wrap(gui, p, gui.width - 50.0)).collect();
+        let lines: Vec<String> = screens::wrap_paras(gui, &reason, gui.width - 50.0);
         let total = 29.0 + lines.len() as f32 * 9.0 + 20.0 + 24.0;
         let top = fl((gui.height - total) / 2.0);
         let by = top + 29.0 + lines.len() as f32 * 9.0 + 20.0 + 2.0;

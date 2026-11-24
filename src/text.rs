@@ -620,8 +620,13 @@ fn build(t: &Tag, parent: &Style, out: &mut Rich, depth: u32) {
                 if let Some(v) = s.get("value").and_then(|v| v.plain()) {
                     emit(out, st, &v);
                 }
-            } else if t.get("selector").is_some() || t.get("nbt").is_some() {
-                // Unresolved entity selectors and NBT paths show nothing on the client.
+            } else if let Some(sel) = t.get("selector") {
+                // SelectorContents.visit emits the selector's source: an unresolved one shows as typed.
+                if let Some(v) = sel.plain() {
+                    emit(out, st, &v);
+                }
+            } else if t.get("nbt").is_some() {
+                // Unresolved NBT paths show nothing on the client.
             } else if t.get("object").is_some() || t.get("sprite").is_some() || t.get("player").is_some() {
                 // Object contents (sprites, heads): their fallback text.
                 if let Some(f) = t.get("fallback") {
@@ -858,7 +863,9 @@ pub fn wrap(gui: &crate::gui::Gui, r: &Rich, width: f32) -> Vec<Line> {
     let mut w = 0.0f32;
     // Where the last space of the line is: (run index, byte index after it, width there).
     let mut brk: Option<(usize, usize, f32)> = None;
-    let mut buf = [0u8; 4];
+    // Literal legacy codes in the text ("§a", "§#rrggbb") take no room, as in Gui::text_width: where in one we are
+    // (0 none, 1 after the sign, 2.. the hex digits left), and the bold and font they set.
+    let (mut code, mut lit_bold, mut lit_font) = (0u8, false, 0u32);
     for (st, s) in &r.runs {
         let bold = st.flags & BOLD != 0;
         for ch in s.chars() {
@@ -868,7 +875,46 @@ pub fn wrap(gui: &crate::gui::Gui, r: &Rich, width: f32) -> Vec<Line> {
                 brk = None;
                 continue;
             }
-            let cw = gui.text_width(ch.encode_utf8(&mut buf)) + bold as i32 as f32;
+            let cw = if code > 0 {
+                if code == 1 {
+                    match ch {
+                        '#' => code = 7,
+                        'l' | 'L' => {
+                            lit_bold = true;
+                            code = 0;
+                        }
+                        c if (0xF800..0xF900).contains(&(c as u32)) => {
+                            lit_font = c as u32;
+                            code = 0;
+                        }
+                        c if c.is_ascii_hexdigit() || c == 'r' || c == 'R' => {
+                            lit_bold = false;
+                            lit_font = 0;
+                            code = 0;
+                        }
+                        _ => code = 0,
+                    }
+                } else {
+                    code -= 1;
+                    if code == 1 {
+                        code = 0;
+                    }
+                }
+                0.0
+            } else if ch == '\u{a7}' {
+                code = 1;
+                0.0
+            } else {
+                // The glyph in the run's font (the marker text_quads puts before what it draws).
+                let mut m = String::new();
+                let font = if lit_font != 0 { lit_font } else if st.font != 0 { 0xF800 + st.font as u32 } else { 0 };
+                if let Some(f) = char::from_u32(font).filter(|_| font != 0) {
+                    m.push('\u{a7}');
+                    m.push(f);
+                }
+                m.push(ch);
+                gui.text_width(&m) + (bold || lit_bold) as i32 as f32
+            };
             if w + cw > width && !(line.is_empty() && ch == ' ') && w > 0.0 {
                 // Break at the last space (dropping it), or here.
                 let mut rest: Line = Vec::new();
@@ -919,7 +965,15 @@ pub fn wrap(gui: &crate::gui::Gui, r: &Rich, width: f32) -> Vec<Line> {
 }
 
 pub fn width_of(gui: &crate::gui::Gui, s: &str, st: &Style) -> f32 {
-    let w = gui.text_width(s);
+    // In the run's font, as text_quads draws it.
+    let w = if st.font != 0 {
+        let mut m = String::from("\u{a7}");
+        m.push(char::from_u32(0xF800 + st.font as u32).unwrap_or('r'));
+        m.push_str(s);
+        gui.text_width(&m)
+    } else {
+        gui.text_width(s)
+    };
     if st.flags & BOLD != 0 {
         w + s.chars().count() as f32
     } else {
@@ -1001,6 +1055,9 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     out.push(("nbt italic false wins", crate::nbt::text_italic(&mut In::new(&b)), "x"));
     let b = comp(&[(8, "text", &s8("g")), (8, "font", &s8("minecraft:nofont"))]);
     out.push(("nbt unknown font not coded", crate::nbt::text(&mut In::new(&b)), "g"));
+    out.push(("nbt text plain drops styles", crate::nbt::text_plain(&mut In::new(&comp(&[(8, "text", &s8("Blade")), (8, "color", &s8("red")), (1, "bold", &[1])]))), "Blade"));
+    let t = json_tag(r#"{"selector":"@p","color":"red"}"#).unwrap();
+    out.push(("selector shows its source", component(&t).string(), "@p"));
     out.push(("formatting codes read back", back.legacy(), "\u{a7}r\u{a7}cred \u{a7}r\u{a7}c\u{a7}lbold\u{a7}r plain"));
     out
 }

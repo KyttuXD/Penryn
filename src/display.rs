@@ -362,6 +362,24 @@ fn line_x(flags: u8, width: i32, line: i32) -> f32 {
     }
 }
 
+/// Display.brightnessOverride (index 16): the packed light, block light << 4 and sky light << 20, as (sky, block);
+/// -1 (or no value) is none.
+fn brightness(e: &Entity) -> Option<(u8, u8)> {
+    let v = e.data.get(&16).copied().unwrap_or(-1) as i32;
+    if v == -1 {
+        return None;
+    }
+    Some((((v >> 20) & 15) as u8, ((v >> 4) & 15) as u8))
+}
+
+/// The light a display is drawn in: its brightness override, else the world's light at its place.
+fn light(cx: &DrawCx, e: &Entity, at: [f64; 3]) -> [f32; 3] {
+    match brightness(e) {
+        Some((sky, block)) => cx.lit.colour(sky, block),
+        None => cx.lit.at(at),
+    }
+}
+
 /// The background colour (RGBA): the default flag gives 25% black, else the colour the server sent (0x40000000 until it does).
 fn background(e: &Entity, flags: u8) -> [u8; 4] {
     let v = if flags & 4 != 0 { 0x4000_0000 } else { e.data.get(&25).copied().unwrap_or(0x4000_0000) as u32 };
@@ -472,7 +490,7 @@ fn draw_texts(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Ent
         if d2 > range * range {
             continue;
         }
-        let lc = cx.lit.at([p[0] + eye[0], p[1] + eye[1], p[2] + eye[2]]);
+        let lc = light(cx, e, [p[0] + eye[0], p[1] + eye[1], p[2] + eye[2]]);
         let place = A::translate([p[0] as f32, p[1] as f32, p[2] as f32]).then(&orientation(e, cx.yaw, cx.pitch)).then(&matrix(&transformation(e, partial)));
         if let Some(q) = text_quads(gui, e, &place, lc, d2 as f32) {
             all.push(q);
@@ -538,10 +556,15 @@ fn draw_texts(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Ent
     }
 }
 
-/// Draws the block, item and text displays.
+/// Draws the block, item and text displays: the text last, so its depth-tested but depth-free quads lie over the opaque
+/// displays behind it.
 pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entity>, partial: f32, table: &EntityTable, cx: &DrawCx, overlays: &[crate::itemmodels::Entry]) {
-    let [kb, ki] = kinds(table);
+    draw_blocks(gl, view, eye, ents, partial, table, cx, overlays);
     draw_texts(gl, view, eye, ents, partial, text_kind(table), cx);
+}
+
+fn draw_blocks(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entity>, partial: f32, table: &EntityTable, cx: &DrawCx, overlays: &[crate::itemmodels::Entry]) {
+    let [kb, ki] = kinds(table);
     if kb < 0 && ki < 0 {
         return;
     }
@@ -565,7 +588,7 @@ pub fn draw(gl: &Gl, view: &[f32; 16], eye: [f64; 3], ents: &BTreeMap<i32, Entit
             stats[1] += 1;
             continue;
         }
-        let lc = cx.lit.at([p[0] + eye[0], p[1] + eye[1], p[2] + eye[2]]);
+        let lc = light(cx, e, [p[0] + eye[0], p[1] + eye[1], p[2] + eye[2]]);
         let place = A::translate([p[0] as f32, p[1] as f32, p[2] as f32])
             .then(&orientation(e, cx.yaw, cx.pitch))
             .then(&matrix(&transformation(e, partial)));
@@ -755,5 +778,13 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
             alloc::format!("{:.2} {:.2} {:.2} {:.2}", lo[1], hi[1], lo[0], hi[0]),
             "-0.25 0.25 -0.25 0.25"
         ),
+        ("display brightness override", {
+            let mut b = Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+            let none = brightness(&b);
+            b.data.insert(16, -1);
+            let minus = brightness(&b);
+            b.data.insert(16, (7 << 4 | 12 << 20) as i64);
+            alloc::format!("{:?} {:?} {:?}", none, minus, brightness(&b))
+        }, "None None Some((12, 7))"),
     ]
 }
