@@ -248,7 +248,10 @@ const SDL_NAMES: &[&str] = &[
     "/usr/local/lib/libSDL2-2.0.0.dylib",
     "/opt/local/lib/libSDL2-2.0.0.dylib",
 ];
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+// Windows: SDL2.dll beside penryn.exe (LoadLibrary looks in the program's own folder first).
+#[cfg(windows)]
+const SDL_NAMES: &[&str] = &["SDL2.dll"];
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 const SDL_NAMES: &[&str] = &["libSDL2.so"];
 
 impl Video {
@@ -268,9 +271,11 @@ impl Video {
             }
         }
         if lib.is_null() {
-            return Err(String::from(
-                "SDL2 was not found: put SDL2.framework beside penryn (or set PENRYN_SDL2 to the library)",
-            ));
+            return Err(String::from(if cfg!(windows) {
+                "SDL2 was not found: put SDL2.dll beside penryn.exe (or set PENRYN_SDL2 to the library)"
+            } else {
+                "SDL2 was not found: put SDL2.framework beside penryn (or set PENRYN_SDL2 to the library)"
+            }));
         }
         let sym = |n: &str| unsafe { sys::dlsym(lib, sys::cstr(n).as_ptr() as *const c_char) };
         let sdl = unsafe { Sdl::load(&sym) }.map_err(|m| alloc::format!("this SDL2 has no {}", m))?;

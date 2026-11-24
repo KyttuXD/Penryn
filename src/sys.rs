@@ -8,6 +8,14 @@ use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::{c_char, c_int, c_void};
 
+// Windows: the same names on the UCRT, kernel32 and Winsock (sys_win.rs). The POSIX code below is not
+// compiled there, and nothing in it changes for Linux and macOS.
+#[cfg(windows)]
+#[path = "sys_win.rs"]
+mod win;
+#[cfg(windows)]
+pub use win::*;
+
 pub type SizeT = usize;
 pub type SsizeT = isize;
 
@@ -32,7 +40,20 @@ pub struct AddrInfo {
     pub ai_addr: *mut c_void,
     pub ai_next: *mut AddrInfo,
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+#[repr(C)]
+pub struct AddrInfo {
+    pub ai_flags: c_int,
+    pub ai_family: c_int,
+    pub ai_socktype: c_int,
+    pub ai_protocol: c_int,
+    /// size_t on Windows.
+    pub ai_addrlen: usize,
+    pub ai_canonname: *mut c_char,
+    pub ai_addr: *mut c_void,
+    pub ai_next: *mut AddrInfo,
+}
+#[cfg(not(any(target_os = "macos", windows)))]
 #[repr(C)]
 pub struct AddrInfo {
     pub ai_flags: c_int,
@@ -47,7 +68,7 @@ pub struct AddrInfo {
 
 /// `struct timeval`: on Darwin `tv_usec` is 32 bits followed by padding.
 #[repr(C)]
-struct TimeVal {
+pub(crate) struct TimeVal {
     sec: i64,
     #[cfg(target_os = "macos")]
     usec: i32,
@@ -60,6 +81,7 @@ struct TimeVal {
 pub const SOCK_STREAM: c_int = 1;
 pub const RTLD_NOW: c_int = 2;
 
+#[cfg(not(windows))]
 #[cfg_attr(all(unix, not(target_os = "macos")), link(name = "c"))]
 #[cfg_attr(target_os = "linux", link(name = "dl"))]
 #[cfg_attr(target_os = "macos", link(name = "System"))]
@@ -117,12 +139,27 @@ extern "C" {
     fn readlink(path: *const c_char, buf: *mut u8, n: SizeT) -> SsizeT;
 }
 
+#[cfg(not(windows))]
 extern "C" {
     fn symlink(target: *const c_char, link: *const c_char) -> c_int;
     fn unlink(path: *const c_char) -> c_int;
 }
 
+/// Closes a socket (a plain `close` here; on Windows sockets are not file descriptors).
+#[cfg(not(windows))]
+pub unsafe fn sock_close(fd: c_int) -> c_int {
+    close(fd)
+}
+
 /// Runs a shell command and waits for it (its exit status, -1 when it could not start).
+/// Windows: only the self-update ran commands, and it does not exist there.
+#[cfg(windows)]
+pub fn shell(_cmd: &str) -> i32 {
+    -1
+}
+
+/// Runs a shell command and waits for it (its exit status, -1 when it could not start).
+#[cfg(not(windows))]
 pub fn shell(cmd: &str) -> i32 {
     let c = cstr(cmd);
     let r = unsafe { system(c.as_ptr() as *const c_char) };
@@ -202,9 +239,12 @@ pub fn processors() -> u32 {
 
 // The prebuilt `alloc` was compiled with unwinding; with panic = "abort" nothing ever unwinds,
 // but the linker still wants these two names.
+// (Windows MSVC: the CRT's vruntime has __CxxFrameHandler3; these are not wanted there.)
+#[cfg(not(windows))]
 #[no_mangle]
 pub extern "C" fn rust_eh_personality() {}
 
+#[cfg(not(windows))]
 #[no_mangle]
 pub extern "C" fn _Unwind_Resume() -> ! {
     unsafe { abort() }
@@ -227,6 +267,10 @@ unsafe impl GlobalAlloc for Malloc {
         }
     }
     unsafe fn dealloc(&self, p: *mut u8, _l: Layout) {
+        #[cfg(windows)]
+        if _l.align() > 16 {
+            return aligned_free(p as *mut c_void);
+        }
         free(p as *mut c_void)
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
@@ -298,6 +342,12 @@ pub unsafe fn from_cstr(p: *const c_char) -> String {
     String::from_utf8_lossy(&v).into_owned()
 }
 
+#[cfg(windows)]
+pub fn env(name: &str) -> Option<String> {
+    getenv_utf8(name)
+}
+
+#[cfg(not(windows))]
 pub fn env(name: &str) -> Option<String> {
     let n = cstr(name);
     let p = unsafe { getenv(n.as_ptr() as *const c_char) };
@@ -366,9 +416,13 @@ pub fn sleep_ms(ms: u32) {
 const O_RDONLY: c_int = 0;
 #[cfg(target_os = "macos")]
 const O_WRONLY_CREAT_TRUNC: c_int = 0x1 | 0x200 | 0x400;
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+const O_RDONLY: c_int = 0x8000; // _O_RDONLY | _O_BINARY
+#[cfg(windows)]
+const O_WRONLY_CREAT_TRUNC: c_int = 0x1 | 0x100 | 0x200 | 0x8000; // _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY
+#[cfg(not(any(target_os = "macos", windows)))]
 const O_RDONLY: c_int = 0;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 const O_WRONLY_CREAT_TRUNC: c_int = 0o1 | 0o100 | 0o1000;
 
 pub fn read_file(path: &str) -> Option<Vec<u8>> {
@@ -476,16 +530,36 @@ pub fn open_url(url: &str) -> bool {
     if !(url.starts_with("http://") || url.starts_with("https://")) || url.bytes().any(|b| b < 0x20) {
         return false;
     }
-    let quoted = url.replace('\'', "'\\''");
-    #[cfg(target_os = "macos")]
-    let cmd = alloc::format!("/usr/bin/open '{}' >/dev/null 2>&1 &", quoted);
-    #[cfg(not(target_os = "macos"))]
-    let cmd = alloc::format!("xdg-open '{}' >/dev/null 2>&1 &", quoted);
-    let c = cstr(&cmd);
-    unsafe { system(c.as_ptr() as *const c_char) == 0 }
+    #[cfg(windows)]
+    {
+        // ShellExecuteW "open": no shell, so nothing to quote.
+        shell_open(url)
+    }
+    #[cfg(not(windows))]
+    {
+        let quoted = url.replace('\'', "'\\''");
+        #[cfg(target_os = "macos")]
+        let cmd = alloc::format!("/usr/bin/open '{}' >/dev/null 2>&1 &", quoted);
+        #[cfg(not(target_os = "macos"))]
+        let cmd = alloc::format!("xdg-open '{}' >/dev/null 2>&1 &", quoted);
+        let c = cstr(&cmd);
+        unsafe { system(c.as_ptr() as *const c_char) == 0 }
+    }
+}
+
+/// `n` random bytes from /dev/urandom (Windows: RtlGenRandom, the system's generator).
+#[cfg(windows)]
+pub fn read_urandom(n: usize) -> Option<Vec<u8>> {
+    let mut out = alloc::vec![0u8; n];
+    if random_bytes(&mut out) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 /// `n` random bytes from /dev/urandom.
+#[cfg(not(windows))]
 pub fn read_urandom(n: usize) -> Option<Vec<u8>> {
     let p = cstr("/dev/urandom");
     let fd = unsafe { open(p.as_ptr() as *const c_char, O_RDONLY, 0) };

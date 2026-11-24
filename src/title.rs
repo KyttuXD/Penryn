@@ -634,6 +634,7 @@ pub fn saved_name() -> Option<String> {
 pub fn default_name() -> String {
     saved_name()
         .or_else(|| sys::env("USER").filter(|u| valid_name(u)))
+        .or_else(|| if cfg!(windows) { sys::env("USERNAME").filter(|u| valid_name(u)) } else { None })
         .unwrap_or_else(|| String::from("Player"))
 }
 

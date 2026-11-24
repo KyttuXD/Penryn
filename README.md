@@ -408,6 +408,40 @@ protocol layer is `src/voicechat/`. The microphone is SDL's on Linux and AudioQu
 time, so 10.5 and newer) on the Mac. Test hooks: `PENRYN_VOICE_TONE=1` speaks a tone,
 `PENRYN_VOICE_LEVEL=1` logs the microphone level.
 
+## Windows
+
+The nightly release has `penryn-windows-x86_64.zip` and `penryn-windows-arm64.zip` (Windows 10 or newer). Unzip the
+folder anywhere and run `penryn.exe` from a terminal, or double-click `Penryn-offline.bat` (`penryn.exe --offline`). The
+zip holds `SDL2.dll` (Penryn loads it at run time from the folder of `penryn.exe`; the ARM64 one is built by CI from the
+SDL2 2.32.10 source, because SDL publishes none), the relay and game-file maker in `tools/` (they need Python 3), and
+needs no Visual C++ Redistributable (the C runtime is inside `penryn.exe`). The console window stays open on purpose, so
+the log is there.
+
+- **Data folder:** `PENRYN_DATA`, else the current folder when it holds `blocks.bin`, else `%APPDATA%\Penryn` (made when
+  needed). `account.txt`, `servers.dat`, `options.txt` and the game files live there. The game files are made once
+  from your own Minecraft 26.3 (`py tools\relay.py --build-assets "%APPDATA%\Penryn"`), as in "Offline, no relay".
+- **Updates are manual:** there is no self-update on Windows; download the zip from the nightly release again.
+- **Server addresses:** the `_minecraft._tcp` SRV record is not looked up on Windows (there is no `resolv.conf`):
+  the typed host and port are used. Type the port when a server's SRV record points to another one. (`PENRYN_DNS=ip[:port]`
+  turns the lookup on.)
+- Names given on the command line and in paths are UTF-8 inside the program, converted at the Windows calls, so a user
+  name with accents is fine. The microphone for voice chat is SDL's.
+
+Building on Windows needs [rustup](https://rustup.rs) with the MSVC toolchain (the Visual Studio Build Tools with the
+"Desktop development with C++" workload, plus the ARM64 build tools for an ARM64 build; there is no crate to fetch):
+
+```bat
+rustup toolchain install 1.99.1
+cargo build --release --locked
+target\release\penryn.exe selftest
+```
+
+Put `SDL2.dll` (the "win32-x64" zip of an [SDL2 release](https://github.com/libsdl-org/SDL/releases/tag/release-2.32.10))
+beside `target\release\penryn.exe`. For ARM64 add `--target aarch64-pc-windows-msvc` (after `rustup target add`); build
+SDL2 for ARM64 from its source with `cmake -A ARM64`. `.cargo/config.toml` links the C runtime statically.
+The Windows code is in `src/sys_win.rs` (the Universal CRT, kernel32 and Winsock under the names `src/sys.rs` uses on
+Linux and the Mac); CI is `.github/workflows/build-windows.yml`.
+
 ## Controls
 
 Vanilla's defaults: WASD, mouse, space (double-tap to fly in creative), shift sneak, ctrl or double

@@ -969,6 +969,10 @@ pub fn open_url(url: &str) {
     if !(l.starts_with("http://") || l.starts_with("https://")) {
         return;
     }
+    if cfg!(windows) {
+        crate::sys::open_url(url);
+        return;
+    }
     let spawn = symbol("posix_spawnp");
     if spawn.is_null() {
         return;
