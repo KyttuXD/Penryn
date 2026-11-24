@@ -240,11 +240,28 @@ pub fn text_payload(r: &mut In, t: u8) -> Option<String> {
     Some(s)
 }
 
-/// The plain text of a chat component sent as network NBT.
+/// A component sent as network NBT as text with formatting codes: its colours, bold, italic,
+/// underline, strikethrough, obfuscation and font (text.rs reads the whole component).
 pub fn text(r: &mut In) -> String {
-    let mut s = String::new();
-    if let Some(t) = r.u8() {
-        let _ = text_of(r, t, &mut s, 0);
+    text_under(r, &crate::text::Style::default())
+}
+
+/// The same under a default style the component's own keys override (vanilla's italic for a
+/// custom name, italic and dark purple for lore).
+pub fn text_italic(r: &mut In) -> String {
+    let st = crate::text::Style { flags: crate::text::ITALIC, set: crate::text::ITALIC, ..crate::text::Style::default() };
+    text_under(r, &st)
+}
+
+fn text_under(r: &mut In, parent: &crate::text::Style) -> String {
+    let Some(t) = crate::text::read_tag(r) else { return String::new() };
+    let rich = crate::text::component(&t);
+    let mut under = crate::text::Rich::default();
+    under.append(&rich, parent);
+    let s = under.legacy();
+    // The first run starts from the drawing colour anyway.
+    match s.strip_prefix("\u{a7}r") {
+        Some(rest) => String::from(rest),
+        None => s,
     }
-    s
 }

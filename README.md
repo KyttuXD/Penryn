@@ -227,7 +227,7 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 - Players' hats, jackets and sleeves always show (the skin customisation bits only hide capes);
   and Dinnerbone and Grumm stand the right way up.
 - Tooltips have no potion effects, book authors, firework or banner lines for stacks whose
-  components the server changed; italics and bold are drawn as plain text; no advanced tooltips
+  components the server changed; no advanced tooltips
   (F3+H). The spectator hotbar menu (teleporting to players) and seeing invisible entities as
   spectator are not done; can_break and can_place_on check blocks and tags, not block states.
 - Item stacks with unusual data components (some potions and other rare ones) can hide the slots after
