@@ -1281,6 +1281,7 @@ impl Game {
         self.max_health = 20.0;
         self.air = 300;
         self.move_speed = 0.1f32 as f64;
+        self.mining_attrs = [0.0, 1.0, 0.2];
         self.jump_strength = 0.42f32 as f64;
         self.fly_speed = 0.05;
         self.may_fly = false;

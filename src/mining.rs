@@ -154,12 +154,10 @@ pub fn destroy_speed(i: &Inputs) -> f64 {
         s *= 1.0 + (amp + 1) as f64 * 0.2;
     }
     if let Some(a) = i.fatigue {
-        s *= match a {
-            0 => 0.3,
-            1 => 0.09,
-            2 => 0.0027,
-            _ => 8.1e-4,
-        };
+        // Math.pow(0.3, amplifier + 1): 0.3, 0.09, 0.027, 0.0081 ...
+        for _ in 0..(a.clamp(0, 254) + 1) {
+            s *= 0.3;
+        }
     }
     s *= i.break_speed;
     if i.eye_in_water {
@@ -201,7 +199,10 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     out.push(("mining: conduit beats haste I", p(&i, 1.5, true), "0.2489"));
     let mut i = base();
     i.fatigue = Some(2);
-    out.push(("mining: fatigue III", p(&i, 1.5, true), "0.0005"));
+    out.push(("mining: fatigue III", p(&i, 1.5, true), "0.0048"));
+    let mut i = base();
+    i.fatigue = Some(3);
+    out.push(("mining: fatigue IV", p(&i, 1.5, true), "0.0014"));
     let mut i = base();
     i.eye_in_water = true;
     let a = destroy_speed(&i);

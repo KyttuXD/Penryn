@@ -2317,8 +2317,6 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 (speed, harvest)
             }
         };
-        let eye = [self.mover.pos[0], self.mover.pos[1] + self.eye_height(), self.mover.pos[2]];
-        let eye_state = g.world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2]));
         let amp = |id: u16| g.effects.get(id).map(|e| e.amplifier);
         let inputs = crate::mining::Inputs {
             tool: speed,
@@ -2328,8 +2326,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             haste: amp(2),
             conduit: amp(28),
             fatigue: amp(3),
-            eye_in_water: g.blocks.kind(eye_state) == blocks::WATER,
-            on_ground: self.mover.on_ground || g.flying,
+            eye_in_water: self.special.under_water, // the fluid test at the eye (waterlogged, kelp, surface height)
+            on_ground: self.mover.on_ground,
         };
         crate::mining::progress(crate::mining::destroy_speed(&inputs), hardness, harvest)
     }
