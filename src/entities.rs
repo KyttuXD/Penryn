@@ -61,8 +61,16 @@ pub struct Entity {
     /// ClientboundSetEquipmentPacket: per EquipmentSlot (main hand, off hand, feet, legs, chest,
     /// head, body, saddle) the item and count.
     pub equipment: [Option<(i32, i32)>; 8],
+    /// Each equipment stack's component patch (item_model, custom_model_data, equippable...).
+    pub equipment_patch: [Vec<u8>; 8],
+    /// Float entity data by index (an interaction entity's width and height).
+    pub floats: BTreeMap<u8, f32>,
+    /// generic.scale (AttributeInstance.getValue; 1 unless the server sends it).
+    pub scale: f32,
     /// DATA_CUSTOM_NAME, as plain text.
     pub custom_name: Option<String>,
+    /// A text display's text (Display.TextDisplay.DATA_TEXT_ID), styled (display.rs).
+    pub disp_text: Option<crate::text::Rich>,
     /// DATA_HEALTH_ID once the server sends it (a full-health mob's is never sent).
     pub health: Option<f32>,
     /// LivingEntity.deathTime: ticks since its health reached 0.
@@ -124,12 +132,16 @@ impl Entity {
             disp_start: 0,
             disp_dur: 0,
             equipment: [None; 8],
+            equipment_patch: Default::default(),
+            floats: BTreeMap::new(),
+            scale: 1.0,
             custom_name: None,
+            disp_text: None,
             health: None,
             death_time: 0,
             villager: [0, 0, 1],
             variant: -1,
-            version: 0,
+            version: NEXT_VERSION.fetch_add(1 << 14, core::sync::atomic::Ordering::Relaxed),
             anim: crate::mobanim::Anim::new(),
         }
     }
@@ -378,6 +390,10 @@ pub struct Draw {
     pub worn: bool,
 }
 
+/// Each new entity starts its `version` far from every other's, so the looks cache (by entity
+/// id) cannot take a stale entry of a reused id for the new entity's own.
+static NEXT_VERSION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 pub struct EntityTable {
     tex: u32,
     aw: f32,
@@ -431,6 +447,8 @@ pub struct DrawCx<'a> {
     pub below: &'a BTreeMap<[u8; 16], String>,
     pub game_time: i64,
     pub icons: &'a [crate::gui::Icon],
+    /// The packs' item definitions (item_model and custom_model_data overlays).
+    pub overlays: &'a [crate::itemmodels::Entry],
     pub blocks: &'a crate::blocks::Blocks,
     pub atlas: u32,
     pub atlas_size: (f32, f32),
@@ -661,6 +679,12 @@ impl EntityTable {
 
     /// The entity's hitbox: its type's, a baby's, a slime's size.
     pub fn dims(&self, e: &Entity) -> (f32, f32) {
+        let (w, h) = self.dims_unscaled(e);
+        (w * e.scale, h * e.scale)
+    }
+
+    /// `dims` before the scale attribute.
+    fn dims_unscaled(&self, e: &Entity) -> (f32, f32) {
         let Some(t) = self.types.get(e.kind as usize) else { return (0.6, 1.8) };
         if t.baby_index > 0 && e.d(t.baby_index) != 0 {
             return t.baby_size;
@@ -670,6 +694,19 @@ impl EntityTable {
             "slime" | "magma_cube" => {
                 let s = e.data.get(&18).copied().unwrap_or(1).max(1) as f32;
                 (t.size.0 * s, t.size.1 * s)
+            }
+            // Interaction: its width and height data (indices 8 and 9).
+            "interaction" => (e.floats.get(&8).copied().unwrap_or(1.0), e.floats.get(&9).copied().unwrap_or(1.0)),
+            // ArmorStand.DATA_CLIENT_FLAGS (15): small (1) is half size, marker (16) has no box.
+            "armor_stand" => {
+                let f = e.d(15);
+                if f & 16 != 0 {
+                    (0.0, 0.0)
+                } else if f & 1 != 0 {
+                    (t.size.0 * 0.5, t.size.1 * 0.5)
+                } else {
+                    t.size
+                }
             }
             // A crouching player (Pose.CROUCHING).
             "player" if e.d(6) == 5 => (0.6, 1.5),
@@ -683,6 +720,11 @@ impl EntityTable {
         let ty = self.types.get(e.kind as usize);
         let name = ty.map_or("", |t| t.name.as_str());
         let mut base = mul(&tr(at[0], at[1], at[2]), &rot(1, math::to_rad((180.0 - e.body_rot(partial)) as f64)));
+        // LivingEntityRenderer: the scale attribute scales everything about the feet.
+        if e.scale != 1.0 {
+            let k = e.scale as f64;
+            base = mul(&tr(at[0], at[1], at[2]), &mul(&sc(k, k, k), &rot(1, math::to_rad((180.0 - e.body_rot(partial)) as f64))));
+        }
         if e.death_time > 0 {
             // setupRotations: fall over to the side (spiders onto their backs) over a second.
             let f = math::sqrt(((e.death_time as f64 + partial as f64 - 1.0) / 20.0 * 1.6).max(0.0)).min(1.0);
@@ -691,7 +733,7 @@ impl EntityTable {
         }
         // LivingEntityRenderer.isEntityUpsideDown: named Dinnerbone or Grumm.
         if matches!(e.custom_name.as_deref(), Some("Dinnerbone" | "Grumm")) {
-            base = mul(&mul(&base, &tr(0.0, self.dims(e).1 as f64 + 0.1, 0.0)), &rot(2, math::PI));
+            base = mul(&mul(&base, &tr(0.0, (self.dims(e).1 / e.scale) as f64 + 0.1, 0.0)), &rot(2, math::PI));
         }
         // Swimming, gliding, sleeping players; a crouching one sits lower (poses.rs).
         base = crate::poses::setup_rotations(name, e, partial, base);
@@ -950,17 +992,22 @@ impl EntityTable {
                         let Some((item, _)) = e.equipment[slot] else { continue };
                         let arm = if left_handed { if arm == "right_arm" { "left_arm" } else { "right_arm" } } else { arm };
                         let Some(ai) = m.parts.iter().position(|q| q.name == arm) else { continue };
-                        self.held_item(items, &mats[ai], item, arm == "left_arm", cx, lc);
+                        self.held_item(items, &mats[ai], item, &e.equipment_patch[slot], arm == "left_arm", cx, lc);
                     }
                 }
             }
             // The name tag: players' names, named mobs' when shown or looked at.
-            if !invisible && e.death_time == 0 {
+            // Invisibility hides the tag of a living entity (LivingEntityRenderer.shouldShowName:
+            // isInvisibleTo), not an armor stand's (its own shouldShowName: custom_name_visible)
+            // and not a non-living entity's (EntityRenderer.shouldShowName).
+            let tname = self.types.get(e.kind as usize).map_or("", |t| t.name.as_str());
+            let stand = tname == "armor_stand";
+            if (!invisible || stand || !is_living(tname)) && e.death_time == 0 {
                 let discrete = e.d(0) & 2 != 0;
                 let range = if discrete { 32.0 } else { 64.0 };
                 let name = if e.kind == self.player_type {
                     e.custom_name.as_deref().or_else(|| cx.names.get(&e.uuid).map(|s| s.as_str()))
-                } else if e.d(3) != 0 || picked == Some(id) {
+                } else if e.d(3) != 0 || (picked == Some(id) && !stand) {
                     e.custom_name.as_deref()
                 } else {
                     None
@@ -1019,8 +1066,17 @@ impl EntityTable {
 
     /// ItemInHandLayer.submitArmWithItem: the item at the end of the arm, with its model's
     /// third-person transform (mirrored in the left hand).
-    fn held_item(&self, out: &mut Vec<V>, arm: &M, item: i32, left: bool, cx: &DrawCx, lc: [f32; 3]) {
-        let d = self.item_third.get(item as usize).copied().unwrap_or([0.0, 0.0, 0.0, 0.0, 3.0, 1.0, 0.55, 0.55, 0.55]);
+    fn held_item(&self, out: &mut Vec<V>, arm: &M, item: i32, patch: &[u8], left: bool, cx: &DrawCx, lc: [f32; 3]) {
+        // A stack's item_model of a vanilla item takes that item's icon and hand transform.
+        let mut from = item;
+        if !patch.is_empty() {
+            if let (Some(m), _) = crate::itemmodels::of_patch(patch) {
+                if let Some(i) = m.strip_prefix("minecraft:").and_then(|n| cx.blocks.items.iter().position(|x| x == n)) {
+                    from = i as i32;
+                }
+            }
+        }
+        let d = self.item_third.get(from as usize).copied().unwrap_or([0.0, 0.0, 0.0, 0.0, 3.0, 1.0, 0.55, 0.55, 0.55]);
         if d[6] == 0.0 {
             return; // a special renderer's item (shield, banner, head...): not drawn here
         }
@@ -1037,7 +1093,9 @@ impl EntityTable {
         m = mul(&m, &sc(d[6] as f64, d[7] as f64, d[8] as f64));
         m = mul(&m, &tr(-0.5, -0.5, -0.5));
         let (aw, ah) = cx.atlas_size;
-        match cx.icons.get(item as usize) {
+        // Its icon: a server's item_model / custom_model_data overlay, else the game's.
+        let shown = crate::itemmodels::icon_for(cx.overlays, cx.icons, cx.blocks, from, patch);
+        match shown.as_ref() {
             Some(crate::gui::Icon::Flat(layers)) => {
                 let tiles_row = (aw / 16.0) as u32;
                 for &(tile, tint) in layers.iter() {
@@ -1071,6 +1129,25 @@ impl EntityTable {
             _ => {}
         }
     }
+}
+
+/// Whether an entity type is a LivingEntity (invisibility hides its name tag).
+fn is_living(name: &str) -> bool {
+    !(name.ends_with("_display")
+        || name.ends_with("boat")
+        || name.ends_with("raft")
+        || name.ends_with("minecart")
+        || name.ends_with("arrow")
+        || name.ends_with("fireball")
+        || name.ends_with("_charge")
+        || matches!(
+            name,
+            "interaction" | "marker" | "area_effect_cloud" | "item_frame" | "glow_item_frame" | "painting" | "leash_knot" | "tnt"
+                | "falling_block" | "end_crystal" | "lightning_bolt" | "experience_orb" | "item" | "ominous_item_spawner"
+                | "evoker_fangs" | "trident" | "snowball" | "egg" | "ender_pearl" | "eye_of_ender" | "experience_bottle"
+                | "splash_potion" | "lingering_potion" | "wither_skull" | "llama_spit" | "shulker_bullet" | "firework_rocket"
+                | "fishing_bobber" | "block_display" | "item_display" | "text_display" | "small_fireball" | "dragon_fireball"
+        ))
 }
 
 /// Name tags (EntityRenderer.submitNameTag): the text facing the camera half a block above the
@@ -1188,6 +1265,9 @@ impl EntityTable {
                 continue;
             }
             let (w, h) = self.dims(e);
+            if w <= 0.0 || h <= 0.0 {
+                continue; // a marker armor stand, a cloud: nothing to hit
+            }
             let r = w as f64 / 2.0;
             let lo = [e.pos[0] - r, e.pos[1], e.pos[2] - r];
             let hi = [e.pos[0] + r, e.pos[1] + h as f64, e.pos[2] + r];
@@ -1363,7 +1443,18 @@ pub fn selftest() -> alloc::vec::Vec<(&'static str, alloc::string::String, &'sta
     for _ in 0..6 {
         s.tick();
     }
+    // A reused entity id must not match a stale looks-cache entry: versions differ.
+    let (va, vb) = (Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0).version, Entity::new(0, [0; 16], [0.0; 3], 0.0, 0.0, 0.0).version);
+    // A respawn or reconfiguration drops every entity and riding link.
+    let mut table = alloc::collections::BTreeMap::new();
+    table.insert(7, Entity::new(0, [1; 16], [0.0; 3], 0.0, 0.0, 0.0));
+    let mut links = crate::riding::Links::default();
+    links.vehicle_of.insert(7, 8);
+    links.passengers.insert(8, alloc::vec![7]);
+    crate::client::clear_entities(&mut table, &mut links);
     alloc::vec![
+        ("entity versions differ", alloc::format!("{}", va != vb), "true"),
+        ("entities cleared", alloc::format!("{} {} {}", table.len(), links.vehicle_of.len(), links.passengers.len()), "0 0 0"),
         ("entity glides in equal steps", alloc::format!("{}", even), "true"),
         ("entity stops on its target", alloc::format!("{}", f.pos[0] == 1.0 && f.steps == 0), "true"),
         ("frame draws from the tick's start to its end", alloc::format!("{}", glided && (half - 0.25).abs() < 1e-6), "true"),

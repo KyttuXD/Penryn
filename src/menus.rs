@@ -313,7 +313,7 @@ pub fn set_component(patch: &[u8], kind: i32, value: &[u8]) -> Vec<u8> {
 pub fn stack_name(g: &Game, item: i32, patch: &[u8]) -> String {
     for kind in [6, 9] {
         if let Some(v) = component(patch, kind) {
-            let t = crate::nbt::text(&mut In::new(v));
+            let t = if kind == 6 { crate::nbt::text_italic(&mut In::new(v)) } else { crate::nbt::text(&mut In::new(v)) };
             if !t.is_empty() {
                 return t;
             }

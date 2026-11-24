@@ -6,6 +6,7 @@
 extern crate alloc;
 
 mod account;
+mod anim;
 mod update;
 mod textedit;
 mod display;
@@ -53,6 +54,7 @@ mod servers;
 mod serverhud;
 mod serverui;
 mod gamemode;
+mod mining;
 mod tooltip;
 mod skins;
 mod signs;
@@ -433,6 +435,9 @@ fn selftest() -> Result<(), String> {
     for (what, got, want) in talk::selftest().into_iter().chain(text::selftest()).chain(commands::selftest()).chain(chatui::selftest()) {
         check(what, got, want);
     }
+    for (what, got, want) in anim::selftest() {
+        check(what, got, want);
+    }
     for (what, got, want) in textedit::selftest() {
         check(what, got, want);
     }
@@ -488,7 +493,7 @@ fn selftest() -> Result<(), String> {
         check(what, got, want);
     }
     // The server-driven HUD, tooltips and game modes (serverui.bin when present).
-    for (what, got, want) in serverui::selftest().into_iter().chain(tooltip::selftest()).chain(serverhud::selftest()).chain(gamemode::selftest()) {
+    for (what, got, want) in serverui::selftest().into_iter().chain(tooltip::selftest()).chain(mining::selftest()).chain(serverhud::selftest()).chain(gamemode::selftest()).chain(play::selftest()) {
         check(what, got, want);
     }
     // The creative inventory's tabs, search and clicks (needs gui.bin and blocks.bin).

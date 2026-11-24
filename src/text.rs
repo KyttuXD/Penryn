@@ -976,6 +976,31 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     let t0 = crate::sys::now_ms();
     let n = component(&bomb).string().len();
     out.push(("translation bomb bounded", alloc::format!("{}", n <= BUDGET && crate::sys::now_ms() - t0 < 1000), "true"));
+    // A network-NBT component through nbt::text: styles survive, and the italic default
+    // (custom names, lore) yields to an explicit "italic":false.
+    fn comp(entries: &[(u8, &str, &[u8])]) -> Vec<u8> {
+        let mut b = alloc::vec![10u8];
+        for (t, n, v) in entries {
+            b.push(*t);
+            b.extend_from_slice(&(n.len() as u16).to_be_bytes());
+            b.extend_from_slice(n.as_bytes());
+            b.extend_from_slice(v);
+        }
+        b.push(0);
+        b
+    }
+    fn s8(s: &str) -> Vec<u8> {
+        let mut v = (s.len() as u16).to_be_bytes().to_vec();
+        v.extend_from_slice(s.as_bytes());
+        v
+    }
+    let b = comp(&[(8, "text", &s8("hi")), (8, "color", &s8("red")), (1, "bold", &[1]), (1, "underlined", &[1]), (1, "strikethrough", &[1]), (1, "obfuscated", &[1])]);
+    out.push(("nbt text keeps styles", crate::nbt::text(&mut In::new(&b)), "\u{a7}c\u{a7}k\u{a7}l\u{a7}m\u{a7}nhi"));
+    out.push(("nbt text italic default", crate::nbt::text_italic(&mut In::new(&b)), "\u{a7}c\u{a7}k\u{a7}l\u{a7}m\u{a7}n\u{a7}ohi"));
+    let b = comp(&[(8, "text", &s8("x")), (1, "italic", &[0])]);
+    out.push(("nbt italic false wins", crate::nbt::text_italic(&mut In::new(&b)), "x"));
+    let b = comp(&[(8, "text", &s8("g")), (8, "font", &s8("minecraft:nofont"))]);
+    out.push(("nbt unknown font not coded", crate::nbt::text(&mut In::new(&b)), "g"));
     out.push(("formatting codes read back", back.legacy(), "\u{a7}r\u{a7}cred \u{a7}r\u{a7}c\u{a7}lbold\u{a7}r plain"));
     out
 }

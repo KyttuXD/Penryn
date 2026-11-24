@@ -227,6 +227,8 @@ pub struct Particles {
     id_explosion: u16,
     id_large_smoke: u16,
     id_totem: u16,
+    id_crit: u16,
+    id_enchanted_hit: u16,
 }
 
 fn rd16(d: &[u8], o: usize) -> u16 {
@@ -260,6 +262,8 @@ impl Particles {
             id_explosion: 0xFFFF,
             id_large_smoke: 0xFFFF,
             id_totem: 0xFFFF,
+            id_crit: 0xFFFF,
+            id_enchanted_hit: 0xFFFF,
         };
         if let Some(d) = data {
             if p.parse(Some(gl), d).is_none() {
@@ -314,6 +318,8 @@ impl Particles {
                 "explosion" => self.id_explosion = id,
                 "large_smoke" => self.id_large_smoke = id,
                 "totem_of_undying" => self.id_totem = id,
+                "crit" => self.id_crit = id,
+                "enchanted_hit" => self.id_enchanted_hit = id,
                 _ => {}
             }
             let mut k = kind_of(&name);
@@ -1244,6 +1250,19 @@ impl Particles {
         let (w, h) = sizes.get(kind.max(0) as usize).map_or((0.6, 1.8), |s| (s.0 as f64, s.1 as f64));
         // Villager's own events (the minecraft:entity_type id of villager in 26.3).
         let villager = kind == ENTITY_VILLAGER;
+        // ClientboundAnimatePacket's crits (client.rs CRIT_EVENT): the TrackingEmitter, 3 ticks of
+        // 16 tries each, a point in the unit ball a quarter of the body wide, flung outwards.
+        if ev == crate::client::CRIT_EVENT || ev == crate::client::MAGIC_CRIT_EVENT {
+            let ty = if ev == crate::client::CRIT_EVENT { self.id_crit } else { self.id_enchanted_hit };
+            for _ in 0..48 {
+                let v = [self.rd() * 2.0 - 1.0, self.rd() * 2.0 - 1.0, self.rd() * 2.0 - 1.0];
+                if v[0] * v[0] + v[1] * v[1] + v[2] * v[2] > 1.0 {
+                    continue;
+                }
+                self.spawn(g, gui, eye, ty, Opt::None, false, pos[0] + w * v[0] / 4.0, pos[1] + h * (0.5 + v[1] / 4.0), pos[2] + w * v[2] / 4.0, v[0], v[1] + 0.2, v[2]);
+            }
+            return;
+        }
         let (ty, n, dy) = match ev {
             60 | 20 => (self.id_poof, 20, 0.0),
             18 | 7 => (self.id_heart, 7, 0.5),
@@ -1826,6 +1845,8 @@ pub fn selftest(b: &Blocks, w: &World) -> Vec<(&'static str, String, &'static st
         id_explosion: 0xFFFF,
         id_large_smoke: 0xFFFF,
         id_totem: 0xFFFF,
+        id_crit: 0xFFFF,
+        id_enchanted_hit: 0xFFFF,
     };
     let stone = (0..b.states.len() as u16).find(|&s| b.of_state(s).name == "stone").unwrap_or(1);
     p.destroy(w, b, [8, 64, 8], stone);

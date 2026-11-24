@@ -90,6 +90,8 @@ pub struct Game {
     pub entities: alloc::collections::BTreeMap<i32, crate::entities::Entity>,
     /// Set when the arm swings (the hand's swing animation starts).
     pub swung: bool,
+    /// The local player's pose is sleeping (the server's entity data): the in-bed screen shows.
+    pub sleeping: bool,
     /// The level's game time in ticks (clouds drift with it).
     pub game_time: i64,
     /// Sounds the server asked for, waiting for the window to play them.
@@ -100,6 +102,8 @@ pub struct Game {
     /// abilities' flying speed.
     pub move_speed: f64,
     pub jump_strength: f64,
+    /// The mining attributes: mining_efficiency (0), block_break_speed (1), submerged_mining_speed (0.2).
+    pub mining_attrs: [f64; 3],
     pub fly_speed: f32,
     /// The rain and thunder levels (ClientboundGameEventPacket 1, 2, 7 and 8).
     pub rain_level: f32,
@@ -155,6 +159,17 @@ pub struct Container {
     pub patches: Vec<Vec<u8>>,
     pub state: i32,
 }
+
+/// Drops every entity and the riding links with them (a new level): no ghost may remain.
+pub fn clear_entities(entities: &mut alloc::collections::BTreeMap<i32, crate::entities::Entity>, riding: &mut crate::riding::Links) {
+    entities.clear();
+    riding.clear();
+}
+
+/// Pseudo entity events for particles.rs (real ones are 0-127 bytes the server sends; these are
+/// above that range): the animate packet's crits.
+pub const CRIT_EVENT: u8 = 200;
+pub const MAGIC_CRIT_EVENT: u8 = 201;
 
 pub fn uuid_bytes(hex: &str) -> [u8; 16] {
     let mut u = [0u8; 16];
@@ -417,11 +432,13 @@ impl Game {
             clock_rate: 1.0,
             entities: alloc::collections::BTreeMap::new(),
             swung: false,
+            sleeping: false,
             game_time: 0,
             sounds: Vec::new(),
             placing: None,
             move_speed: 0.1f32 as f64,
             jump_strength: 0.42f32 as f64,
+            mining_attrs: [0.0, 1.0, 0.2],
             fly_speed: 0.05,
             rain_level: 0.0,
             thunder_level: 0.0,
@@ -453,6 +470,8 @@ impl Game {
     /// The configuration phase the server started from play (ClientboundStartConfiguration).
     pub fn reconfigure_now(&mut self, ui: &mut dyn crate::packs::Host) -> Result<(), String> {
         self.reconfigure = false;
+        // The old listener and level are gone (the new play phase starts empty).
+        self.reset_session();
         let mut b: Vec<String> = Vec::new();
         let mut dims: Vec<(String, i32, i32)> = Vec::new();
         configure(&mut self.conn, 8, &mut b, &mut dims, &mut self.creative.registries, &mut self.variants, &mut self.packs, ui, Some(&mut self.world), &mut self.blocks, &mut self.ui.common)?;
@@ -516,6 +535,7 @@ impl Game {
             }
             play::C_LOGIN => {
                 // After a reconfiguration the server waits for PlayerLoaded again.
+                self.reset_session();
                 self.positioned = false;
                 self.loaded_sent = false;
                 self.entity_id = r.i32().unwrap_or(0);
@@ -535,6 +555,7 @@ impl Game {
                 crate::say!("joined: entity {}, game mode {}", self.entity_id, self.game_mode);
             }
             play::C_RESPAWN => {
+                self.reset_level();
                 self.riding.clear();
                 self.spawn_info(&mut r);
                 self.dead = false;
@@ -696,12 +717,21 @@ impl Game {
                         match attr {
                             26 => self.move_speed = v.clamp(0.0, 1024.0),
                             19 => self.jump_strength = v.clamp(0.0, 32.0),
+                            24 => self.mining_attrs[0] = v.clamp(0.0, 1024.0),
+                            7 => self.mining_attrs[1] = v.clamp(0.0, 1024.0),
+                            34 => self.mining_attrs[2] = v.clamp(0.0, 20.0),
                             1 => self.armor = v.clamp(0.0, 30.0),
                             23 => self.max_health = v.clamp(1.0, 1024.0),
                             _ => {}
                         }
                     } else {
                         self.riding.on_attribute(id, attr, v);
+                        // generic.scale (Attributes.SCALE, clamped 0.0625..16 as its range).
+                        if attr == 30 {
+                            if let Some(e) = self.entities.get_mut(&id) {
+                                e.scale = v.clamp(0.0625, 16.0) as f32;
+                            }
+                        }
                     }
                 }
             }
@@ -1015,14 +1045,20 @@ impl Game {
                     e.lerp_head_to(h);
                 }
             }
-            // ClientboundAnimatePacket: 0 the main arm swings, 3 the off arm (LivingEntity.swing).
+            // ClientboundAnimatePacket (26.3): 0 WAKE_UP, 1 CRITICAL_HIT, 2 MAGIC_CRITICAL_HIT
+            // (the swings are C_SWING_ANIMATION now).
             play::C_ANIMATE => {
                 let id = r.varint().unwrap_or(0);
                 let action = r.u8().unwrap_or(255);
                 if let Some(e) = self.entities.get_mut(&id) {
                     match action {
-                        0 => e.swing_arm(false),
-                        3 => e.swing_arm(true),
+                        // WAKE_UP: the pose comes with the entity data (nothing to animate).
+                        0 => {}
+                        1 | 2 if self.particle_events.len() < 512 => {
+                            // ClientPacketListener.handleAnimate: 5 crit / magic crit particles
+                            // over the target (Entity.crit, particles.rs).
+                            self.particle_events.push(crate::particles::Effect::Entity(if action == 1 { CRIT_EVENT } else { MAGIC_CRIT_EVENT }, e.pos, e.kind));
+                        }
                         _ => {}
                     }
                 }
@@ -1063,6 +1099,10 @@ impl Game {
                     if let Some(&a) = me.data.get(&1) {
                         self.air = a as i32;
                     }
+                    // Pose (data 6): 2 is sleeping.
+                    if let Some(&pose) = me.data.get(&6) {
+                        self.sleeping = pose as i64 == crate::poses::SLEEPING;
+                    }
                 }
                 if let Some(e) = self.entities.get_mut(&id) {
                     let before = crate::display::snapshot(e);
@@ -1085,7 +1125,7 @@ impl Game {
             crate::mobs::C_SET_EQUIPMENT => {
                 let id = r.varint().unwrap_or(0);
                 if let Some(e) = self.entities.get_mut(&id) {
-                    crate::mobs::equipment(&mut r, e, slot);
+                    crate::mobs::equipment(&mut r, e, crate::creative::read_stack);
                 }
             }
             play::C_SOUND | play::C_SOUND_ENTITY => {
@@ -1184,6 +1224,73 @@ impl Game {
         Ok(())
     }
 
+    /// What a new ClientLevel drops (ClientboundRespawn, and everything below): the entities and
+    /// their links, block entities, map data, the open menu and the world border. The tab list,
+    /// scoreboard, boss bars and inventory belong to the listener and stay.
+    pub fn reset_level(&mut self) {
+        if crate::sys::env("PENRYN_DEBUG").is_some() {
+            crate::say!("new level: {} entities dropped", self.entities.len());
+        }
+        clear_entities(&mut self.entities, &mut self.riding);
+        crate::skins::forget_entities();
+        self.block_entities.clear();
+        self.maps = crate::maps::Maps::new();
+        self.container = None;
+        self.carried = None;
+        self.menus = crate::menus::State::new();
+        self.particle_events.clear();
+        self.placing = None;
+        self.swung = false;
+        self.ui.border = crate::serverui::Border::default();
+        self.ui.camera = None;
+    }
+
+    /// A new ClientPacketListener (a reconfiguration, or a login): the level's state and every
+    /// per-session thing of the listener starts empty. Kept: the connection, the world's
+    /// dimension types and biomes and the registries (configuration data), the options, chat
+    /// lines and history, cookies, links and block tags (ServerUi::common), the resource packs.
+    pub fn reset_session(&mut self) {
+        self.reset_level();
+        self.world.columns.clear();
+        self.world.dirty.clear();
+        self.world.epoch += 1;
+        self.ui.reset_session();
+        self.player_names.clear();
+        crate::skins::forget_profiles();
+        let t = &mut self.talk;
+        t.tree = None;
+        t.suggestions = None;
+        t.names.clear();
+        t.title = None;
+        t.subtitle = None;
+        t.title_ticks = 0;
+        t.overlay = None;
+        self.inventory = [None; 46];
+        self.inventory_state = 0;
+        self.selected = 0;
+        self.creative.patches = alloc::vec![Vec::new(); 46];
+        self.creative.op_level = 0;
+        self.effects.clear();
+        self.sounds.clear();
+        self.voice_in.clear();
+        self.health = 20.0;
+        self.food = 20;
+        self.xp_progress = 0.0;
+        self.xp_level = 0;
+        self.armor = 0.0;
+        self.max_health = 20.0;
+        self.air = 300;
+        self.move_speed = 0.1f32 as f64;
+        self.jump_strength = 0.42f32 as f64;
+        self.fly_speed = 0.05;
+        self.may_fly = false;
+        self.flying = false;
+        self.dead = false;
+        self.entity_id = 0;
+        self.rain_level = 0.0;
+        self.thunder_level = 0.0;
+    }
+
     fn spawn_info(&mut self, r: &mut In) {
         self.effects.clear();
         let dim_type = r.varint().unwrap_or(0);
@@ -1272,12 +1379,18 @@ impl Game {
     }
 
     pub fn place(&mut self, x: i32, y: i32, z: i32, face: i32, cursor: [f32; 3], inside: bool) -> Result<(), String> {
+        self.place_with(0, x, y, z, face, cursor, inside)
+    }
+
+    /// ServerboundUseItemOn for `hand` (0 main, 1 off).
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_with(&mut self, hand: i32, x: i32, y: i32, z: i32, face: i32, cursor: [f32; 3], inside: bool) -> Result<(), String> {
         self.sequence += 1;
         const OFF: [[i32; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
         let o = OFF[face.clamp(0, 5) as usize];
         self.placing = Some(([x + o[0], y + o[1], z + o[2]], crate::sys::now_ms()));
         let mut o = Out::new();
-        o.varint(0).i64(Self::pos_long(x, y, z)).varint(face).f32(cursor[0]).f32(cursor[1]).f32(cursor[2]).bool(inside).bool(false).varint(self.sequence);
+        o.varint(hand).i64(Self::pos_long(x, y, z)).varint(face).f32(cursor[0]).f32(cursor[1]).f32(cursor[2]).bool(inside).bool(false).varint(self.sequence);
         self.conn.send(play::S_USE_ITEM_ON, &o)
     }
 
@@ -1342,14 +1455,28 @@ impl Game {
     }
 
     pub fn use_item(&mut self) -> Result<(), String> {
+        self.use_item_with(0)
+    }
+
+    /// ServerboundUseItem for `hand` (0 main, 1 off).
+    pub fn use_item_with(&mut self, hand: i32) -> Result<(), String> {
         self.sequence += 1;
         let mut o = Out::new();
-        o.varint(0).varint(self.sequence).f32(self.player.yaw).f32(self.player.pitch);
+        o.varint(hand).varint(self.sequence).f32(self.player.yaw).f32(self.player.pitch);
         self.conn.send(play::S_USE_ITEM, &o)
     }
 
     pub fn held(&self) -> Option<(i32, i32)> {
         self.inventory[36 + self.selected as usize]
+    }
+
+    /// The item in a hand (0 main, 1 off: inventory slot 45).
+    pub fn hand_item(&self, hand: i32) -> Option<(i32, i32)> {
+        if hand == 1 {
+            self.inventory[45]
+        } else {
+            self.held()
+        }
     }
 
     pub fn select_slot(&mut self, slot: i16) -> Result<(), String> {
@@ -1545,15 +1672,27 @@ pub(crate) fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option
             }
             3 => {
                 let v = f32::from_bits(r.i32()? as u32);
+                // Display.DATA_VIEW_RANGE_ID (display.rs reads it back as bits).
+                if index == 17 {
+                    e.data.insert(index, v.to_bits() as i64);
+                }
                 // LivingEntity.DATA_HEALTH_ID.
                 if index == 9 && e.item.is_none() {
                     e.health = Some(v);
                 }
+                e.floats.insert(index, v);
             }
             4 => {
                 r.string()?;
             }
-            5 => nbt::skip_root(r)?,
+            5 => {
+                // Display.TextDisplay.DATA_TEXT_ID: kept, styled (display.rs).
+                let start = r.pos;
+                nbt::skip_root(r)?;
+                if index == 23 {
+                    e.disp_text = Some(crate::text::read(&mut crate::wire::In::new(&r.b[start..r.pos])));
+                }
+            }
             6 => {
                 // Entity.DATA_CUSTOM_NAME.
                 let name = if r.bool()? { Some(nbt::text(r)) } else { None };
