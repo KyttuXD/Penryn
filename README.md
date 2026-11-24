@@ -183,7 +183,7 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
   the stack into Penryn's game files with `make_assets.py --packs`: block and item textures and
   models, 26.x item definitions (`items.bin`: the stacks with an `item_model` or a `custom_model_data` string draw their model in slots, the hotbar, the hand, drops and item frames; not yet in the creative tabs or on the cursor), block states, GUI sprites (nine-slice), fonts (bitmap
   providers), language, `sounds.json` and sounds (a small `packsounds.bin` over sounds.bin),
-  particles, entity textures, sun, moon and rain, animated textures (their first frame),
+  particles, entity textures, sun, moon and rain, animated block and model textures (`animations.bin`, anim.rs: frametime, frame lists, interpolate; GUI, entity and particle sheets keep their first frame),
   `pack.mcmeta` formats, overlays and filters; higher-resolution textures are scaled to the
   game's size. Only the files the packs change are fetched, and they are loaded at once, without
   reconnecting. Core shaders are ignored (OpenGL 1.5).
@@ -193,8 +193,8 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 - Menus: no Singleplayer, Realms, friends list, language or credits screens; server addresses
   are not looked up as SRV records.
 - Resource packs: no pack icons, drag and drop or pack folder button in the selection screen;
-  TrueType fonts, pack panoramas and splashes on the title screen, animations past
-  their first frame, and core shaders are not used (bitmap, space and unihex fonts are: the
+  TrueType fonts, pack panoramas and splashes on the title screen, GUI, entity and particle
+  animations past their first frame, and core shaders are not used (bitmap, space and unihex fonts are: the
   packs' other fonts such as `minecraft:gui` draw too, and Unifont's symbols come from a sheet of
   their own).
 - Chat: text in the alt font is drawn with the default glyphs; other players'
@@ -406,6 +406,7 @@ has on the relay's computer (and signs in with another Microsoft account or sign
 | `src/conn.rs`, `net.rs`, `wire.rs`, `zlib.rs`, `crypto.rs`, `md5.rs`, `nbt.rs` | the protocol underneath |
 | `src/world.rs`, `blocks.rs` | chunks and the block table |
 | `src/render.rs` | drawing the world (OpenGL 1.5 fixed function): fog, sky, passes, outline |
+| `src/anim.rs` | animated textures (`animations.bin`): each game tick the frames step, and the changed ones are written into the atlas with glTexSubImage2D, mips included |
 | `src/lightmap.rs` | the light map: the 26.x shader's arithmetic on the CPU, its texture, and how entities, particles and the hand are lit from it |
 | `src/mesher.rs`, `terrain.rs`, `occlusion.rs` | meshing sections on worker threads, their vertex buffers and draw calls, cave culling |
 | `src/perf.rs` | the per-stage frame timer behind `PENRYN_PERF` |

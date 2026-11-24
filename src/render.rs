@@ -81,6 +81,8 @@ pub struct Renderer {
     pub atlas_size: (f32, f32),
     /// The atlas' alpha, kept to extrude flat items held in the hand.
     pub atlas_alpha: Vec<u8>,
+    /// The animated textures (anim.rs).
+    pub anim: crate::anim::Anim,
     /// The rain's fog (AtmosphericFogEnvironment.rainFogMultiplier, 0 to 1): pulls the fog in.
     pub rain_fog: f32,
     /// The vertical field of view, degrees (the FOV option with its effects).
@@ -134,6 +136,7 @@ impl Renderer {
             atlas: 0,
             atlas_size: (1.0, 1.0),
             atlas_alpha: Vec::new(),
+            anim: Default::default(),
             rain_fog: 0.0,
             fov: 70.0,
             lightmap: crate::lightmap::Lightmap::new(),
@@ -193,7 +196,23 @@ impl Renderer {
             lw = nw;
             lh = nh;
         }
+        self.anim = crate::anim::load(&d[8..8 + w * h * 4], w, h);
         Ok(())
+    }
+
+    /// A pack stack that changes animations.bin but not atlas.bin (a texture's frametime): the animations again.
+    pub fn reload_animations(&mut self, atlas_bin: &[u8]) {
+        if atlas_bin.len() >= 8 {
+            let (w, h) = (u16::from_le_bytes([atlas_bin[4], atlas_bin[5]]) as usize, u16::from_le_bytes([atlas_bin[6], atlas_bin[7]]) as usize);
+            if atlas_bin.len() >= 8 + w * h * 4 {
+                self.anim = crate::anim::load(&atlas_bin[8..8 + w * h * 4], w, h);
+            }
+        }
+    }
+
+    /// The animated textures that changed since the last frame go into the atlas (anim.rs).
+    pub fn animate(&mut self, gl: &Gl) {
+        self.anim.upload(gl, self.atlas, &mut self.atlas_alpha);
     }
 
     /// A new world (another server): the old world's meshes go, and the meshing that was on its way.

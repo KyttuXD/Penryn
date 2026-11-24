@@ -38,8 +38,8 @@ pub const FAILED_RELOAD: i32 = 6;
 pub const DISCARDED: i32 = 7;
 
 /// The game files a pack stack can change (relay.py's PACK_FILES).
-pub const FILES: [&str; 13] =
-    ["blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin", "effects.bin", "packsounds.bin", "items.bin", "containers.bin", "menu.bin", "serverui.bin"];
+pub const FILES: [&str; 14] =
+    ["blocks.bin", "atlas.bin", "gui.bin", "entities.bin", "weather.bin", "signs.bin", "particles.bin", "effects.bin", "packsounds.bin", "items.bin", "containers.bin", "menu.bin", "serverui.bin", "animations.bin"];
 
 // ------------------------------------------------------------------ the files in use
 
@@ -59,6 +59,11 @@ fn set_active(v: Vec<String>) {
     // The old list is leaked on purpose: a reader may still hold it (a few bytes per reload).
     ACTIVE.store(Box::into_raw(Box::new(v)), Ordering::Release);
     GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Whether the pack stack in use changes game file `name`.
+pub fn changes(name: &str) -> bool {
+    active().iter().any(|n| n == name)
 }
 
 /// Where game file `name` is read from: the pack stack's copy when it changes it.

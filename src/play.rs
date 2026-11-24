@@ -842,6 +842,7 @@ impl App {
             }
             let partial = 1.0 - ((next_tick - now) as f64 / 50.0).clamp(0.0, 1.0);
             crate::perf::lap(crate::perf::S::Logic);
+            self.r.animate(&self.v.gl);
             self.draw(g, partial);
             // The Max Framerate option (vanilla's FramerateLimitTracker), on top of vsync.
             if let Some(fps) = self.menu.o.frame_limit() {
@@ -1498,6 +1499,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
 
     fn tick(&mut self, g: &mut Game) -> Result<(), String> {
         g.ui.tick();
+        self.r.anim.advance();
         let own = g.name.clone();
         g.ui.refresh_tags(&own);
         let eye = [self.mover.pos[0], self.mover.pos[1] + self.eye_height(), self.mover.pos[2]];
@@ -2641,6 +2643,11 @@ impl crate::packs::Host for App {
                 if let Err(e) = self.r.load_atlas(gl, &d) {
                     say!("{}", e);
                 }
+            }
+        }
+        if has("animations.bin") && !has("atlas.bin") {
+            if let Some(d) = sys::read_file(&path("atlas.bin")) {
+                self.r.reload_animations(&d);
             }
         }
         if has("atlas.bin") || has("particles.bin") {
