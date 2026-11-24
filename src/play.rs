@@ -2807,6 +2807,7 @@ impl crate::packs::Host for App {
         if has("atlas.bin") {
             if let Some(d) = sys::read_file(&path("atlas.bin")) {
                 unsafe { (gl.DeleteTextures)(1, &self.r.atlas) };
+                self.r.atlas = 0;
                 if let Err(e) = self.r.load_atlas(gl, &d) {
                     say!("{}", e);
                 }
