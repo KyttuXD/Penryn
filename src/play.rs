@@ -46,6 +46,8 @@ struct Mining {
     pos: [i32; 3],
     progress: f64,
     ticks: u32,
+    /// The hotbar slot and item id held when the dig began: a change restarts it (sameDestroyTarget).
+    held: (i32, i32),
 }
 
 #[derive(PartialEq)]
@@ -106,6 +108,27 @@ fn use_acts(name: &str) -> bool {
         || ["_helmet", "_chestplate", "_leggings", "_boots"].iter().any(|w| name.ends_with(w))
 }
 
+/// Items whose block has another name (ItemNameBlockItem: crops, berries, redstone, string).
+fn named_block_item(name: &str) -> bool {
+    matches!(
+        name,
+        "carrot" | "potato" | "wheat_seeds" | "beetroot_seeds" | "melon_seeds" | "pumpkin_seeds" | "torchflower_seeds"
+            | "pitcher_pod" | "sweet_berries" | "glow_berries" | "cocoa_beans" | "redstone" | "string"
+    )
+}
+
+/// Whether the player could start eating or drinking this item (Player.canEat): food needs
+/// hunger unless it is always edible, a bow needs an arrow; creative players can always.
+fn can_start_use(g: &Game, name: &str) -> bool {
+    let free = g.game_mode == 1 || g.game_mode == 3;
+    match name {
+        "bow" => free || g.inventory.iter().flatten().any(|&(i, _)| matches!(g.blocks.items.get(i as usize).map(|s| s.as_str()), Some("arrow" | "spectral_arrow" | "tipped_arrow"))),
+        "potion" | "milk_bucket" | "honey_bottle" | "ominous_bottle" | "golden_apple" | "enchanted_golden_apple" | "chorus_fruit" => true,
+        n if use_duration(n) == Some(0) => true,
+        _ => free || g.food < 20,
+    }
+}
+
 /// What the client predicts Item.useOn does to the block aimed at (a consumed result: no
 /// UseItem follows): block items place, tools and utensils act on the blocks they work on.
 fn use_on_consumes(block_item: bool, item: &str, block: &str) -> bool {
@@ -142,6 +165,13 @@ fn use_on_consumes(block_item: bool, item: &str, block: &str) -> bool {
     if item.ends_with("_spawn_egg") {
         return true;
     }
+    // Edible block items place only where the plant can stand, else they are eaten.
+    match item {
+        "carrot" | "potato" => return block == "farmland",
+        "sweet_berries" => return has(&["dirt", "grass_block", "podzol", "mud", "moss_block", "farmland"]),
+        "glow_berries" => return false,
+        _ => {}
+    }
     if block.contains("cauldron") && (item.ends_with("bucket") || item.ends_with("potion") || item == "glass_bottle") {
         return true;
     }
@@ -158,12 +188,21 @@ fn leave_bed_button(gui: &Gui) -> screens::Button {
 
 /// Blocks a right click uses rather than letting the held item act (doors, containers...).
 fn interactive(block: &str) -> bool {
-    ["door", "trapdoor", "gate", "button", "lever", "chest", "barrel", "furnace", "smoker", "crafting_table", "anvil",
-        "bed", "bell", "hopper", "dispenser", "dropper", "shulker_box", "enchanting_table", "brewing_stand", "loom",
-        "cartography_table", "grindstone", "stonecutter", "smithing_table", "lectern", "repeater", "comparator",
-        "note_block", "jukebox", "crafter", "beacon", "cake", "composter", "respawn_anchor"]
-        .iter()
-        .any(|w| block.contains(w))
+    // Iron doors do not open by hand.
+    if block == "iron_door" || block == "iron_trapdoor" {
+        return false;
+    }
+    const EXACT: &[&str] = &[
+        "lever", "barrel", "crafting_table", "bell", "hopper", "dispenser", "dropper", "enchanting_table", "brewing_stand",
+        "loom", "cartography_table", "grindstone", "stonecutter", "smithing_table", "lectern", "repeater", "comparator",
+        "note_block", "jukebox", "crafter", "beacon", "cake", "composter", "respawn_anchor", "daylight_detector",
+        "dragon_egg", "command_block",
+    ];
+    const SUFFIX: &[&str] = &[
+        "_door", "_trapdoor", "_fence_gate", "_button", "chest", "furnace", "smoker", "anvil", "_bed", "shulker_box", "_cake",
+        "_sign", "_shelf", "_command_block",
+    ];
+    EXACT.contains(&block) || SUFFIX.iter().any(|w| block.ends_with(w))
 }
 
 fn tool_of(name: &str) -> (u8, f64, u8) {
@@ -234,6 +273,8 @@ pub struct App {
     right_down: bool,
     /// An item in use (eating, a drawn bow): ticks so far, and how long it lasts (0: until released).
     using: Option<(u32, u32)>,
+    /// What `using` started with: the hand, the selected slot and the item id (a change ends the use).
+    using_key: (i32, i32, i32),
     last_space: u64,
     last_w: u64,
     double_w: bool,
@@ -571,6 +612,7 @@ pub fn run(server: Option<String>, name: &str, account: Option<Account>, relay: 
         left_down: false,
         right_down: false,
         using: None,
+        using_key: (0, 0, 0),
         last_space: 0,
         last_w: 0,
         double_w: false,
@@ -2023,7 +2065,13 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         let hit = if play { self.pick(g) } else { None };
         // Minecraft.handleKeybinds: a use ends as soon as the use key is up (a screen opening
         // releases every key, and its mouse-up never reaches the game).
-        if self.using.is_some() && (!self.right_down || !play) {
+        // LivingEntity.updatingUsingItem: changing the held stack (slot or item) stops the use.
+        let key_now = {
+            let hand = self.using_key.0;
+            (hand, if hand == 0 { g.selected } else { 0 }, g.hand_item(hand).map_or(-1, |(i, _)| i))
+        };
+        let changed = self.using.is_some() && key_now != self.using_key;
+        if self.using.is_some() && (changed || !self.right_down || !play) {
             // A riptide trident throws the player (TridentItem.releaseUsing).
             if let Some((t, _)) = self.using {
                 self.special.release_use(g, &mut self.mover, t, g.rain_level > 0.2);
@@ -2049,7 +2097,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         if self.right_down && play && self.use_delay == 0 && self.using.is_none() {
             self.use_delay = 4;
-            let sneak = self.sneaking();
+            // Sneaking with either hand filled suppresses the block's own use (both hands).
+            let suppress = self.sneaking() && (g.hand_item(0).is_some() || g.hand_item(1).is_some());
             let bname = hit.map(|h| g.blocks.of_state(g.world.get(h.pos[0], h.pos[1], h.pos[2])).name.clone());
             // Minecraft.startUseItem: each hand in turn, the main hand first. A hand tries the
             // block (useItemOn) and, when that passes, the item (useItem); a hand whose action
@@ -2066,11 +2115,18 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     g.place_with(hand, h.pos[0], h.pos[1], h.pos[2], h.face, c, false)?;
                     // The result the client predicts: the block's own use (skipped when sneaking
                     // with something in hand), then what the item does to the block.
-                    let consumed = (!(sneak && stack.is_some()) && interactive(bn)) || (stack.is_some() && use_on_consumes(g.blocks.blocks.iter().any(|b| b.name == name), &name, bn));
+                    let block_item = stack.is_some() && (g.blocks.blocks.iter().any(|b| b.name == name) || named_block_item(&name));
+                    let by_block = !suppress && interactive(bn);
+                    // Only a block item's placement arms the place sound.
+                    if by_block || !block_item {
+                        g.placing = None;
+                    }
+                    let consumed = by_block || (stack.is_some() && use_on_consumes(block_item, &name, bn));
                     if consumed {
                         g.punch()?;
                         if name == "brush" {
                             self.using = Some((0, 0));
+                            self.using_key = (hand, g.selected, stack.map_or(-1, |(i, _)| i));
                         }
                         break;
                     }
@@ -2079,9 +2135,11 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     continue;
                 }
                 g.use_item_with(hand)?;
-                let usable = use_duration(&name);
+                // A use the server would refuse (full hunger, a bow without arrows) passes to the off hand.
+                let usable = use_duration(&name).filter(|_| can_start_use(g, &name));
                 if let Some(d) = usable {
                     self.using = Some((0, d));
+                    self.using_key = (hand, g.selected, stack.map_or(-1, |(i, _)| i));
                 }
                 // WritableBookItem.use: the client opens its own edit screen.
                 if hand == 0 {
@@ -2093,7 +2151,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if usable.is_some() {
                     break;
                 }
-                if use_acts(&name) {
+                if use_duration(&name).is_none() && use_acts(&name) {
                     g.punch()?;
                     break;
                 }
@@ -2193,8 +2251,9 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             return Ok(());
         }
         let per_tick = self.dig_speed(g, h.pos);
+        let held_key = (g.selected, g.held().map_or(-1, |(i, _)| i));
         match &mut self.mining {
-            Some(m) if m.pos == h.pos => {
+            Some(m) if m.pos == h.pos && m.held == held_key => {
                 m.progress += per_tick;
                 m.ticks += 1;
                 if m.progress >= 1.0 {
@@ -2213,7 +2272,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if per_tick >= 1.0 {
                     self.break_locally(g, h.pos); // instant (grass, flowers, torches...)
                 } else {
-                    self.mining = Some(Mining { pos: h.pos, progress: per_tick, ticks: 0 });
+                    self.mining = Some(Mining { pos: h.pos, progress: per_tick, ticks: 0, held: held_key });
                 }
             }
         }
@@ -2920,6 +2979,12 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     v.push(("axe on stone passes (shield follows)", yn(!use_on_consumes(false, "iron_axe", "stone")).into(), "yes"));
     v.push(("axe on log acts", yn(use_on_consumes(false, "iron_axe", "oak_log")).into(), "yes"));
     v.push(("door is interactive", yn(interactive("oak_door")).into(), "yes"));
+    v.push(("bedrock is not interactive", yn(!interactive("bedrock")).into(), "yes"));
+    v.push(("red bed is interactive", yn(interactive("red_bed")).into(), "yes"));
+    v.push(("iron door is not interactive", yn(!interactive("iron_door")).into(), "yes"));
+    v.push(("sign is interactive", yn(interactive("oak_wall_sign") && interactive("trapped_chest")).into(), "yes"));
+    v.push(("carrot plants on farmland only", yn(use_on_consumes(true, "carrot", "farmland") && !use_on_consumes(true, "carrot", "stone")).into(), "yes"));
+    v.push(("seeds and redstone are block items", yn(named_block_item("wheat_seeds") && named_block_item("redstone") && !named_block_item("bread")).into(), "yes"));
     v.push(("lily pad is used, not placed on a block", yn(!use_on_consumes(true, "lily_pad", "water")).into(), "yes"));
     v
 }
