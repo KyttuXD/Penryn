@@ -711,6 +711,17 @@ pub fn selftest_checks(t: &EntityTable) -> Vec<(&'static str, String, &'static s
     inter.floats.insert(8, 2.0);
     inter.floats.insert(9, 3.0);
     v.push(("interaction hitbox", format!("{:?}", t.dims(&inter)), "(2.0, 3.0)"));
+    // Data index 9 is health for a living entity only: an interaction's height 0 is no death.
+    let pk = [9u8, 3, 0, 0, 0, 0, 0xFF];
+    let mut zero = Entity::new(kind("interaction"), [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    let _ = crate::client::entity_data(&mut In::new(&pk), &mut zero);
+    let mut cow9 = Entity::new(kind("cow"), [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    let _ = crate::client::entity_data(&mut In::new(&pk), &mut cow9);
+    v.push((
+        "interaction height is no health, a cow's data 9 is",
+        format!("{} {} {:?} {}", zero.health.is_none(), zero.dying(), cow9.health, cow9.dying()),
+        "true false Some(0.0) true",
+    ));
     let mut stand = Entity::new(kind("armor_stand"), [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
     let full = t.dims(&stand);
     stand.data.insert(15, 1);

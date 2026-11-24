@@ -462,14 +462,16 @@ pub struct ServerUi {
 impl ServerUi {
     /// A new listener (reconfiguration, login): the tab list, teams, scoreboard, boss bars,
     /// titles, border and name-tag caches start empty. What outlives the connection
-    /// (`common`) and what the connection itself says (`online`) stay; the login packet that
-    /// follows sets hardcore and immediate_respawn again.
+    /// (`common`) and what the connection itself says (`online`) stay. The login packet's
+    /// hardcore and immediate_respawn are read after this reset (Game::handle resets first).
+    /// `version` only ever grows, so a cache keyed on it never meets an old key again.
     pub fn reset_session(&mut self) {
         let common = core::mem::take(&mut self.common);
-        let (online, ticks) = (self.online, self.ticks);
+        let (online, ticks, version) = (self.online, self.ticks, self.version);
         *self = ServerUi::new(common);
         self.online = online;
         self.ticks = ticks;
+        self.version = version.wrapping_add(1);
     }
 
     pub fn new(mut common: Common) -> ServerUi {
@@ -1255,7 +1257,9 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     ui.display[1] = Some(String::from("side"));
     ui.border.size = 5.0;
     ui.title = Some(String::from("hi"));
+    ui.version = 7;
     ui.reset_session();
+    out.push(("reset session keeps the version growing", format!("{}", ui.version), "8"));
     out.push((
         "reset session",
         format!("{} {} {} {} {} {} {} {}", ui.players.len(), ui.teams.len() + ui.team_of.len(), ui.display[1].is_none(), ui.border.size > 5.0, ui.title.is_none(), ui.bosses.len(), ui.online, ui.common.cookies.len()),

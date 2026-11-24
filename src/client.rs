@@ -516,6 +516,11 @@ impl Game {
     }
 
     fn handle(&mut self, p: Packet) -> Result<(), String> {
+        // A new listener: the reset comes before serverui::handle reads the login packet's
+        // hardcore and immediate_respawn into the fresh ServerUi.
+        if p.id == play::C_LOGIN {
+            self.reset_session();
+        }
         if self.talk_packet(&p)? || crate::serverui::handle(self, &p)? {
             return Ok(());
         }
@@ -535,7 +540,6 @@ impl Game {
             }
             play::C_LOGIN => {
                 // After a reconfiguration the server waits for PlayerLoaded again.
-                self.reset_session();
                 self.positioned = false;
                 self.loaded_sent = false;
                 self.entity_id = r.i32().unwrap_or(0);
@@ -1237,8 +1241,12 @@ impl Game {
         self.maps = crate::maps::Maps::new();
         self.container = None;
         self.carried = None;
+        // The recipes belong to the listener (UpdateRecipes comes at login and /reload only).
+        let stonecutter = core::mem::take(&mut self.menus.stonecutter);
         self.menus = crate::menus::State::new();
+        self.menus.stonecutter = stonecutter;
         self.particle_events.clear();
+        self.particle_events.push(crate::particles::Effect::Clear);
         self.placing = None;
         self.swung = false;
         self.ui.border = crate::serverui::Border::default();
@@ -1255,6 +1263,7 @@ impl Game {
         self.world.dirty.clear();
         self.world.epoch += 1;
         self.ui.reset_session();
+        self.menus.stonecutter.clear();
         self.player_names.clear();
         crate::skins::forget_profiles();
         let t = &mut self.talk;
@@ -1677,7 +1686,7 @@ pub(crate) fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option
                     e.data.insert(index, v.to_bits() as i64);
                 }
                 // LivingEntity.DATA_HEALTH_ID.
-                if index == 9 && e.item.is_none() {
+                if index == 9 && e.item.is_none() && !crate::entities::nonliving_kind(e.kind) {
                     e.health = Some(v);
                 }
                 e.floats.insert(index, v);
