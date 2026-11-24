@@ -183,6 +183,10 @@ fn nameserver() -> Option<([u8; 4], u16)> {
     if let Some(s) = sys::env("PENRYN_DNS") {
         return parse_ip(&s);
     }
+    // Windows has no resolv.conf: no SRV lookup there (the typed host and port are used; PENRYN_DNS still works).
+    if cfg!(windows) {
+        return None;
+    }
     let text = sys::read_file("/etc/resolv.conf")?;
     for line in String::from_utf8_lossy(&text).lines() {
         if let Some(ip) = line.trim().strip_prefix("nameserver") {
@@ -241,7 +245,7 @@ fn exchange(ns: ([u8; 4], u16), q: &[u8], id: u16) -> Option<Vec<Record>> {
                 }
             }
         }
-        sys::close(fd);
+        sys::sock_close(fd);
     }
     answer
 }

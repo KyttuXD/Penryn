@@ -36,7 +36,7 @@ impl Udp {
                     found = Some(fd);
                     break;
                 }
-                unsafe { sys::close(fd) };
+                unsafe { sys::sock_close(fd) };
             }
             ai = a.ai_next;
         }
@@ -70,6 +70,6 @@ impl Udp {
 
 impl Drop for Udp {
     fn drop(&mut self) {
-        unsafe { sys::close(self.fd) };
+        unsafe { sys::sock_close(self.fd) };
     }
 }

@@ -1,0 +1,160 @@
+# Builds Penryn for Windows: x86_64 (penryn-windows-x86_64.zip) and ARM64 (penryn-windows-arm64.zip). Each zip is
+# published to the rolling pre-release "nightly" (packaging/nightly.sh), next to the Linux and Mac builds that
+# build.yml makes. The zip holds penryn.exe (the C runtime is linked in: no Visual C++ Redistributable needed),
+# SDL2.dll (Penryn loads it at run time, from the folder of penryn.exe), the README, the licence, the relay and
+# game-file maker (tools/) and Penryn-offline.bat. There is no self-update on Windows: download the zip again.
+#
+# SDL2.dll: x86_64 is the official 2.32.10 build (libsdl-org/SDL release, sha256 pinned). The SDL project publishes
+# no ARM64 build of SDL2, so for ARM64 the same release's source zip (sha256 pinned) is built with CMake and
+# Visual Studio on the ARM64 runner (about two minutes).
+#
+# The repository is public, so GitHub-hosted runners (including windows-11-arm) are free.
+name: build-windows
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".claude/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RUST_TOOLCHAIN: "1.99.1"
+  # Built into the program (src/update.rs reads it; the update itself does not exist on Windows).
+  PENRYN_BUILD: ${{ github.run_number }}
+  SDL_VERSION: "2.32.10"
+  SDL_X64_SHA256: "6cf9706eefd0a4a06dc764007934d428afaf029fabdd408a9e646048c91e18fb"
+  SDL_SOURCE_SHA256: "12b2dc2eb8f2836100a7916b5d394a0c82f1f7e32693f95f98305403af242f08"
+
+jobs:
+  windows:
+    name: windows ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: penryn-windows-x86_64.zip
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset: penryn-windows-arm64.zip
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      # The ARM64 image may come without rustup: install it (idempotent: skipped when rustup is there). The
+      # toolchain itself is installed by the next step.
+      - name: Make sure rustup exists
+        run: |
+          if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$USERPROFILE/.cargo/bin/rustup.exe" ]; then
+            case "${{ matrix.arch }}" in
+              arm64) host=aarch64-pc-windows-msvc ;;
+              *) host=x86_64-pc-windows-msvc ;;
+            esac
+            curl -fsSL -o rustup-init.exe "https://static.rust-lang.org/rustup/dist/$host/rustup-init.exe"
+            ./rustup-init.exe -y --default-toolchain none --profile minimal
+            rm -f rustup-init.exe
+          fi
+          echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.arch }}
+
+      # --locked: Cargo.lock has no crates (Penryn uses none). The C runtime is static (.cargo/config.toml).
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # The program's own checks (crypto, compression, parsers, ...): a FAIL line fails the job. The tests that need
+      # the game files (which are not here) skip themselves. It runs penryn.exe natively (x86_64 on the x64 runner,
+      # ARM64 on the ARM64 runner).
+      - name: Selftest
+        run: |
+          exe="target/${{ matrix.target }}/release/penryn.exe"
+          ls -l "$exe"
+          status=0
+          "$exe" selftest > selftest.txt 2>&1 || status=$?
+          cat selftest.txt
+          if grep -E '^FAIL' selftest.txt; then
+            echo "::error::selftest has FAIL lines"
+            exit 1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "::error::selftest exited with status $status"
+            exit 1
+          fi
+
+      # x86_64: the official prebuilt SDL2.dll. ARM64: SDL has none, build it from the pinned source release.
+      - name: "SDL2.dll, x86_64: the official build, sha256 checked"
+        if: matrix.arch == 'x86_64'
+        run: |
+          mkdir -p vendor/sdl2
+          curl -fsSL -o vendor/sdl2/sdl2.zip "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL2-${SDL_VERSION}-win32-x64.zip"
+          echo "${SDL_X64_SHA256}  vendor/sdl2/sdl2.zip" | sha256sum -c -
+          pwsh -NoProfile -Command "Expand-Archive -Force -Path vendor/sdl2/sdl2.zip -DestinationPath vendor/sdl2/out"
+          ls -l vendor/sdl2/out
+          test -f vendor/sdl2/out/SDL2.dll
+          cp vendor/sdl2/out/SDL2.dll vendor/sdl2/SDL2.dll
+          cp vendor/sdl2/out/README-SDL.txt vendor/sdl2/SDL2-README.txt
+      - name: "SDL2.dll, ARM64: built from the source release, sha256 checked"
+        if: matrix.arch == 'arm64'
+        run: |
+          mkdir -p vendor/sdl2
+          curl -fsSL -o vendor/sdl2/src.zip "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL2-${SDL_VERSION}.zip"
+          echo "${SDL_SOURCE_SHA256}  vendor/sdl2/src.zip" | sha256sum -c -
+          pwsh -NoProfile -Command "Expand-Archive -Force -Path vendor/sdl2/src.zip -DestinationPath vendor/sdl2/src"
+          # (CMAKE_POLICY_VERSION_MINIMUM: new CMake refuses the old policy versions SDL2's CMakeLists names.)
+          cmake -S "vendor/sdl2/src/SDL2-${SDL_VERSION}" -B vendor/sdl2/build -A ARM64 \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF -DSDL_TESTS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build vendor/sdl2/build --config Release --parallel
+          dll=$(find vendor/sdl2/build -name SDL2.dll | head -n 1)
+          echo "built: $dll"
+          test -n "$dll"
+          cp "$dll" vendor/sdl2/SDL2.dll
+          cp "vendor/sdl2/src/SDL2-${SDL_VERSION}/LICENSE.txt" vendor/sdl2/SDL2-README.txt
+      - name: Check SDL2.dll
+        run: |
+          ls -l vendor/sdl2/SDL2.dll
+          # The file must be at least a few hundred kB (the x64 build is about 1.6 MB).
+          test "$(wc -c < vendor/sdl2/SDL2.dll)" -gt 500000
+
+      - name: Package
+        run: |
+          out=dist/Penryn
+          rm -rf dist
+          mkdir -p "$out/tools"
+          cp "target/${{ matrix.target }}/release/penryn.exe" "$out/"
+          cp vendor/sdl2/SDL2.dll "$out/"
+          cp vendor/sdl2/SDL2-README.txt "$out/"
+          cp tools/relay.py tools/make_assets.py tools/make_icon.py "$out/tools/"
+          cp README.md LICENSE "$out/"
+          # Double-click to play offline (offline-mode servers; the game files must be in %APPDATA%\Penryn).
+          printf '@echo off\r\ncd /d "%%~dp0"\r\npenryn.exe --offline %%*\r\n' > "$out/Penryn-offline.bat"
+          pwsh -NoProfile -Command "Compress-Archive -Path dist/Penryn -DestinationPath dist/${{ matrix.asset }} -Force"
+          ls -l dist
+          sha256sum "dist/${{ matrix.asset }}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish to nightly
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh packaging/nightly.sh "dist/${{ matrix.asset }}"

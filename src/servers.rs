@@ -400,7 +400,10 @@ fn lan<R>(f: impl FnOnce(&mut Shared) -> R) -> R {
 
 #[cfg(target_os = "macos")]
 const SOCKOPTS: (i32, i32, i32, i32) = (0xffff, 4 | 0x200, 0, 12); // SOL_SOCKET, SO_REUSEADDR|SO_REUSEPORT, IPPROTO_IP, IP_ADD_MEMBERSHIP
-#[cfg(not(target_os = "macos"))]
+// Windows: SOL_SOCKET 0xffff, SO_REUSEADDR 4 (it has no SO_REUSEPORT; this one lets several programs listen), IPPROTO_IP 0, IP_ADD_MEMBERSHIP 12.
+#[cfg(windows)]
+const SOCKOPTS: (i32, i32, i32, i32) = (0xffff, 4, 0, 12);
+#[cfg(not(any(target_os = "macos", windows)))]
 const SOCKOPTS: (i32, i32, i32, i32) = (1, 2, 0, 35);
 
 fn sockaddr(port: u16, addr: [u8; 4]) -> [u8; 16] {
@@ -445,7 +448,7 @@ extern "C" fn listen(_: *mut c_void) -> *mut c_void {
         }
         let a = sockaddr(4445, [0; 4]);
         if sys::bind(fd, a.as_ptr() as *const c_void, 16) != 0 {
-            sys::close(fd);
+            sys::sock_close(fd);
             return core::ptr::null_mut();
         }
         let mreq: [u8; 8] = [224, 0, 2, 60, 0, 0, 0, 0];

@@ -1,0 +1,8 @@
+# Windows: link the C runtime statically (libcmt, libvcruntime, libucrt are inside penryn.exe), so the nightly zip
+# runs on a PC without the "Visual C++ Redistributable". Only the two Windows targets are touched; Linux and the
+# Mac cross build do not read this. (A RUSTFLAGS in the environment replaces it: then give the flag there.)
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

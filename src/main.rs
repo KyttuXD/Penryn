@@ -125,7 +125,7 @@ const USAGE: &str = "Penryn: a Minecraft Java Edition 26.3 client for old Macs
   --no-update                      (with the title screen or play) skip the check for a newer nightly build
   --offline                        (or PENRYN_OFFLINE=1) no relay at all: offline play as --name (else the user
                                    name of this computer), on offline-mode servers; the game files must be in the
-                                   data folder (Linux: ~/.local/share/penryn, or PENRYN_DATA)
+                                   data folder (Linux: ~/.local/share/penryn, Windows: %APPDATA%\\Penryn, or PENRYN_DATA)
   penryn add-server HOST[:PORT] [NAME]
                                    put a server in the Multiplayer list (servers.dat)
   penryn join HOST[:PORT] [NAME]   join without a window, printing what happens (tests)
@@ -149,6 +149,21 @@ pub fn data_dir() -> String {
                 if !MADE.swap(true, core::sync::atomic::Ordering::Relaxed) {
                     sys::make_dir(&alloc::format!("{}/.local", home));
                     sys::make_dir(&alloc::format!("{}/.local/share", home));
+                    sys::make_dir(&d);
+                }
+                return d;
+            }
+        }
+    }
+    // Windows: without PENRYN_DATA and without game files in the current folder, %APPDATA%/Penryn
+    // (made on first use).
+    #[cfg(windows)]
+    {
+        if sys::read_head("./blocks.bin", 4).is_none() {
+            if let Some(appdata) = sys::env("APPDATA") {
+                let d = alloc::format!("{}/Penryn", appdata);
+                static MADE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+                if !MADE.swap(true, core::sync::atomic::Ordering::Relaxed) {
                     sys::make_dir(&d);
                 }
                 return d;
@@ -722,8 +737,26 @@ fn physics_checks(b: &blocks::Blocks) -> Vec<(&'static str, String, &'static str
     out
 }
 
+/// The C entry point. Windows: the real work runs on a thread with a bigger stack (sys_win.rs), and the
+/// command line is read again as UTF-16 (the CRT's argv is in the ANSI code page).
 #[no_mangle]
 pub extern "C" fn main(argc: c_int, argv: *const *const c_char) -> c_int {
+    #[cfg(windows)]
+    {
+        sys::init_console();
+        sys::run_main(sys::MainArgs { f: start, argc, argv })
+    }
+    #[cfg(not(windows))]
+    start(argc, argv)
+}
+
+fn start(argc: c_int, argv: *const *const c_char) -> c_int {
+    #[cfg(windows)]
+    let args: Vec<String> = {
+        let _ = (argc, argv);
+        sys::args()
+    };
+    #[cfg(not(windows))]
     let args: Vec<String> = (0..argc as usize).map(|i| unsafe { sys::from_cstr(*argv.add(i)) }).collect();
     sys::install_local_bin();
     match run(&args) {
