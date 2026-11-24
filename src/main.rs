@@ -6,6 +6,7 @@
 extern crate alloc;
 
 mod account;
+mod anim;
 mod update;
 mod textedit;
 mod display;
@@ -432,6 +433,9 @@ fn selftest() -> Result<(), String> {
     let z = zlib::store(&data);
     check("zlib stored round trip", alloc::format!("{}", zlib::inflate(&z, data.len()) == Some(data.clone())), "true");
     for (what, got, want) in talk::selftest().into_iter().chain(text::selftest()).chain(commands::selftest()).chain(chatui::selftest()) {
+        check(what, got, want);
+    }
+    for (what, got, want) in anim::selftest() {
         check(what, got, want);
     }
     for (what, got, want) in textedit::selftest() {

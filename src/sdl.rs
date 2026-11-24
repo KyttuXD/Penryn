@@ -216,6 +216,7 @@ api! { Gl, "gl", "system",
     DeleteTextures(i32, *const u32);
     BindTexture(u32, u32);
     TexImage2D(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
+    TexSubImage2D(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
     TexParameteri(u32, u32, i32);
     TexCoordPointer(i32, u32, i32, *const c_void);
     AlphaFunc(u32, f32);

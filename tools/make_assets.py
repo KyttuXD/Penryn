@@ -38,6 +38,7 @@ blocks.bin (little-endian), "PNBD":
 kind: 0 air, 1 solid, 2 cutout, 3 plant (no collision), 4 water, 5 lava, 6 invisible solid
 
 atlas.bin: "PNA2", u16 width, u16 height, then width x height RGBA (16x16 tiles).
+animations.bin: "PNAM", see write_animations (the .mcmeta animations of the atlas' textures).
 items.bin: see the writer in main (the packs' item definitions, keyed by ns:path).
 """
 import json
@@ -377,6 +378,39 @@ class Assets:
                 img = first_frame(img, anim, k)
         return img
 
+    def animation(self, rel):
+        """A texture's .mcmeta animation as (frames, sequence, interpolate), or None for a still one: frames are the
+        distinct sprite frames as (w, h, rgba) (scaled down like image()), sequence the (frame, ticks) order."""
+        if not isinstance(rel, str) or not rel.endswith(".png"):
+            return None
+        meta = self.meta(rel)
+        if not meta:
+            return None
+        try:
+            anim = json.loads(meta.decode("utf-8-sig")).get("animation")
+        except (ValueError, AttributeError):
+            return None
+        if not isinstance(anim, dict):
+            return None
+        data = self.read(rel)
+        size = png_header(data)
+        own = self.from_pack(rel) if self.packs else None
+        if own is not None and size and size[0] * size[1] > PACK_IMAGE_LIMIT:
+            return None
+        img = png_decode(data)
+        if img is None:
+            return None
+        k = 1
+        if own is not None:
+            base = self.base(full_name(rel))
+            bimg = png_header(base) if base else None
+            w, h, px = img
+            if bimg and (bimg[0], bimg[1]) != (w, h) and w % bimg[0] == 0 and h % bimg[1] == 0 \
+                    and w // bimg[0] == h // bimg[1]:
+                k = w // bimg[0]
+                img = scale_down(img, k)
+        return anim_frames(img, anim, k)
+
     def names(self):
         """Every assets/... file of the stack."""
         out = set(self.zip.namelist()) if self.zip else set()
@@ -428,6 +462,55 @@ def first_frame(img, anim, k=1):
         o = ((y0 + y) * w + x0) * 4
         out += px[o:o + fw * 4]
     return fw, fh, bytes(out)
+
+
+def anim_frames(img, anim, k=1):
+    """(frames, sequence, interpolate) of an .mcmeta animation over a strip image (the geometry of first_frame):
+    frames are the used sprite frames (w, h, rgba) renumbered from 0, sequence is [(frame, ticks)] as
+    SpriteContents.AnimatedTexture orders it (frametime default 1, per frame 'time'). None when it never changes."""
+    w, h, px = img
+    side = min(w, h)
+    fw = max(1, int(anim.get("width", side * k)) // k)
+    fh = max(1, int(anim.get("height", side * k)) // k)
+    if "width" in anim and "height" not in anim:
+        fh = h
+    if "height" in anim and "width" not in anim:
+        fw = w
+    fw, fh = min(fw, w), min(fh, h)
+    cols, rows = max(1, w // fw), max(1, h // fh)
+    count = cols * rows
+    try:
+        default = max(1, int(anim.get("frametime", 1)))
+    except (TypeError, ValueError):
+        default = 1
+    seq = []
+    listed = anim.get("frames")
+    if isinstance(listed, list) and listed:
+        for f in listed:
+            try:
+                if isinstance(f, dict):
+                    idx, t = int(f.get("index", 0)), max(1, int(f.get("time", default)))
+                else:
+                    idx, t = int(f), default
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < count:
+                seq.append((idx, min(t, 65535)))
+    else:
+        seq = [(i, default) for i in range(count)]
+    if len({i for i, _ in seq}) < 2:
+        return None
+    used = sorted({i for i, _ in seq})
+    number = {i: n for n, i in enumerate(used)}
+    frames = []
+    for i in used:
+        x0, y0 = (i % cols) * fw, (i // cols) * fh
+        out = bytearray()
+        for y in range(fh):
+            o = ((y0 + y) * w + x0) * 4
+            out += px[o:o + fw * 4]
+        frames.append((fw, fh, bytes(out)))
+    return frames, [(number[i], t) for i, t in seq], bool(anim.get("interpolate", False))
 
 
 def scale_down(img, k):
@@ -542,6 +625,58 @@ def tile_of(img):
             o = (sy * w + sx) * 4
             out[(y * TILE + x) * 4:(y * TILE + x) * 4 + 4] = px[o:o + 4]
     return bytes(out)
+
+
+ANIM_BUDGET = 12_000_000  # pixels of animation frames in animations.bin (48 MB)
+
+
+def resample(frame, w, h):
+    """A frame (sw, sh, rgba) cut to w x h by nearest (like tile_of and hd_layout)."""
+    sw, sh, spx = frame
+    if (sw, sh) == (w, h):
+        return spx
+    cols = [(x * sw // w) * 4 for x in range(w)]
+    out = bytearray()
+    for y in range(h):
+        o = (y * sh // h) * sw * 4
+        for c in cols:
+            out += spx[o + c:o + c + 4]
+    return bytes(out)
+
+
+def write_animations(out_dir, anim_list, tile_cell, hd_rects, width, height):
+    """animations.bin, "PNAM" (little-endian), the animated textures of atlas.bin: u16 atlas width, u16 atlas height,
+    u32 count, then per animation u16 x, y, w, h (its place in the atlas), u8 flags (1 interpolate), u16 frames, u16
+    sequence length, the sequence as (u16 frame, u16 ticks), and every distinct frame as w x h RGBA (cut to the
+    atlas region the way tile_of / hd_layout cut the first one). Always written (a pack stack's atlas without
+    animations says so)."""
+    recs = []
+    pixels = 0
+    for kind, ident, (frames, seq, interp) in anim_list:
+        if kind == "tile":
+            x, y = tile_cell(ident)
+            w = h = TILE
+        else:
+            x, y, w, h = hd_rects[ident]
+        cost = w * h * len(frames)
+        if pixels + cost > ANIM_BUDGET:
+            print("animations.bin: over budget, a %dx%d texture with %d frames is left still" % (w, h, len(frames)))
+            continue
+        pixels += cost
+        if kind == "tile":
+            data = [tile_of(f) for f in frames]
+        else:
+            data = [resample(f, w, h) for f in frames]
+        recs.append((x, y, w, h, interp, seq, data))
+    with open(os.path.join(out_dir, "animations.bin"), "wb") as f:
+        f.write(b"PNAM" + struct.pack("<HHI", width, height, len(recs)))
+        for x, y, w, h, interp, seq, data in recs:
+            f.write(struct.pack("<HHHHBHH", x, y, w, h, 1 if interp else 0, len(data), len(seq)))
+            for fr, t in seq:
+                f.write(struct.pack("<HH", fr, t))
+            for d in data:
+                f.write(d)
+    print("animations.bin: %d animated textures, %d pixels of frames" % (len(recs), pixels))
 
 
 HD_BUDGET = 7_000_000  # pixels of big textures in the atlas (1024 wide: about 8192 high at most)
@@ -1396,6 +1531,7 @@ def main():
     tiles = []          # RGBA 16x16
     tile_index = {}     # texture path -> (index, alpha class: 0 opaque, 1 cutout, 2 translucent)
     missing = set()
+    anim_list = []      # ("tile", atlas slot | "hd", big texture number, (frames, sequence, interpolate)): animations.bin
 
     def texture(path):
         if path in tile_index:
@@ -1413,6 +1549,9 @@ def main():
             t = bytes(t)
         else:
             t = tile_of(img)
+            an = assets.animation("textures/" + path + ".png")
+            if an:
+                anim_list.append(("tile", len(tiles) + RESERVED, an))
         alphas = t[3::4]
         cls = 0
         if any(0 < a < 255 for a in alphas):
@@ -1466,6 +1605,9 @@ def main():
         cls = 2 if any(0 < a < 255 for a in alphas) else (1 if any(a == 0 for a in alphas) else 0)
         hd_ids[path] = len(hd_list)
         hd_list.append((path, w, h, px, cls))
+        an = assets.animation("textures/" + path + ".png")
+        if an:
+            anim_list.append(("hd", hd_ids[path], an))
         return hd_ids[path], cls
 
     CHEST_TEX = {"chest": "normal", "trapped_chest": "trapped", "ender_chest": "ender"}
@@ -2013,6 +2155,8 @@ def main():
             f.write(bytes([len(nb)]) + nb + struct.pack("<4I", *cols))
     with open(os.path.join(out_dir, "atlas.bin"), "wb") as f:
         f.write(b"PNA2" + struct.pack("<HH", width, height) + bytes(atlas))
+    write_animations(out_dir, anim_list, tile_cell=lambda slot: ((slot % 64) * TILE, (slot // 64) * TILE),
+                     hd_rects=[(hx, hd_y0 + hy, hw, hh) for hx, hy, hw, hh, _ in hd_place[0]], width=width, height=height)
     make_particles(assets, res, out_dir, particle_tiles, width, height)
 
     # ---- the GUI: vanilla's sprites, the font, the item icons
