@@ -583,12 +583,12 @@ fn predicates(r: &mut In) -> Option<Vec<Predicate>> {
 
 fn read_value(p: &mut Parsed, kind: i32, r: &mut In) -> Option<()> {
     match kind {
-        CUSTOM_NAME => p.custom_name = Some(nbt::text(r)),
+        CUSTOM_NAME => p.custom_name = Some(nbt::text_italic(r)),
         ITEM_NAME => p.item_name = Some(nbt::text(r)),
         LORE => {
             let n = r.varint()?;
             for _ in 0..n.clamp(0, 256) {
-                p.lore.push(nbt::text(r));
+                p.lore.push(nbt::text_italic(r));
             }
         }
         RARITY => p.rarity = Some(r.varint()?.clamp(0, 3)),
@@ -931,7 +931,7 @@ pub fn lines(g: &Game, item: i32, patch: &[u8], rarity: i32, defaults: Option<&D
     };
     let id = g.blocks.items.get(item as usize).cloned().unwrap_or_default();
     let name = match (&p.custom_name, &p.item_name) {
-        // A custom name is in italics (not drawn by Penryn's font).
+        // A custom name is in italics (text_italic).
         (Some(c), _) => c.clone(),
         (None, Some(n)) => n.clone(),
         _ => lang::item_name(&id),
@@ -1120,7 +1120,7 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     out.push((
         "patch parse",
         format!("{:?} {:?} {:?} {} {} {:?}", p.custom_name, p.lore, p.enchantments, p.modifiers.as_ref().map_or(0, |m| m.len()), p.unbreakable, p.removed),
-        "Some(\"Blade\") [\"Old!\"] Some([(0, 3)]) 1 true [47]",
+        "Some(\"\u{a7}oBlade\") [\"\u{a7}oOld!\"] Some([(0, 3)]) 1 true [47]",
     ));
     let m = &p.modifiers.as_ref().unwrap()[0];
     out.push(("modifier fields", format!("{} {} {} {} {}", m.attribute, m.id, m.amount, m.op, m.slot), "26 x:fast 0.1 2 1"));
