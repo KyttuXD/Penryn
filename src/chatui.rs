@@ -7,6 +7,7 @@
 //! and action bar.
 
 use crate::client::Game;
+use crate::textedit::{self, Edit, Filter};
 use crate::gui::Gui;
 use crate::talk::Tag;
 use crate::text::{self, Click, Hover, Rich, Style};
@@ -14,30 +15,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 // SDL scancodes.
-const K_C: usize = 6;
-const K_V: usize = 25;
-const K_X: usize = 27;
-const K_A: usize = 4;
 const K_RETURN: usize = 40;
 const K_ESC: usize = 41;
-const K_BACKSPACE: usize = 42;
 const K_TAB: usize = 43;
-const K_HOME: usize = 74;
 const K_PAGEUP: usize = 75;
-const K_DELETE: usize = 76;
-const K_END: usize = 77;
 const K_PAGEDOWN: usize = 78;
-const K_RIGHT: usize = 79;
-const K_LEFT: usize = 80;
 const K_DOWN: usize = 81;
 const K_UP: usize = 82;
 const K_KP_ENTER: usize = 88;
-const K_LCTRL: usize = 224;
-const K_LSHIFT: usize = 225;
-const K_LGUI: usize = 227;
-const K_RCTRL: usize = 228;
-const K_RSHIFT: usize = 229;
-const K_RGUI: usize = 231;
 
 /// CommandSuggestions.ARGUMENT_STYLES: aqua, yellow, green, light purple, gold.
 const ARGUMENT_COLORS: [char; 5] = ['b', 'e', 'a', 'd', '6'];
@@ -79,11 +64,12 @@ pub enum Act {
     Close,
 }
 
-#[derive(Default)]
 pub struct ChatUi {
-    pub input: String,
-    /// A byte index into `input`.
-    cursor: usize,
+    /// The input line: text, caret, selection (textedit.rs), 256 UTF-16 units, no control characters or section signs.
+    pub ed: Edit,
+    /// A mouse drag that started in the input line, and the last click (time, x) for the double click.
+    dragging: bool,
+    last_click: (u64, f32),
     /// Browsing the history: the index into it, and the line being written before.
     history: Option<usize>,
     draft: String,
@@ -103,6 +89,30 @@ pub struct ChatUi {
     confirm: Option<Confirm>,
     focused_at: u64,
     test_ticks: u64,
+}
+
+impl Default for ChatUi {
+    fn default() -> ChatUi {
+        ChatUi {
+            ed: Edit::new(256, Filter::Line),
+            dragging: false,
+            last_click: (0, 0.0),
+            history: None,
+            draft: String::new(),
+            list: None,
+            pending: Vec::new(),
+            waiting: None,
+            keep: false,
+            usage: Vec::new(),
+            usage_x: 0.0,
+            usage_w: 0.0,
+            formatted: String::new(),
+            scroll: 0,
+            confirm: None,
+            focused_at: 0,
+            test_ticks: 0,
+        }
+    }
 }
 
 fn char_floor(s: &str, mut i: usize) -> usize {
@@ -126,15 +136,13 @@ impl ChatUi {
     /// ChatScreen.init: the chat opened with `initial` typed.
     pub fn open(&mut self, g: &mut Game, initial: &str) {
         *self = ChatUi { test_ticks: self.test_ticks, ..ChatUi::default() };
-        self.input = String::from(initial);
-        self.cursor = self.input.len();
+        self.ed.set(initial);
         self.focused_at = crate::sys::now_ms();
         self.edited(g);
     }
 
     fn set_input(&mut self, g: &mut Game, s: &str) {
-        self.input = crate::talk::truncate_utf16(s, 256);
-        self.cursor = self.input.len();
+        self.ed.set(s);
         self.edited(g);
     }
 
@@ -143,16 +151,12 @@ impl ChatUi {
         if self.confirm.is_some() {
             return;
         }
-        // SharedConstants.filterText: no control characters.
-        let s: String = s.chars().filter(|c| *c >= ' ' && *c != '\u{7f}' && *c != '\u{a7}').collect();
-        let room = 256usize.saturating_sub(self.input.encode_utf16().count());
-        let s = crate::talk::truncate_utf16(&s, room);
-        if s.is_empty() {
-            return;
+        // SharedConstants.filterText (Filter::Line); typing over a selection replaces it.
+        let before = (self.ed.text.len(), self.ed.cursor, self.ed.anchor);
+        self.ed.insert(s);
+        if before != (self.ed.text.len(), self.ed.cursor, self.ed.anchor) {
+            self.edited(g);
         }
-        self.input.insert_str(self.cursor, &s);
-        self.cursor += s.len();
-        self.edited(g);
     }
 
     /// CommandSuggestions.updateCommandInfo (the EditBox's responder).
@@ -162,8 +166,8 @@ impl ChatUi {
         }
         self.usage.clear();
         self.formatted.clear();
-        let cursor = self.cursor;
-        let text = self.input.clone();
+        let cursor = self.ed.cursor;
+        let text = self.ed.text.clone();
         if text.starts_with('/') && g.talk.tree.is_some() {
             let (parse, ctx) = {
                 let tree = g.talk.tree.as_ref().unwrap();
@@ -206,9 +210,9 @@ impl ChatUi {
     /// suggestion list shown (autoSuggestions).
     fn usage_info(&mut self, g: &Game, parse: &crate::commands::Parse, node: usize, start: usize) {
         let Some(tree) = g.talk.tree.as_ref() else { return };
-        let input = &self.input;
+        let input = &self.ed.text;
         let mut trailing = false;
-        if self.cursor == input.len() {
+        if self.ed.cursor == input.len() {
             if self.pending.is_empty() && self.waiting.is_none() && !parse.errors.is_empty() {
                 let mut literals = 0;
                 for e in &parse.errors {
@@ -248,7 +252,7 @@ impl ChatUi {
         if self.pending.is_empty() {
             return;
         }
-        let mut l = List { items: self.pending.clone(), sel: 0, offset: 0, tab_cycles: false, original: self.input.clone() };
+        let mut l = List { items: self.pending.clone(), sel: 0, offset: 0, tab_cycles: false, original: self.ed.text.clone() };
         // sortSuggestions: those starting with the typed word first (already sorted).
         l.sel = 0;
         self.list = Some(l);
@@ -270,8 +274,9 @@ impl ChatUi {
         let Some(l) = self.list.take() else { return };
         let (t, cur) = self.apply(&l, l.sel);
         self.keep = true;
-        self.input = crate::talk::truncate_utf16(&t, 256);
-        self.cursor = cur.min(self.input.len());
+        self.ed.set(&t);
+        self.ed.cursor = char_floor(&self.ed.text, cur);
+        self.ed.anchor = self.ed.cursor;
         self.list = Some(l);
         self.edited(g);
         self.keep = false;
@@ -292,14 +297,10 @@ impl ChatUi {
         }
     }
 
-    fn move_cursor(&mut self, to: usize) {
-        self.cursor = char_floor(&self.input, to);
-    }
-
     /// ChatScreen.keyPressed with CommandSuggestions and the EditBox.
     pub fn key(&mut self, g: &mut Game, sc: usize, keys: &[bool], v: &crate::sdl::Video) -> Result<Act, String> {
-        let shift = keys[K_LSHIFT] || keys[K_RSHIFT];
-        let ctrl = keys[K_LCTRL] || keys[K_RCTRL] || keys[K_LGUI] || keys[K_RGUI];
+        let shift = textedit::shift(keys);
+        let command = textedit::command(keys);
         if let Some(c) = self.confirm.take() {
             match sc {
                 K_ESC => {}
@@ -341,7 +342,9 @@ impl ChatUi {
         match sc {
             K_ESC => return Ok(Act::Close),
             K_RETURN | K_KP_ENTER => {
-                let line = core::mem::take(&mut self.input);
+                let line = core::mem::take(&mut self.ed.text);
+                self.ed.cursor = 0;
+                self.ed.anchor = 0;
                 g.send_line(&line)?;
                 return Ok(Act::Close);
             }
@@ -349,46 +352,15 @@ impl ChatUi {
             K_DOWN => self.history_move(g, 1),
             K_PAGEUP => self.scroll_by(g, 19),
             K_PAGEDOWN => self.scroll_by(g, -19),
-            K_BACKSPACE if self.cursor > 0 => {
-                let to = if ctrl { word_left(&self.input, self.cursor) } else { prev_char(&self.input, self.cursor) };
-                self.input.replace_range(to..self.cursor, "");
-                self.cursor = to;
-                self.edited(g);
+            _ => {
+                // The EditBox: arrows, Home, End, Backspace, Delete, select all, copy, cut, paste.
+                let before = (self.ed.text.clone(), self.ed.cursor, self.ed.anchor);
+                if self.ed.key(sc, command, shift, &mut || v.clipboard(), &mut |t| v.set_clipboard(t))
+                    && before != (self.ed.text.clone(), self.ed.cursor, self.ed.anchor)
+                {
+                    self.edited(g);
+                }
             }
-            K_DELETE if self.cursor < self.input.len() => {
-                let to = if ctrl { word_right(&self.input, self.cursor) } else { next_char(&self.input, self.cursor) };
-                self.input.replace_range(self.cursor..to, "");
-                self.edited(g);
-            }
-            K_LEFT => {
-                let to = if ctrl { word_left(&self.input, self.cursor) } else { prev_char(&self.input, self.cursor) };
-                self.move_cursor(to);
-                self.edited(g);
-            }
-            K_RIGHT => {
-                let to = if ctrl { word_right(&self.input, self.cursor) } else { next_char(&self.input, self.cursor) };
-                self.move_cursor(to);
-                self.edited(g);
-            }
-            K_HOME => {
-                self.cursor = 0;
-                self.edited(g);
-            }
-            K_END => {
-                self.cursor = self.input.len();
-                self.edited(g);
-            }
-            K_V if ctrl => {
-                let c = v.clipboard();
-                self.type_text(g, &c);
-            }
-            K_C if ctrl => v.set_clipboard(&self.input),
-            K_X if ctrl => {
-                v.set_clipboard(&self.input);
-                self.set_input(g, "");
-            }
-            K_A if ctrl => self.cursor = self.input.len(),
-            _ => {}
         }
         Ok(Act::None)
     }
@@ -402,7 +374,7 @@ impl ChatUi {
             return;
         }
         if self.history.is_none() {
-            self.draft = self.input.clone();
+            self.draft = self.ed.text.clone();
         }
         if next == n {
             self.history = None;
@@ -446,6 +418,34 @@ impl ChatUi {
         Some((x, top, w + 1.0, rows))
     }
 
+    /// The input line's band (ChatScreen: 2, height - 14 to width - 2, height - 2).
+    fn in_input(&self, gui: &Gui, mx: f32, my: f32) -> bool {
+        mx >= 2.0 && mx < gui.width - 2.0 && my >= gui.height - 14.0 && my < gui.height - 2.0
+    }
+
+    /// EditBox.displayPos: how far the text is scrolled left to keep the caret in view.
+    fn scroll_x(&self, gui: &Gui) -> f32 {
+        let pre_w = gui.text_width(&self.ed.text[..self.ed.cursor]);
+        let field = gui.width - 8.0;
+        if pre_w > field { pre_w - field } else { 0.0 }
+    }
+
+    /// The character boundary nearest to the mouse x, from the text as it is drawn.
+    fn index_at(&self, gui: &Gui, mx: f32) -> usize {
+        textedit::index_at(&self.ed.text, mx - 4.0 + self.scroll_x(gui), &|s| gui.text_width(s))
+    }
+
+    /// The mouse moved with the left button `held`: a drag that started in the input line extends the selection.
+    pub fn drag(&mut self, gui: &Gui, mx: f32, held: bool) {
+        if !held || self.confirm.is_some() {
+            self.dragging = false;
+        }
+        if self.dragging {
+            let at = self.index_at(gui, mx);
+            self.ed.click(at, true);
+        }
+    }
+
     /// ChatScreen.mouseClicked: a suggestion, a chat component's click event (or its
     /// insertion with shift), or a confirmation's button.
     pub fn click(&mut self, g: &mut Game, gui: &Gui, mx: f32, my: f32, button: u8, shift: bool, v: &crate::sdl::Video) -> Result<Act, String> {
@@ -471,6 +471,23 @@ impl ChatUi {
                 self.use_suggestion(g);
                 return Ok(Act::None);
             }
+        }
+        if self.in_input(gui, mx, my) {
+            // EditBox.mouseClicked: the caret goes to the nearest character, shift extends the selection, a double
+            // click selects the word, and holding the button drags a selection.
+            let at = self.index_at(gui, mx);
+            let now = crate::sys::now_ms();
+            let double = now.saturating_sub(self.last_click.0) < 400 && (mx - self.last_click.1).abs() < 3.0;
+            if double {
+                self.ed.select_word(at);
+                self.last_click = (0, 0.0);
+            } else {
+                self.ed.click(at, shift);
+                self.last_click = (now, mx);
+            }
+            self.dragging = !double;
+            self.edited(g);
+            return Ok(Act::None);
         }
         let Some((msg, st)) = style_at(g, gui, self.scroll, mx, my) else { return Ok(Act::None) };
         let ev = g.talk.msgs.get(msg).and_then(|m| m.rich.events_of(&st)).cloned().unwrap_or_default();
@@ -557,7 +574,7 @@ impl ChatUi {
                 self.pending.push(Suggestion { text: s.text, tooltip: s.tooltip, start, end });
             }
         }
-        let typed = &self.input[char_floor(&self.input, start)..char_floor(&self.input, self.cursor)];
+        let typed = &self.ed.text[char_floor(&self.ed.text, start)..char_floor(&self.ed.text, self.ed.cursor)];
         let mut texts: Vec<String> = self.pending.iter().map(|p| p.text.clone()).collect();
         crate::commands::sort_suggestions(&mut texts, typed);
         let mut sorted = Vec::new();
@@ -574,9 +591,9 @@ impl ChatUi {
             }
         } else if let Some(t) = g.talk.tree.as_ref() {
             // Nothing from the server either: the usage again, errors included.
-            if self.input.starts_with('/') {
-                let p = t.parse(&self.input, 1);
-                let (node, start) = t.suggestion_context(&p, self.cursor);
+            if self.ed.text.starts_with('/') {
+                let p = t.parse(&self.ed.text, 1);
+                let (node, start) = t.suggestion_context(&p, self.ed.cursor);
                 self.usage.clear();
                 self.usage_info(g, &p, node, start);
             }
@@ -656,26 +673,6 @@ impl ChatUi {
         }
         Ok(open)
     }
-}
-
-fn prev_char(s: &str, i: usize) -> usize {
-    s[..i].char_indices().last().map_or(0, |(j, _)| j)
-}
-
-fn next_char(s: &str, i: usize) -> usize {
-    s[i..].chars().next().map_or(i, |c| i + c.len_utf8())
-}
-
-fn word_left(s: &str, i: usize) -> usize {
-    let t = s[..i].trim_end_matches(' ');
-    t.rfind(' ').map_or(0, |j| j + 1)
-}
-
-fn word_right(s: &str, i: usize) -> usize {
-    let rest = &s[i..];
-    let skip = rest.find(' ').map_or(rest.len(), |j| j);
-    let after = &rest[skip..];
-    i + skip + (after.len() - after.trim_start_matches(' ').len())
 }
 
 /// CommandSyntaxException's message as CommandSuggestions shows it: red, with the position
@@ -874,12 +871,19 @@ pub fn draw(gui: &mut Gui, g: &mut Game, ui: &mut ChatUi, open: bool, show_chat:
     // The input (ChatScreen: the band behind it, the EditBox at 4, height - 12).
     let h = gui.height;
     gui.fill(2.0, h - 14.0, gui.width - 2.0, h - 2.0, 0x8000_0000);
-    let shown = if ui.formatted.is_empty() { alloc::format!("\u{a7}r{}", ui.input) } else { ui.formatted.clone() };
+    let shown = if ui.formatted.is_empty() { alloc::format!("\u{a7}r{}", ui.ed.text) } else { ui.formatted.clone() };
     let field = gui.width - 8.0;
     // EditBox.displayPos: keep the cursor in view.
-    let pre_w = gui.text_width(&ui.input[..ui.cursor]);
-    let shift = if pre_w > field { pre_w - field } else { 0.0 };
+    let pre_w = gui.text_width(&ui.ed.text[..ui.ed.cursor]);
+    let shift = ui.scroll_x(gui);
     let tx = 4.0 - shift;
+    // The selection: EditBox.extractHighlight, a blue band behind the selected characters.
+    if ui.ed.has_selection() && ui.confirm.is_none() {
+        let (a, b) = ui.ed.selection();
+        let x0 = (tx + gui.text_width(&ui.ed.text[..a])).clamp(4.0, 4.0 + field);
+        let x1 = (tx + gui.text_width(&ui.ed.text[..b])).clamp(4.0, 4.0 + field);
+        gui.fill(x0, h - 13.0, x1, h - 12.0 + 9.0 + 1.0, 0xFF33_99FF);
+    }
     gui.text(&shown, tx, h - 12.0, 0xFFE0_E0E0);
     let blink = (now.saturating_sub(ui.focused_at) / 300) % 2 == 0;
     let cx = tx + pre_w;
@@ -887,15 +891,15 @@ pub fn draw(gui: &mut Gui, g: &mut Game, ui: &mut ChatUi, open: bool, show_chat:
     let mut hint = String::new();
     if let Some(l) = ui.list.as_ref() {
         let (t, _) = ui.apply(l, l.sel);
-        if t.starts_with(ui.input.as_str()) && t.len() > ui.input.len() {
-            hint = String::from(&t[ui.input.len()..]);
+        if t.starts_with(ui.ed.text.as_str()) && t.len() > ui.ed.text.len() {
+            hint = String::from(&t[ui.ed.text.len()..]);
         }
     }
-    if ui.cursor == ui.input.len() && !hint.is_empty() {
+    if ui.ed.cursor == ui.ed.text.len() && !hint.is_empty() {
         gui.text(&hint, cx, h - 12.0, 0xFF80_8080);
     }
     if blink && ui.confirm.is_none() {
-        if ui.cursor == ui.input.len() && hint.is_empty() {
+        if ui.ed.cursor == ui.ed.text.len() && hint.is_empty() {
             gui.text("_", cx, h - 12.0, 0xFFE0_E0E0);
         } else {
             gui.fill(cx, h - 13.0, cx + 1.0, h - 12.0 + 9.0 + 1.0, 0xFFD0_D0D0);
@@ -939,7 +943,7 @@ pub fn draw(gui: &mut Gui, g: &mut Game, ui: &mut ChatUi, open: bool, show_chat:
     } else if !ui.usage.is_empty() {
         let w = ui.usage.iter().map(|u| gui.text_width(u)).fold(0.0, f32::max);
         let x = if ui.usage_x > 0.0 {
-            (4.0 + gui.text_width(&ui.input[..char_floor(&ui.input, ui.usage_x as usize)])).clamp(0.0, (gui.width - w).max(0.0))
+            (4.0 + gui.text_width(&ui.ed.text[..char_floor(&ui.ed.text, ui.usage_x as usize)])).clamp(0.0, (gui.width - w).max(0.0))
         } else {
             0.0
         };
@@ -1077,6 +1081,11 @@ fn titles(gui: &mut Gui, g: &Game, partial: f32) {
 
 pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     let mut out = Vec::new();
-    out.push(("word movement", alloc::format!("{} {}", word_left("say hello world", 15), word_right("say hello world", 4)), "10 10"));
+    let mut c = ChatUi::default();
+    c.ed.insert("say h\u{e9}llo w\u{f6}rld");
+    c.ed.select_word(7);
+    out.push(("chat word select", String::from(c.ed.selected()), "h\u{e9}llo"));
+    c.ed.insert("\u{a7}x\ny");
+    out.push(("chat input filter", c.ed.text.clone(), "say xy w\u{f6}rld"));
     out
 }
