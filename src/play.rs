@@ -2218,7 +2218,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         Ok(())
     }
 
-    /// BlockState.getDestroyProgress for the held item (no enchantments or effects).
+    /// BlockState.getDestroyProgress for the held item (mining.rs).
     fn dig_speed(&self, g: &Game, pos: [i32; 3]) -> f64 {
         let s = g.world.get(pos[0], pos[1], pos[2]);
         let st = g.blocks.state(s);
@@ -2231,27 +2231,46 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
         }
         let blk = g.blocks.of_state(s);
         let held = g.held().and_then(|(i, _)| g.blocks.items.get(i as usize)).map(|s| s.as_str()).unwrap_or("");
-        let (kind, mut speed, tier) = tool_of(held);
-        let right_tool = kind != 0 && blk.mineable & kind != 0;
-        if !right_tool {
-            speed = 1.0;
-        }
-        if held == "shears" && (blk.name.ends_with("leaves") || blk.name == "cobweb" || blk.name.ends_with("_wool")) {
-            speed = if blk.name.ends_with("_wool") { 5.0 } else { 15.0 };
-        }
-        if kind == 16 && blk.name == "cobweb" {
-            speed = 15.0;
-        }
-        let harvest = st.flags & blocks::NEEDS_TOOL == 0
-            || (right_tool && blk.incorrect & tier == 0)
-            || (held == "shears" && blk.name == "cobweb");
-        if self.fluid_at(g) == blocks::WATER {
-            speed /= 5.0;
-        }
-        if !self.mover.on_ground && !g.flying {
-            speed /= 5.0;
-        }
-        speed / hardness / if harvest { 30.0 } else { 100.0 }
+        let slot = 36 + g.selected as usize;
+        let tags = &g.ui.common.block_tags;
+        let block = st.block as i32;
+        let (speed, harvest) = match crate::mining::from_patch(g.creative.patches.get(slot).map_or(&[][..], |v| &v[..])) {
+            // A tool component of the stack's own (custom tools): its rules decide.
+            crate::mining::Patch::Tool(t) => (t.speed(block, tags), st.flags & blocks::NEEDS_TOOL == 0 || t.correct_for_drops(block, tags)),
+            crate::mining::Patch::Removed => (1.0, st.flags & blocks::NEEDS_TOOL == 0),
+            crate::mining::Patch::Default => {
+                let (kind, mut speed, tier) = tool_of(held);
+                let right_tool = kind != 0 && blk.mineable & kind != 0;
+                if !right_tool {
+                    speed = 1.0;
+                }
+                if held == "shears" && (blk.name.ends_with("leaves") || blk.name == "cobweb" || blk.name.ends_with("_wool")) {
+                    speed = if blk.name.ends_with("_wool") { 5.0 } else { 15.0 };
+                }
+                if kind == 16 && blk.name == "cobweb" {
+                    speed = 15.0;
+                }
+                let harvest = st.flags & blocks::NEEDS_TOOL == 0
+                    || (right_tool && blk.incorrect & tier == 0)
+                    || (held == "shears" && blk.name == "cobweb");
+                (speed, harvest)
+            }
+        };
+        let eye = [self.mover.pos[0], self.mover.pos[1] + self.eye_height(), self.mover.pos[2]];
+        let eye_state = g.world.get(math::ifloor(eye[0]), math::ifloor(eye[1]), math::ifloor(eye[2]));
+        let amp = |id: u16| g.effects.get(id).map(|e| e.amplifier);
+        let inputs = crate::mining::Inputs {
+            tool: speed,
+            efficiency: g.mining_attrs[0],
+            break_speed: g.mining_attrs[1],
+            submerged: g.mining_attrs[2],
+            haste: amp(2),
+            conduit: amp(28),
+            fatigue: amp(3),
+            eye_in_water: g.blocks.kind(eye_state) == blocks::WATER,
+            on_ground: self.mover.on_ground || g.flying,
+        };
+        crate::mining::progress(crate::mining::destroy_speed(&inputs), hardness, harvest)
     }
 
     /// A block's sound (`which`: 0 break, 1 step, 2 place, 3 hit, 4 fall) at a block.
