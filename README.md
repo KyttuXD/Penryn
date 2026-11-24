@@ -233,6 +233,24 @@ macOS 12 and on Linux). It is named after that Mac's CPU family.
 - Item stacks with unusual data components (some potions and other rare ones) can hide the slots after
   them in a container until the server sends them again.
 
+## Downloads
+
+Every push to `main` rebuilds the **nightly** [release](../../releases/tag/nightly), one file for each kind of
+computer:
+
+| File | For | What it needs |
+|---|---|---|
+| `penryn-windows-x86_64.zip` | Windows, 64-bit Intel/AMD | Nothing more: `SDL2.dll` is inside the zip, next to `penryn.exe`. |
+| `penryn-windows-arm64.zip` | Windows on ARM (Copilot+ PCs, Surface Pro X...) | Nothing more: `SDL2.dll` is inside the zip. |
+| `penryn-macos-arm64.zip` | Apple Silicon Macs (M1 and newer), macOS 11 or newer | Nothing more: `Penryn.app` bundles SDL2. It is signed ad hoc, not notarised: the first time, right-click the app and choose Open. |
+| `penryn-macos-x86_64.zip` | Intel Macs, Mac OS X 10.6 or newer (also runs on Apple Silicon under Rosetta 2 where that accepts a 10.6 binary; prefer the arm64 file there) | Nothing more: `Penryn.app` bundles SDL2 2.0.4. |
+| `penryn-linux-x86_64.tar.gz` | Linux, 64-bit Intel/AMD | SDL2 installed (`libSDL2-2.0.so.0`); glibc 2.35 or newer for the CI builds (Ubuntu 22.04, Debian 12, Fedora 36 and newer). |
+| `penryn-linux-aarch64.tar.gz` | Linux on ARM 64-bit (Raspberry Pi 4/5 with a 64-bit system, ARM servers and laptops) | The same: SDL2 installed, glibc 2.35 or newer. |
+
+Each Linux file has a `.sha256` beside it. Penryn loads SDL2 when it starts (it is not linked), so a Linux machine
+without `libSDL2` says so and does not start. Any of them still needs your own copy of Minecraft for the game
+files (see **The relay** and **Offline, no relay**), and OpenGL 2.1.
+
 ## Building (on Linux)
 
 Needs Rust with the `x86_64-apple-darwin` target and Python 3.
@@ -243,6 +261,10 @@ scripts/build-mac.sh          # dist/mac/penryn
 scripts/package-mac.sh        # dist/Penryn: the folder to copy to the Mac
 cargo build --release         # a Linux build, for testing
 ```
+
+On an Apple Silicon Mac, `SDL2_FRAMEWORK=path/to/SDL2.framework packaging/macos/build_app_arm64.sh` makes the
+native arm64 app (`dist/Penryn.app`, signed ad hoc, and `dist/penryn-macos-arm64.zip`); on Linux,
+`packaging/linux/build.sh` packs `dist/penryn-linux-<uname -m>.tar.gz`.
 
 `scripts/package-mac.sh` takes SDL2 from `../../VoxelRust/vendor/sdl2/SDL2.framework` (SDL 2.0.4,
 which runs on 10.6), or from a path you give it.
@@ -356,7 +378,7 @@ relay). Items drawn are flat items, block items and player heads; other mob head
 ## Updates (nightly builds)
 
 CI builds Penryn on every push to `main` and replaces the **nightly** [release](../../releases/tag/nightly)
-(`penryn-macos-x86_64.zip`, `penryn-linux-x86_64.tar.gz`). The nightly builds update themselves: at
+(see **Downloads**). The nightly builds update themselves: at
 start, before the window opens, Penryn asks the relay for the release's SHA-256 (the relay reads the
 release from GitHub, which Penryn cannot do itself, checks the download against the checksum GitHub
 reports, and hands the files over). When it differs from the one installed, the files are put in place
@@ -367,6 +389,12 @@ The relay is what Penryn trusts for this (as it already is for your sign-in): th
 your computer, not in the program, so keep the relay on a network you trust. A build made by hand (not by CI) never checks, so it is never replaced. The installed release is
 recorded in `installed-release.txt` in the data folder; a release that is installed twice without
 becoming the running program is not installed a third time.
+
+Which file a copy updates from is decided by its platform name, sent to the relay: `macos-x86_64`, `macos-arm64`,
+`linux-x86_64` or `linux-aarch64` (a build always asks for its own, so an Apple Silicon app is never given the Intel
+zip, and the relay also checks that the program in the file is for that processor). Copies from before these names
+sent `macos` and `linux`, which the relay still takes as the x86_64 builds. The Windows builds do not update
+themselves yet: download a new zip.
 
 ## Voice chat (off by default)
 

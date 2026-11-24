@@ -1,10 +1,12 @@
-# Builds Penryn for Linux (x86_64) and for Intel Macs (Mac OS X 10.6 and newer). Each build is published to a
-# rolling pre-release in Releases (not Actions artifacts): "nightly". The release is replaced in place on every
-# push to main (packaging/nightly.sh). The Linux build is penryn-linux-x86_64.tar.gz (the program, the relay and the
-# game-file maker, the README) and the Mac build is penryn-macos-x86_64.zip (Penryn.app, which bundles SDL2 2.0.4).
-# Penryn is built from POSIX calls and OpenGL through SDL2, so Windows and Apple Silicon builds do not exist (the Mac
-# build is one x86_64 app; Apple Silicon Macs open it through Rosetta 2 where that accepts a 10.6 binary).
-# The repository is public, so GitHub-hosted runners (including macOS) are free.
+# Builds Penryn for every device and publishes each build to a rolling pre-release in Releases (not Actions artifacts):
+# "nightly". The release is replaced in place on every push to main (packaging/nightly.sh). The files:
+#   penryn-linux-x86_64.tar.gz, penryn-linux-aarch64.tar.gz   (the program, the relay and the game-file maker, the README)
+#   penryn-macos-x86_64.zip    Penryn.app for Intel Macs, Mac OS X 10.6 and newer (bundles SDL2 2.0.4)
+#   penryn-macos-arm64.zip     Penryn.app for Apple Silicon, macOS 11 and newer (bundles SDL2 2.30, signed ad hoc)
+#   penryn-windows-x86_64.zip, penryn-windows-arm64.zip   (build-windows.yml)
+# Penryn loads SDL2 at run time and is built from POSIX calls and OpenGL, so each target is a plain build for it. The
+# Intel Mac build is cross-compiled for 10.6; the Apple Silicon one is a normal native build.
+# The repository is public, so GitHub-hosted runners (including macOS and the ARM ones) are free.
 name: build
 on:
   push:
@@ -53,6 +55,55 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: sh packaging/nightly.sh dist/penryn-linux-x86_64.tar.gz dist/penryn-linux-x86_64.tar.gz.sha256
 
+  # Linux on ARM 64-bit (Raspberry Pi 4/5 class and up, Ampere, Graviton...): the same script, on an ARM runner; it
+  # names the tarball after `uname -m` (penryn-linux-aarch64.tar.gz). Built on Ubuntu 22.04 like the x86_64 one, so
+  # the program needs glibc 2.35 or newer.
+  linux-arm64:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          key: linux-arm64
+      - name: Build times header
+        shell: bash
+        run: |
+          printf '### Build times (linux arm64)\n\n| step | os | cache | elapsed |\n|---|---|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: packaging/linux/build.sh
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          t0=$(date +%s); date -u +"start %FT%TZ"
+          trap 'echo "| packaging/linux/build.sh | ${{ runner.os }} ${{ runner.arch }} | cache-hit: ${CACHE_HIT:-n/a} | $(( $(date +%s) - t0 ))s |" >> "$GITHUB_STEP_SUMMARY"; date -u +"end   %FT%TZ"' EXIT
+          sh packaging/linux/build.sh
+      # build.sh left target/release/penryn: the built-in checks must pass on ARM too (a FAIL line fails the job).
+      - name: penryn selftest
+        shell: bash
+        run: |
+          set -o pipefail
+          ./target/release/penryn selftest 2>&1 | tee selftest.log
+          ! grep -q '^FAIL' selftest.log
+      - name: The package is for aarch64
+        shell: bash
+        run: |
+          ls -l dist/
+          test -f dist/penryn-linux-aarch64.tar.gz
+          mkdir -p "$RUNNER_TEMP/pkg"
+          tar -xzf dist/penryn-linux-aarch64.tar.gz -C "$RUNNER_TEMP/pkg"
+          # ELF header: e_machine (bytes 19-20 of the dump) must be b7 00 (aarch64)
+          od -An -tx1 -N20 "$RUNNER_TEMP/pkg/penryn-linux/penryn"
+          uname -m
+      - name: Publish to nightly
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh packaging/nightly.sh dist/penryn-linux-aarch64.tar.gz dist/penryn-linux-aarch64.tar.gz.sha256
+
   # Intel Mac: its own build, its own zip. Built on the Apple Silicon runner (it is about twice as fast as the Intel
   # one): the x86_64 target is cross-compiled, which is how Penryn is always built for the Mac (scripts/build-mac.sh:
   # Rust's own linker and a text stub of the libSystem calls, no Xcode and no Apple SDK).
@@ -97,3 +148,57 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: sh packaging/nightly.sh dist/penryn-macos-x86_64.zip
+
+  # Apple Silicon Mac: a normal native build (aarch64-apple-darwin, linked against the real libSystem; no stub, no
+  # Mach-O rewrite). The app bundles the universal SDL2 2.30.12 framework from the SDL project (zlib licence; sha256
+  # pinned, into a folder that is not committed) and is signed ad hoc (packaging/macos/build_app_arm64.sh): an arm64
+  # program without a signature is killed by the system.
+  macos-arm64:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Fetch SDL2 2.30.12 (sha256 checked)
+        shell: bash
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/SDL2-2.30.12.dmg" https://github.com/libsdl-org/SDL/releases/download/release-2.30.12/SDL2-2.30.12.dmg
+          echo "a8fcd488a8062f632bacd7a74dbbb5f585f3b0303ccf08384ac0349eccd8420d  $RUNNER_TEMP/SDL2-2.30.12.dmg" | shasum -a 256 -c -
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/sdl2-dmg" "$RUNNER_TEMP/SDL2-2.30.12.dmg"
+          mkdir -p vendor/sdl2
+          cp -R "$RUNNER_TEMP/sdl2-dmg/SDL2.framework" vendor/sdl2/
+          hdiutil detach "$RUNNER_TEMP/sdl2-dmg"
+          # Universal (x86_64 + arm64): the arm64 part is what the app uses.
+          lipo -archs vendor/sdl2/SDL2.framework/Versions/A/SDL2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        id: cache
+        with:
+          key: macos-arm64
+      - name: Build times header
+        shell: bash
+        run: |
+          printf '### Build times (macos arm64)\n\n| step | os | cache | elapsed |\n|---|---|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Build the Apple Silicon app
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+          SDL2_FRAMEWORK: vendor/sdl2/SDL2.framework
+        run: |
+          t0=$(date +%s); date -u +"start %FT%TZ"
+          trap 'echo "| Build the Apple Silicon app | macOS arm64 | cache-hit: ${CACHE_HIT:-n/a} | $(( $(date +%s) - t0 ))s |" >> "$GITHUB_STEP_SUMMARY"; date -u +"end   %FT%TZ"' EXIT
+          sh packaging/macos/build_app_arm64.sh
+      # The built-in checks, run by the program inside the app (a FAIL line fails the job). It is the signed binary
+      # the zip holds, so this also proves the signed app starts on Apple Silicon.
+      - name: penryn selftest
+        shell: bash
+        run: |
+          set -o pipefail
+          dist/Penryn.app/Contents/MacOS/penryn-bin selftest 2>&1 | tee selftest.log
+          ! grep -q '^FAIL' selftest.log
+      - name: Publish to nightly
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh packaging/nightly.sh dist/penryn-macos-arm64.zip

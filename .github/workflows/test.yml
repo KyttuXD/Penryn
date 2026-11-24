@@ -1,4 +1,4 @@
-# Builds Penryn on Linux, runs its self-test (the built-in checks of the crypto, compression, protocol, text, physics,
+# Builds Penryn on Linux (x86_64 and aarch64) and on an Apple Silicon Mac, runs its self-test (the built-in checks of the crypto, compression, protocol, text, physics,
 # Opus codec, voice chat and so on) and checks the Python tools. Nothing is published.
 #
 # The self-test skips the checks that need the game files (they are made from the player's own copy of Minecraft and are
@@ -32,7 +32,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ["ubuntu-22.04"]
+        # Linux x86_64 and aarch64, and Apple Silicon (a native arm64 Mac build: its selftest runs here)
+        os: ["ubuntu-22.04", "ubuntu-22.04-arm", "macos-15"]
     steps:
       - uses: actions/checkout@v6
 
@@ -60,11 +61,20 @@ jobs:
 
       # Exit status 1 when any check fails.
       - name: penryn selftest
-        run: ./target/release/penryn selftest
+        run: |
+          set -o pipefail
+          ./target/release/penryn selftest 2>&1 | tee selftest.log
+          ! grep -q '^FAIL' selftest.log
 
       # The Mac program is linked without Xcode (scripts/build-mac.sh): a build here proves the Mac-only code compiles and links.
+      # (The Intel program is cross-built once, on the x86_64 Linux row.)
       - name: The Mac program builds
+        if: matrix.os == 'ubuntu-22.04'
         run: sh scripts/build-mac.sh
 
       - name: The tools are valid Python
-        run: python3 -m py_compile tools/make_assets.py tools/relay.py tools/make_icon.py
+        run: python3 -m py_compile tools/make_assets.py tools/relay.py tools/make_icon.py tools/test_relay_update.py
+
+      # The relay's update platform names (the old "macos" and "linux" are the x86_64 builds; arm64 is never given Intel).
+      - name: The relay's update names
+        run: python3 -I tools/test_relay_update.py

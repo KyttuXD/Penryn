@@ -92,12 +92,22 @@ def call(url, data=None, form=None, token=None, method=None):
 #
 # Penryn updates itself from the GitHub "nightly" release (CI replaces it on every push to main). The
 # program cannot speak HTTPS, so the relay reads the release and unpacks the build for it: the client
-# asks GET /update/check?platform=macos|linux (the release file's SHA-256) and, when that differs from
+# asks GET /update/check?platform=macos-x86_64|macos-arm64|linux-x86_64|linux-aarch64 (the release file's SHA-256) and, when that differs from
 # what it installed, GET /update/download?platform=...&sha=... (the files, as one "PNU1" archive).
 # The SHA-256 of the release file is the one GitHub itself reports for it, and is checked here.
 
 UPDATE_REPO = "KyttuXD/Penryn"
-UPDATE_FILES = {"macos": "penryn-macos-x86_64.zip", "linux": "penryn-linux-x86_64.tar.gz"}
+UPDATE_FILES = {
+    "macos-x86_64": "penryn-macos-x86_64.zip",
+    "macos-arm64": "penryn-macos-arm64.zip",
+    "linux-x86_64": "penryn-linux-x86_64.tar.gz",
+    "linux-aarch64": "penryn-linux-aarch64.tar.gz",
+}
+# Older installed clients ask for "macos" and "linux": those were the x86_64 builds, and stay so (an arm64 build
+# always sends its own name, so it is never given an x86_64 file). Windows is not updatable (no entry on purpose).
+UPDATE_ALIASES = {"macos": "macos-x86_64", "linux": "linux-x86_64"}
+# What the program inside the release file must be (Mach-O cputype / ELF e_machine), checked before it is sent.
+UPDATE_CPU = {"macos-x86_64": 0x01000007, "macos-arm64": 0x0100000C, "linux-x86_64": 0x3E, "linux-aarch64": 0xB7}
 UPDATE_LIMIT = 64 << 20
 _update_cache = {}  # platform -> (time, (sha256, size)) | sha256 -> archive bytes
 _update_lock = threading.Lock()
@@ -117,11 +127,17 @@ class _GithubOnly(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def update_platform(platform):
+    """The canonical platform name (the old "macos" and "linux" mean the x86_64 builds); ValueError when unknown."""
+    platform = UPDATE_ALIASES.get(platform, platform)
+    if platform not in UPDATE_FILES:
+        raise ValueError("unknown platform")
+    return platform
+
+
 def update_release(platform):
     """(sha256, size, download url) of the nightly release's file for `platform`."""
-    name = UPDATE_FILES.get(platform)
-    if not name:
-        raise ValueError("unknown platform")
+    name = UPDATE_FILES[update_platform(platform)]
     req = urllib.request.Request("https://api.github.com/repos/%s/releases/tags/nightly" % UPDATE_REPO,
                                  headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=15) as r:
@@ -137,6 +153,7 @@ def update_release(platform):
 
 def update_check(platform):
     """The nightly file's "SHA-256 size" (looked up at most once a minute)."""
+    platform = update_platform(platform)
     with _update_lock:
         hit = _update_cache.get(platform)
         if hit and time.time() - hit[0] < 60:
@@ -152,6 +169,18 @@ def _update_path_ok(path):
         and "\\" not in path
 
 
+def update_cpu_ok(platform, program):
+    """True when the program's header is for `platform`'s processor (an Intel build is never sent to an Apple Silicon
+    Mac, or an arm64 Linux build to an x86_64 one, whatever the release holds under that name)."""
+    want = UPDATE_CPU[platform]
+    if platform.startswith("macos"):
+        # Mach-O 64-bit little endian (feedfacf), cputype follows the magic.
+        return len(program) >= 8 and program[:4] == b"\xcf\xfa\xed\xfe" and int.from_bytes(program[4:8], "little") == want
+    # ELF 64-bit little endian, e_machine at offset 18.
+    return len(program) >= 20 and program[:4] == b"\x7fELF" and program[4] == 2 and program[5] == 1 \
+        and int.from_bytes(program[18:20], "little") == want
+
+
 def update_entries(platform, data):
     """[(kind, path, mode, bytes)] of the release file: kind 0 file, 1 folder, 2 link (bytes: target).
     The top folder (Penryn.app/, penryn-linux/) is dropped; the Mac build keeps the whole app, the
@@ -160,8 +189,9 @@ def update_entries(platform, data):
     import stat
     import tarfile
     import zipfile
+    platform = update_platform(platform)
     out = []
-    if platform == "macos":
+    if platform.startswith("macos"):
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             for i in z.infolist():
                 path = i.filename.rstrip("/")
@@ -195,6 +225,9 @@ def update_entries(platform, data):
                     out.append((2, rest, 0o777, m.linkname.encode()))
                 elif m.isfile():
                     out.append((0, rest, m.mode & 0o7777, t.extractfile(m).read()))
+    program = "Contents/MacOS/penryn-bin" if platform.startswith("macos") else "penryn"
+    if not any(k == 0 and path == program and update_cpu_ok(platform, body) for k, path, _, body in out):
+        raise ValueError("the release file's program is not for " + platform)
     return out
 
 
@@ -202,6 +235,7 @@ def update_archive(platform, want):
     """The PNU1 archive of the nightly file with SHA-256 `want` (it is verified against the download):
     "PNU1", u32 count, then for each entry: u8 kind, u16 mode, u16 path length, path, u32 length, data."""
     import struct
+    platform = update_platform(platform)
     with _update_lock:
         hit = _update_cache.get(("archive", platform, want))
     if hit:
@@ -711,8 +745,12 @@ def make_handler(relay):
         def do_GET(self):
             if not private(self.client_address[0]):
                 return self.reply(403, "local network only")
-            m = re.fullmatch(r"/update/(check|download)\?platform=(macos|linux)(?:&sha=([0-9a-f]{64}))?", self.path)
+            m = re.fullmatch(r"/update/(check|download)\?platform=([a-z0-9_-]{1,32})(?:&sha=([0-9a-f]{64}))?", self.path)
             if m:
+                try:
+                    update_platform(m.group(2))
+                except ValueError:
+                    return self.reply(400, "unknown platform")
                 try:
                     if m.group(1) == "check":
                         sha, size = update_check(m.group(2))

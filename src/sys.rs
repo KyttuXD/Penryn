@@ -71,7 +71,8 @@ extern "C" {
     fn write(fd: c_int, buf: *const c_void, n: SizeT) -> SsizeT;
     fn read(fd: c_int, buf: *mut c_void, n: SizeT) -> SsizeT;
     fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64;
-    fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int;
+    /// Variadic in C: Apple's arm64 passes variadic arguments on the stack, so the mode must be sent as one.
+    fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     fn mkdir(path: *const c_char, mode: c_int) -> c_int;
     fn rename(from: *const c_char, to: *const c_char) -> c_int;
     pub fn close(fd: c_int) -> c_int;

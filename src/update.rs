@@ -10,7 +10,8 @@
 //! Only builds made by CI check (the build has PENRYN_BUILD, the CI run number); a build made by hand
 //! never replaces itself. `--no-update`, PENRYN_NO_UPDATE=1 or UPDATE=no in the Mac app's
 //! settings.txt turn it off. The Mac app is updated in place (PENRYN_APP names it: the launcher sets
-//! it); the Linux program replaces itself and the files beside it.
+//! it); the Linux program replaces itself and the files beside it. The platform names are macos-x86_64, macos-arm64,
+//! linux-x86_64 and linux-aarch64; Windows does not update itself.
 
 use crate::{http, sys};
 use alloc::format;
@@ -20,7 +21,20 @@ use alloc::vec::Vec;
 /// The CI run number this build was made in (None for a build made by hand).
 pub const BUILD: Option<&str> = option_env!("PENRYN_BUILD");
 
-const PLATFORM: &str = if cfg!(target_os = "macos") { "macos" } else { "linux" };
+/// The name the relay knows this build's release file by (tools/relay.py UPDATE_FILES): the architecture is part of
+/// it, so an Apple Silicon app is never given the Intel zip. The older clients sent "macos" and "linux" (the x86_64
+/// builds); the relay still takes those. None: this platform does not update itself (Windows); `run` returns early.
+const PLATFORM: Option<&str> = if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+    Some("macos-x86_64")
+} else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    Some("macos-arm64")
+} else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    Some("linux-x86_64")
+} else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+    Some("linux-aarch64")
+} else {
+    None
+};
 
 /// One thing in the update archive.
 #[derive(Debug, PartialEq)]
@@ -199,21 +213,23 @@ fn restart(root: &str, args: &[String]) -> ! {
 /// failure is only logged: the game starts with what it has.
 pub fn run(relay: Option<&(String, u16)>, args: &[String]) {
     let Some(build) = BUILD.filter(|b| !b.is_empty()) else { return };
+    let Some(platform) = PLATFORM else { return };
     if args.iter().any(|a| a == "--no-update") || sys::env("PENRYN_NO_UPDATE").is_some() {
         return;
     }
     let (Some(relay), Some(root)) = (relay, root()) else { return };
-    if let Err(e) = try_update(relay, &root, args, build) {
+    if let Err(e) = try_update(relay, &root, args, build, platform) {
         crate::warn!("update: {}", e);
     }
 }
 
-fn try_update(relay: &(String, u16), root: &str, args: &[String], build: &str) -> Result<(), String> {
+fn try_update(relay: &(String, u16), root: &str, args: &[String], build: &str, platform: &str) -> Result<(), String> {
     let dir = crate::data_dir();
     // The question runs on a thread: connecting to a relay that is off or asleep has no time limit of its own
     // (the system's, a minute or two), and the game must not wait for that.
     let (host, port) = (relay.0.clone(), relay.1);
-    let mut asking = crate::task::spawn(move || http::get(&host, port, &format!("/update/check?platform={}", PLATFORM), 15000));
+    let platform_owned = String::from(platform);
+    let mut asking = crate::task::spawn(move || http::get(&host, port, &format!("/update/check?platform={}", platform_owned), 15000));
     let deadline = sys::now_ms() + 10_000;
     let r = loop {
         if let Some(r) = asking.take() {
@@ -246,7 +262,7 @@ fn try_update(relay: &(String, u16), root: &str, args: &[String], build: &str) -
         return Err(String::from("this release was installed twice and the program is still not it: not installing it again"));
     }
     crate::say!("update: downloading the nightly build ({}) ...", &want[..12]);
-    let r = http::get(&relay.0, relay.1, &format!("/update/download?platform={}&sha={}", PLATFORM, want), 600_000)?;
+    let r = http::get(&relay.0, relay.1, &format!("/update/download?platform={}&sha={}", platform, want), 600_000)?;
     if r.status != 200 {
         return Err(format!("the relay could not give the release ({} {})", r.status, r.text().trim()));
     }

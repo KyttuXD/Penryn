@@ -8,16 +8,27 @@
 # vendored copy beside this repository is used) and a small launcher. The app itself is never
 # written to: settings.txt, the sign-in and the game files (made by the relay from your own copy
 # of Minecraft, fetched on first start) live in ~/Library/Application Support/Penryn.
+#
+# The Apple Silicon app (packaging/macos/build_app_arm64.sh) is made by this same script, so the launcher and
+# the settings are one thing: PENRYN_BIN is the program (default dist/mac/penryn, built by build-mac.sh),
+# PENRYN_MIN_OS the LSMinimumSystemVersion (default 10.6) and PENRYN_ARCH the processor (default x86_64;
+# arm64 for Apple Silicon).
 set -eu
 cd "$(dirname "$0")/.."
+BIN="${PENRYN_BIN:-dist/mac/penryn}"
+MIN_OS="${PENRYN_MIN_OS:-10.6}"
+ARCH="${PENRYN_ARCH:-x86_64}"
 SDL="${1:-../../VoxelRust/vendor/sdl2/SDL2.framework}"
 [ -d "$SDL" ] || { echo "no SDL2.framework at $SDL (give its path)"; exit 1; }
-[ -x dist/mac/penryn ] || sh scripts/build-mac.sh
+if [ -z "${PENRYN_BIN:-}" ]; then
+  [ -x "$BIN" ] || sh scripts/build-mac.sh
+fi
+[ -x "$BIN" ] || { echo "no program at $BIN"; exit 1; }
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 APP=dist/Penryn.app
 rm -rf "$APP" dist/Penryn
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
-cp dist/mac/penryn "$APP/Contents/MacOS/penryn-bin"
+cp "$BIN" "$APP/Contents/MacOS/penryn-bin"
 # Copy the framework without the AppleDouble "._" files a non-Mac copy picks up.
 tar -C "$(dirname "$SDL")" --exclude='._*' -cf - "$(basename "$SDL")" | tar -C "$APP/Contents/Frameworks" -xf -
 python3 -I tools/make_icon.py "$APP/Contents/Resources/Penryn.icns"
@@ -36,8 +47,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>$VERSION</string>
 	<key>CFBundleVersion</key><string>$VERSION</string>
-	<key>LSMinimumSystemVersion</key><string>10.6</string>
-	<key>LSArchitecturePriority</key><array><string>x86_64</string></array>
+	<key>LSMinimumSystemVersion</key><string>$MIN_OS</string>
+	<key>LSArchitecturePriority</key><array><string>$ARCH</string></array>
 	<key>NSHighResolutionCapable</key><false/>
 	<key>LSApplicationCategoryType</key><string>public.app-category.games</string>
 	<key>NSMicrophoneUsageDescription</key><string>Penryn uses the microphone for voice chat, only when you turn it on in Options.</string>
