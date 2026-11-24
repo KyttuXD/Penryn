@@ -551,6 +551,54 @@ enum SignIn {
     Failed(String),
 }
 
+/// The "Change name..." text field: textedit's editing, limited to the characters a name may hold.
+struct NameBox {
+    ed: crate::textedit::Edit,
+    drag: bool,
+    last_click: (u64, usize),
+}
+
+impl NameBox {
+    fn new() -> NameBox {
+        NameBox { ed: crate::textedit::Edit::new(16, crate::textedit::Filter::Line), drag: false, last_click: (0, usize::MAX) }
+    }
+
+    fn text(&self) -> &str {
+        &self.ed.text
+    }
+
+    /// Typed or pasted text: only letters, digits and _ stay.
+    fn insert(&mut self, s: &str) {
+        let s: String = s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        self.ed.insert(&s);
+    }
+
+    fn at(&self, gui: &Gui, x0: f32, mx: f32) -> usize {
+        crate::textedit::index_at(&self.ed.text, mx - (x0 + 4.0), &|s: &str| gui.text_width(s))
+    }
+
+    fn press(&mut self, gui: &Gui, x0: f32, mx: f32, shift: bool) {
+        let at = self.at(gui, x0, mx);
+        let now = sys::now_ms();
+        if self.last_click.1 == at && now.saturating_sub(self.last_click.0) < 250 {
+            self.ed.select_word(at);
+            self.last_click = (0, usize::MAX);
+            self.drag = false;
+            return;
+        }
+        self.last_click = (now, at);
+        self.ed.click(at, shift);
+        self.drag = true;
+    }
+
+    fn drag_to(&mut self, gui: &Gui, x0: f32, mx: f32) {
+        if self.drag {
+            let at = self.at(gui, x0, mx);
+            self.ed.click(at, true);
+        }
+    }
+}
+
 enum Scr {
     Title,
     /// The options screens (options.rs), from the title screen.
@@ -562,7 +610,7 @@ enum Scr {
     /// The account switch menu.
     Accounts(AccMenu),
     /// Changing the offline player name (typed text).
-    Name(String),
+    Name(NameBox),
 }
 
 /// The file holding the offline player name, in the data folder.
@@ -1026,10 +1074,8 @@ impl Front {
             mp.text(s);
         }
         if let Scr::Name(t) = &mut self.scr {
-            for c in s.chars() {
-                if (c.is_ascii_alphanumeric() || c == '_') && t.len() < 16 {
-                    t.push(c);
-                }
+            if !crate::textedit::command(&self.keys) {
+                t.insert(s);
             }
         }
     }
@@ -1055,9 +1101,28 @@ impl Front {
                 if let Scr::Options = self.scr {
                     ui.menu.drag_to(self.mouse.0);
                 }
+                let mx = self.mouse.0;
+                match &mut self.scr {
+                    Scr::Multiplayer => {
+                        if let Some(mp) = self.mp.as_mut() {
+                            mp.drag(ui.gui, mx);
+                        }
+                    }
+                    Scr::Name(t) => t.drag_to(ui.gui, fl(ui.gui.width / 2.0) - 100.0, mx),
+                    _ => {}
+                }
             }
             sdl::EV_MOUSEDOWN => return self.press(ui, e.0[16]),
             sdl::EV_MOUSEUP => {
+                match &mut self.scr {
+                    Scr::Multiplayer => {
+                        if let Some(mp) = self.mp.as_mut() {
+                            mp.release();
+                        }
+                    }
+                    Scr::Name(t) => t.drag = false,
+                    _ => {}
+                }
                 if let (Scr::Options, 1) = (&self.scr, e.0[16]) {
                     if let crate::options::Ev::Click = ui.menu.release() {
                         Self::click_sound(ui);
@@ -1082,7 +1147,7 @@ impl Front {
     }
 
     fn ctrl(&self) -> bool {
-        self.keys[224] || self.keys[228] || self.keys[227] || self.keys[231]
+        crate::textedit::command(&self.keys)
     }
 
     fn shift(&self) -> bool {
@@ -1107,7 +1172,7 @@ impl Front {
             Scr::Multiplayer => {
                 let (ctrl, shift) = (self.ctrl(), self.shift());
                 let v = ui.v;
-                let act = self.mp.as_mut()?.key(sc, ctrl, shift, || v.clipboard());
+                let act = self.mp.as_mut()?.key(sc, ctrl, shift, &mut || v.clipboard(), &mut |s: &str| v.set_clipboard(s));
                 return self.mp_act(ui, act);
             }
             // ConnectScreen and DisconnectedScreen: shouldCloseOnEsc is false (only their
@@ -1119,16 +1184,19 @@ impl Front {
                 }
             }
             Scr::Name(t) => match sc {
-                42 => {
-                    t.pop();
-                }
                 41 => self.scr = Scr::Title,
-                40 | 88 if valid_name(t) => {
-                    let n = t.clone();
+                40 | 88 if valid_name(t.text()) => {
+                    let n = String::from(t.text());
                     self.set_name(&n);
                     self.scr = Scr::Title;
                 }
-                _ => {}
+                _ => {
+                    let (cmd, shift) = (crate::textedit::command(&self.keys), crate::textedit::shift(&self.keys));
+                    let v = ui.v;
+                    // A paste is cut down to what a name may hold.
+                    let mut put = |s: &str| v.set_clipboard(s);
+                    t.ed.key(sc, cmd, shift, &mut || v.clipboard().chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect(), &mut put);
+                }
             },
         }
         None
@@ -1203,7 +1271,7 @@ impl Front {
                     }
                 } else if self.name_button().map_or(false, |s| s.hit(mx, my)) {
                     Self::click_sound(ui);
-                    self.scr = Scr::Name(String::new());
+                    self.scr = Scr::Name(NameBox::new());
                 }
             }
             Scr::Options => {
@@ -1253,9 +1321,13 @@ impl Front {
             }
             Scr::Name(t) => {
                 let b = Self::name_layout(gw, gh);
-                if b[0].hit(mx, my) && valid_name(t) {
+                let (x0, y0) = (fl(gw / 2.0) - 100.0, fl(gh / 2.0) - 22.0);
+                if mx >= x0 && mx < x0 + 200.0 && my >= y0 && my < y0 + 20.0 {
+                    let shift = crate::textedit::shift(&self.keys);
+                    t.press(ui.gui, x0, mx, shift);
+                } else if b[0].hit(mx, my) && valid_name(t.text()) {
                     Self::click_sound(ui);
-                    let n = t.clone();
+                    let n = String::from(t.text());
                     self.set_name(&n);
                     self.scr = Scr::Title;
                 } else if b[1].hit(mx, my) {
@@ -1380,15 +1452,28 @@ impl Front {
                 gui.fill(x0 - 1.0, y0 - 1.0, x0 + 201.0, y0 + 21.0, 0xFFFFFFFF);
                 gui.fill(x0, y0, x0 + 200.0, y0 + 20.0, 0xFF000000);
                 let blink = (sys::now_ms() / 500) % 2 == 0;
-                if t.is_empty() {
+                if t.text().is_empty() {
                     // The name now, as a hint until something is typed.
-                    gui.text(&format!("{}{}", if blink { "_" } else { "" }, ""), x0 + 4.0, y0 + 6.0, WHITE);
+                    gui.text(if blink { "_" } else { "" }, x0 + 4.0, y0 + 6.0, WHITE);
                     gui.text(&self.name, x0 + 12.0, y0 + 6.0, 0xFF707070);
                 } else {
-                    let shown = format!("{}{}", t, if blink { "_" } else { "" });
-                    gui.text(&shown, x0 + 4.0, y0 + 6.0, WHITE);
+                    let (tx, ty) = (x0 + 4.0, y0 + 6.0);
+                    if t.ed.has_selection() {
+                        let (a, b) = t.ed.selection();
+                        let (xa, xb) = (tx + gui.text_width(&t.text()[..a]), tx + gui.text_width(&t.text()[..b]));
+                        gui.fill(xa, ty - 1.0, xb, ty + 10.0, 0xFF3399FF);
+                    }
+                    gui.text(t.text(), tx, ty, WHITE);
+                    if blink {
+                        let cx = tx + gui.text_width(&t.text()[..t.ed.cursor]);
+                        if t.ed.cursor >= t.text().len() {
+                            gui.text("_", cx, ty, WHITE);
+                        } else {
+                            gui.fill(cx, ty - 1.0, cx + 1.0, ty + 10.0, 0xFFD0D0D0);
+                        }
+                    }
                 }
-                let ok = valid_name(t);
+                let ok = valid_name(t.text());
                 for (i, b) in Self::name_layout(gw, gh).iter().enumerate() {
                     let _ = (i, ok);
                     b.draw(gui, mx, my);
@@ -1445,5 +1530,12 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     // Straight ahead (0, 0, 1) is in front of the camera, a little above the middle.
     let z = v[8] * 0.0 + v[9] * 0.0 + v[10] * 1.0;
     out.push(("panorama looks at panorama_0", format!("{}", z < 0.0), "true"));
+    // The name field: only letters, digits and _, 16 at most, a paste cut the same way, the selection replaced.
+    let mut n = NameBox::new();
+    n.insert("Ab c-d\u{e9}_9 0123456789012345678");
+    out.push(("name field filters and limits", String::from(n.text()), "Abcd_90123456789"));
+    n.ed.select_all();
+    n.insert("x y");
+    out.push(("name field typing replaces the selection", String::from(n.text()), "xy"));
     out
 }

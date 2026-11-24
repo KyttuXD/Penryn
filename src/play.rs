@@ -1227,7 +1227,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 if t == sdl::EV_KEYUP {
                     return Ok(false);
                 }
-                self.creative.key(d, gui, g, sc, e.0[13] != 0, &self.keys, self.mouse)?
+                self.creative.key(d, gui, g, sc, e.0[13] != 0, &self.keys, self.mouse, &self.v)?
             }
             sdl::EV_TEXTINPUT => {
                 let n = e.0[12..44].iter().position(|c| *c == 0).unwrap_or(32);
@@ -1316,7 +1316,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                 }
             }
             Screen::Inventory => {
-                if crate::menus::key(g, sc)? {
+                if crate::menus::key(g, sc, &self.keys, &self.v)? {
                     return Ok(false);
                 }
                 let bound = self.menu.keys.find_kb(sc);

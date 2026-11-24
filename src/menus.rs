@@ -368,7 +368,10 @@ pub struct State {
     pub shop_item: i32,
     pub trade_scroll: i32,
     /// The anvil's name field, its cursor, and the slot-0 stack it was filled from.
-    pub name: String,
+    pub name: crate::textedit::Edit,
+    /// A mouse drag in the name field is selecting; when and where the last click was (for the double click).
+    name_drag: bool,
+    name_click: (u64, usize),
     pub name_for: Option<(i32, Vec<u8>)>,
     /// The beacon's chosen powers (registry ids).
     pub beacon: (Option<i32>, Option<i32>),
@@ -418,7 +421,9 @@ impl State {
             show_progress: false,
             shop_item: 0,
             trade_scroll: 0,
-            name: String::new(),
+            name: crate::textedit::Edit::new(50, crate::textedit::Filter::Line),
+            name_drag: false,
+            name_click: (0, usize::MAX),
             name_for: None,
             beacon: (None, None),
             beacon_synced: (-1, -1),
@@ -439,7 +444,7 @@ impl State {
         self.offers.clear();
         self.shop_item = 0;
         self.trade_scroll = 0;
-        self.name.clear();
+        self.name.set("");
         self.name_for = None;
         self.beacon = (None, None);
         self.beacon_synced = (-1, -1);
@@ -893,15 +898,26 @@ pub fn draw_back(gui: &mut Gui, g: &Game, win: &Window, left: f32, top: f32, mx:
             a.blit(gui, "bg/anvil", left, top);
             let has0 = slot(c, 0).is_some();
             a.blit_size(gui, if has0 { "container/anvil/text_field" } else { "container/anvil/text_field_disabled" }, left + 59.0, top + 20.0, 110.0, 16.0);
-            // The name field (an EditBox without its border), the cursor blinking.
-            let mut t = m.name.clone();
-            let max = 103.0;
-            while gui.text_width(&t) > max && !t.is_empty() {
-                t.remove(0);
+            // The name field (an EditBox without its border): scrolled to keep the cursor in view, the selection
+            // highlighted, the cursor blinking.
+            let (sb, eb) = name_window(gui, &m.name);
+            let (tx, ty) = (left + 62.0, top + 26.0);
+            let cur = m.name.cursor.clamp(sb, eb);
+            if has0 && m.name.has_selection() {
+                let (a, b) = m.name.selection();
+                let (a, b) = (a.clamp(sb, eb), b.clamp(sb, eb));
+                if a < b {
+                    gui.fill(tx + gui.text_width(&m.name.text[sb..a]), ty - 1.0, tx + gui.text_width(&m.name.text[sb..b]), ty + 10.0, 0xFF33_99FF);
+                }
             }
-            let x = gui.text(&t, left + 62.0, top + 26.0, WHITE);
+            let x = gui.text(&m.name.text[sb..eb], tx, ty, WHITE);
             if has0 && (m.ticks / 6) % 2 == 0 {
-                gui.text("_", left + 62.0 + x, top + 26.0, WHITE);
+                if m.name.cursor >= m.name.text.len() {
+                    gui.text("_", tx + x, ty, WHITE);
+                } else {
+                    let cx = tx + gui.text_width(&m.name.text[sb..cur]);
+                    gui.fill(cx, ty - 1.0, cx + 1.0, ty + 10.0, 0xFFD0_D0D0);
+                }
             }
             if (has0 || slot(c, 1).is_some()) && slot(c, 2).is_none() {
                 a.blit(gui, "container/anvil/error", left + 99.0, top + 45.0);
@@ -1612,7 +1628,7 @@ pub fn tick(g: &mut Game) -> Result<(), String> {
                     None => String::new(),
                 };
                 g.menus.name_for = now;
-                g.menus.name = name;
+                g.menus.name.set(&name);
                 if g.menus.name_for.is_some() {
                     send_name(g)?;
                 }
@@ -1636,7 +1652,7 @@ fn send_name(g: &mut Game) -> Result<(), String> {
     let Some(c) = g.container.as_ref() else { return Ok(()) };
     let Some((item, _)) = slot(c, 0) else { return Ok(()) };
     let p = patch(c, 0).to_vec();
-    let mut name = g.menus.name.clone();
+    let mut name = g.menus.name.text.clone();
     if component(&p, 6).is_none() && name == stack_name(g, item, &p) {
         name.clear();
     }
@@ -1655,30 +1671,47 @@ pub fn text(g: &mut Game, s: &str) -> Result<(), String> {
     if !wants_text(g) {
         return Ok(());
     }
-    let before = g.menus.name.clone();
-    for ch in s.chars() {
-        if g.menus.name.chars().count() < 50 && ch != '\u{a7}' && ch >= ' ' && ch != '\u{7f}' {
-            g.menus.name.push(ch);
-        }
-    }
-    if g.menus.name != before {
+    let before = g.menus.name.text.clone();
+    g.menus.name.insert(s);
+    if g.menus.name.text != before {
         send_name(g)?;
     }
     Ok(())
 }
 
+/// The part of the name that is shown (byte offsets): scrolled so the cursor is in view, as far as the field is wide.
+fn name_window(gui: &Gui, e: &crate::textedit::Edit) -> (usize, usize) {
+    let room = 103.0;
+    let t = &e.text;
+    let mut start = 0;
+    while start < e.cursor && gui.text_width(&t[start..e.cursor]) > room {
+        start += t[start..].chars().next().map_or(1, |c| c.len_utf8());
+    }
+    let mut end = start;
+    while end < t.len() {
+        let n = end + t[end..].chars().next().map_or(1, |c| c.len_utf8());
+        if gui.text_width(&t[start..n]) > room {
+            break;
+        }
+        end = n;
+    }
+    (start, end)
+}
+
 /// A key while a menu is open: true when this module used it (the name field takes every
-/// key but Escape).
-pub fn key(g: &mut Game, sc: usize) -> Result<bool, String> {
+/// key but Escape). `keys` holds the pressed scancodes (Control, and Command on macOS, are the command key).
+pub fn key(g: &mut Game, sc: usize, keys: &[bool], v: &crate::sdl::Video) -> Result<bool, String> {
     const K_ESC: usize = 41;
-    const K_BACKSPACE: usize = 42;
     if g.container.as_ref().map_or(false, |c| c.menu == LECTERN) {
         return crate::books::lectern_key(g, sc);
     }
     if !wants_text(g) || sc == K_ESC {
         return Ok(false);
     }
-    if sc == K_BACKSPACE && g.menus.name.pop().is_some() {
+    let before = g.menus.name.text.clone();
+    let (cmd, shift) = (crate::textedit::command(keys), crate::textedit::shift(keys));
+    g.menus.name.key(sc, cmd, shift, &mut || v.clipboard(), &mut |s: &str| v.set_clipboard(s));
+    if g.menus.name.text != before {
         send_name(g)?;
     }
     // Letters, digits and the rest arrive as text input; E, Q and the number keys stay there.
@@ -1709,6 +1742,13 @@ pub fn wheel(gui: &Gui, g: &mut Game, y: i32) {
 
 /// The mouse moved with a button held: drags the scroll bar.
 pub fn drag(gui: &Gui, g: &mut Game, mx: f32, my: f32) {
+    if g.menus.name_drag {
+        if let Some(win) = g.container.as_ref().and_then(|c| window(g, c)) {
+            let (left, _) = screens::window_origin(gui, &win);
+            let at = name_at(gui, &g.menus.name, left, mx);
+            g.menus.name.click(at, true);
+        }
+    }
     if !g.menus.dragging {
         return;
     }
@@ -1732,7 +1772,14 @@ pub fn drag(gui: &Gui, g: &mut Game, mx: f32, my: f32) {
     let _ = mx;
 }
 
+/// The byte offset in the name nearest to the mouse.
+fn name_at(gui: &Gui, e: &crate::textedit::Edit, left: f32, mx: f32) -> usize {
+    let (sb, _) = name_window(gui, e);
+    sb + crate::textedit::index_at(&e.text[sb..], mx - (left + 62.0), &|s: &str| gui.text_width(s))
+}
+
 pub fn release(g: &mut Game) {
+    g.menus.name_drag = false;
     g.menus.dragging = false;
 }
 
@@ -1746,6 +1793,20 @@ pub fn click(gui: &Gui, g: &mut Game, win: &Window, mx: f32, my: f32, button_no:
     let (left, top) = screens::window_origin(gui, win);
     let menu = c.menu;
     let cid = c.id;
+    if menu == ANVIL && button_no == 1 && wants_text(g) && mx >= left + 59.0 && mx < left + 169.0 && my >= top + 20.0 && my < top + 36.0 {
+        // A click in the name field: the caret goes there, a double click selects the word, a drag selects.
+        let at = name_at(gui, &g.menus.name, left, mx);
+        let now = crate::sys::now_ms();
+        if g.menus.name_click.1 == at && now.saturating_sub(g.menus.name_click.0) < 250 {
+            g.menus.name.select_word(at);
+            g.menus.name_click = (0, usize::MAX);
+        } else {
+            g.menus.name_click = (now, at);
+            g.menus.name.click(at, false);
+            g.menus.name_drag = true;
+        }
+        return Ok(true);
+    }
     match menu {
         LECTERN => return crate::books::lectern_click(gui, g, mx, my, button_no),
         CRAFTER => {
