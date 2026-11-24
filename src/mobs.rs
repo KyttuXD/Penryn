@@ -270,18 +270,49 @@ pub fn player_info_remove(r: &mut In, names: &mut BTreeMap<[u8; 16], String>) ->
 
 /// ClientboundSetEquipmentPacket: (slot, stack) pairs, the slot's top bit saying another
 /// follows. `slot` reads a stack; it says false when it could not read past one.
-pub fn equipment(r: &mut In, e: &mut Entity, slot: fn(&mut In) -> Option<(Option<(i32, i32)>, bool)>) -> Option<()> {
+pub fn equipment(r: &mut In, e: &mut Entity, slot: fn(&mut In) -> Option<(Option<(i32, i32)>, bool, Vec<u8>)>) -> Option<()> {
     loop {
         let s = r.u8()?;
-        let (stack, ok) = slot(r)?;
+        let (stack, ok, patch) = slot(r)?;
         if let Some(q) = e.equipment.get_mut((s & 127) as usize) {
             *q = stack;
+            e.equipment_patch[(s & 127) as usize] = patch;
         }
         e.version = e.version.wrapping_add(1);
         if !ok || s & 128 == 0 {
             return Some(());
         }
     }
+}
+
+/// The asset id (without its namespace) of a stack's equippable component (32: slot, equip
+/// sound, asset_id...) in its patch.
+fn equippable_asset(patch: &[u8]) -> Option<String> {
+    if patch.is_empty() {
+        return None;
+    }
+    let mut r = In::new(patch);
+    let (add, _) = (r.varint()?, r.varint()?);
+    for _ in 0..add.max(0) {
+        let (kind, len) = (r.varint()?, r.varint()?);
+        let v = r.take(len.max(0) as usize)?;
+        if kind == 32 {
+            let mut c = In::new(v);
+            c.varint()?;
+            if c.varint()? == 0 {
+                c.string()?;
+                if c.bool()? {
+                    c.take(4)?;
+                }
+            }
+            if c.bool()? {
+                let id = c.string()?;
+                return Some(String::from(id.rsplit_once(':').map_or(id.as_str(), |x| x.1)));
+            }
+            return None;
+        }
+    }
+    None
 }
 
 /// VillagerProfessionLayer's level badges.
@@ -541,6 +572,10 @@ pub fn look(t: &EntityTable, e: &Entity, vs: &Variants, game_time: i64) -> Vec<D
     // ---- equipment: the body slot (horse armour, wolf armour, llama carpets), the saddle
     let equip = |slot: usize| -> Option<&crate::entities::EquipAsset> {
         let (item, _) = e.equipment[slot]?;
+        // A stack's equippable component names its own asset (custom armour).
+        if let Some(a) = equippable_asset(&e.equipment_patch[slot]).and_then(|n| t.equip_assets.iter().find(|a| a.name == n)) {
+            return Some(a);
+        }
         let &(_, asset) = t.item_equip.get(item as usize)?;
         t.equip_assets.get(asset as usize)
     };
@@ -671,6 +706,35 @@ pub fn selftest_checks(t: &EntityTable) -> Vec<(&'static str, String, &'static s
         names(&villager, &vs),
         "villager#main=entity/villager/villager villager_no_hat#main=entity/villager/type/desert villager#main=entity/villager/profession/librarian villager#main=entity/villager/profession_level/gold",
     ));
+    // Hitboxes: an interaction entity's data, small and marker armor stands, the scale attribute.
+    let mut inter = Entity::new(kind("interaction"), [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    inter.floats.insert(8, 2.0);
+    inter.floats.insert(9, 3.0);
+    v.push(("interaction hitbox", format!("{:?}", t.dims(&inter)), "(2.0, 3.0)"));
+    let mut stand = Entity::new(kind("armor_stand"), [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    let full = t.dims(&stand);
+    stand.data.insert(15, 1);
+    let small = t.dims(&stand);
+    stand.data.insert(15, 16);
+    v.push((
+        "armor stand small and marker boxes",
+        format!("{} {:?}", small == (full.0 * 0.5, full.1 * 0.5), t.dims(&stand)),
+        "true (0.0, 0.0)",
+    ));
+    let mut big = Entity::new(kind("zombie"), [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    let one = t.dims(&big);
+    big.scale = 3.0;
+    v.push(("scale attribute scales the box", format!("{:?}", t.dims(&big) == (one.0 * 3.0, one.1 * 3.0)), "true"));
+    // A stack's equippable component names its armour asset: a stick on the head wears iron.
+    let mut o = crate::wire::Out::new();
+    let mut body = crate::wire::Out::new();
+    body.varint(5).varint(1).bool(true).string("minecraft:iron").bytes(&[0; 7]);
+    o.varint(1).varint(0).varint(32).varint(body.b.len() as i32).bytes(&body.b);
+    v.push(("equippable asset id", format!("{:?}", equippable_asset(&o.b)), "Some(\"iron\")"));
+    let mut worn = Entity::new(kind("zombie"), [0; 16], [0.0; 3], 0.0, 0.0, 0.0);
+    worn.equipment[5] = Some((1, 1));
+    worn.equipment_patch[5] = o.b.clone();
+    v.push(("custom armour from the patch", names(&worn, &vs), "zombie#main=entity/zombie/zombie zombie#helmet=entity/equipment/humanoid/iron"));
     // LivingEntity.DATA_EFFECT_PARTICLES: an entity_effect (a colour), a dust (colour and
     // scale) and a trail are read past, so the values after them (a baby flag) are kept.
     let mut b = alloc::vec![28u8, 1, 2, 3, 4, 21];
