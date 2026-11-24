@@ -460,6 +460,18 @@ pub struct ServerUi {
 }
 
 impl ServerUi {
+    /// A new listener (reconfiguration, login): the tab list, teams, scoreboard, boss bars,
+    /// titles, border and name-tag caches start empty. What outlives the connection
+    /// (`common`) and what the connection itself says (`online`) stay; the login packet that
+    /// follows sets hardcore and immediate_respawn again.
+    pub fn reset_session(&mut self) {
+        let common = core::mem::take(&mut self.common);
+        let (online, ticks) = (self.online, self.ticks);
+        *self = ServerUi::new(common);
+        self.online = online;
+        self.ticks = ticks;
+    }
+
     pub fn new(mut common: Common) -> ServerUi {
         // Tests: PENRYN_TEST_LINKS="label|url;label|url" stands in for the server's links.
         if let (true, Some(t)) = (common.links.is_empty(), crate::sys::env("PENRYN_TEST_LINKS")) {
@@ -1225,5 +1237,29 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     store_cookie(&mut In::new(&o.b), &mut c);
     let a = c.answer("minecraft:token").b;
     out.push(("cookie answer", format!("{:?}", &a[a.len() - 5..]), "[1, 3, 97, 98, 99]"));
+    // A new listener (reconfiguration): tab list, teams, border and sidebar are gone, the
+    // cookies and the connection's online flag stay.
+    let mut ui = ServerUi::new(c);
+    ui.online = true;
+    let mut o = Out::new();
+    o.u8(1 | 8).varint(1).bytes(&[2u8; 16]).string("Eve").varint(0).bool(true);
+    player_info(&mut In::new(&o.b), &mut ui);
+    let mut o = Out::new();
+    o.string("blue").u8(0);
+    nbt_string(&mut o, "Blue");
+    nbt_string(&mut o, "");
+    nbt_string(&mut o, "");
+    o.varint(0).varint(0).bool(true).varint(9).u8(0);
+    o.varint(1).string("Eve");
+    team(&mut In::new(&o.b), &mut ui);
+    ui.display[1] = Some(String::from("side"));
+    ui.border.size = 5.0;
+    ui.title = Some(String::from("hi"));
+    ui.reset_session();
+    out.push((
+        "reset session",
+        format!("{} {} {} {} {} {} {} {}", ui.players.len(), ui.teams.len() + ui.team_of.len(), ui.display[1].is_none(), ui.border.size > 5.0, ui.title.is_none(), ui.bosses.len(), ui.online, ui.common.cookies.len()),
+        "0 0 true true true 0 true 1",
+    ));
     out
 }
