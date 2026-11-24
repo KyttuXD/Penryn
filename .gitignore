@@ -6,3 +6,4 @@ account.txt
 __pycache__/
 *.pyc
 /vendor/
+/.claude/
