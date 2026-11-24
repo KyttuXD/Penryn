@@ -1034,6 +1034,8 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
                     let (kx, ky) = self.menu.o.turn_per_pixel();
                     g.player.yaw += dx * kx;
                     g.player.pitch = (g.player.pitch + dy * ky).clamp(-90.0, 90.0);
+                } else if let (Screen::Chat, Some(gui)) = (&self.screen, self.gui.as_ref()) {
+                    self.chat_ui.drag(gui, self.mouse.0, self.mouse_held[0]);
                 } else if self.screen == Screen::Options {
                     self.menu.drag_to(self.mouse.0);
                 } else if let (Screen::Inventory, Some(gui)) = (&self.screen, self.gui.as_ref()) {
