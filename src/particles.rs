@@ -33,6 +33,8 @@ pub enum Effect {
     Level(i32, [i32; 3], i32),
     /// An entity event: the event, where the entity is, its type.
     Entity(u8, [f64; 3], i32),
+    /// A new level (ParticleEngine.setLevel): every live particle goes.
+    Clear,
 }
 
 /// The local player, for the particles it makes itself (sprinting, eating).
@@ -1083,6 +1085,13 @@ impl Particles {
         Some((ty as u16, opt))
     }
 
+    /// Drops every live particle and explosion (a new level).
+    pub fn clear(&mut self) {
+        self.list.clear();
+        self.explosions.clear();
+        self.evict = 0;
+    }
+
     /// Takes what the packet handlers queued: particles, explosions, entity and level events.
     /// Returns the explosion's push on the player, if any.
     pub fn handle(&mut self, g: &mut Game, gui: Option<&Gui>, sizes: &[(f32, f32)], eye: [f64; 3]) -> Option<[f64; 3]> {
@@ -1101,6 +1110,7 @@ impl Particles {
                 Effect::Destroy(pos, s) => self.destroy(&g.world, &g.blocks, *pos, *s),
                 Effect::Level(kind, pos, data) => self.level_event(g, gui, eye, *kind, *pos, *data),
                 Effect::Entity(ev, pos, kind) => self.entity_event(g, gui, eye, sizes, *ev, *pos, *kind),
+                Effect::Clear => self.clear(),
             }
         }
         // Give the queue's buffer back (no allocation next time).
@@ -1866,6 +1876,10 @@ pub fn selftest(b: &Blocks, w: &World) -> Vec<(&'static str, String, &'static st
         ticks += 1;
     }
     out.push(("block particles gone within 40 ticks", yes(ticks <= 41), "yes"));
+    p.destroy(w, b, [8, 64, 8], stone);
+    let before = p.count();
+    p.clear();
+    out.push(("a new level clears the particles", alloc::format!("{} {}", before > 0, p.count()), "true 0"));
     out.push(("block particles stop on the floor", yes(low >= 64.0 - 1e-6), "yes"));
     // A torch-sized shape (one box under 4/16 a side): 2 x 2 x 2 at least per box.
     if let Some(torch) = (0..b.states.len() as u16).find(|&s| b.of_state(s).name == "torch") {

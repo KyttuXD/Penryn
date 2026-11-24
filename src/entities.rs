@@ -394,6 +394,20 @@ pub struct Draw {
 /// id) cannot take a stale entry of a reused id for the new entity's own.
 static NEXT_VERSION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// The entity types that are not LivingEntity (bit per registry id, set by `EntityTable::parse`):
+/// their data index 9 is no health (an interaction's height is a float there).
+static NONLIVING: [core::sync::atomic::AtomicU64; 4] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
+/// Whether `kind` is known to be an entity type that is not a LivingEntity.
+pub fn nonliving_kind(kind: i32) -> bool {
+    (0..256).contains(&kind) && NONLIVING[kind as usize / 64].load(core::sync::atomic::Ordering::Relaxed) >> (kind as usize % 64) & 1 != 0
+}
+
 pub struct EntityTable {
     tex: u32,
     aw: f32,
@@ -565,6 +579,14 @@ impl EntityTable {
             let name = s(&mut p);
             let tex = s(&mut p);
             types.push(TypeInfo { name, model, rect: r, tex, size, baby_size, baby_index });
+        }
+        for (i, ty) in types.iter().enumerate().take(256) {
+            let bit = 1u64 << (i % 64);
+            if is_living(&ty.name) {
+                NONLIVING[i / 64].fetch_and(!bit, core::sync::atomic::Ordering::Relaxed);
+            } else {
+                NONLIVING[i / 64].fetch_or(bit, core::sync::atomic::Ordering::Relaxed);
+            }
         }
         let player_models = [rd16(d, p) as i16, rd16(d, p + 2) as i16];
         let n = rd32(d, p + 4) as usize;

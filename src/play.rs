@@ -72,6 +72,31 @@ enum Screen {
 
 /// Items used over time while the button is held (eaten, drunk, drawn, raised), and for how
 /// many ticks (0: until released).
+/// The looks-cache version of the player's own third-person model: the same for the same
+/// flags, pose, held stack and player, another when any of them changes.
+fn own_looks_key(flags: i64, pose: i64, held: Option<(i32, i32)>, uuid: [u8; 16]) -> u32 {
+    let mut h: u32 = 0x811c9dc5;
+    let mut mix = |x: u64| {
+        for b in x.to_le_bytes() {
+            h = (h ^ b as u32).wrapping_mul(0x01000193);
+        }
+    };
+    mix(flags as u64);
+    mix(pose as u64);
+    match held {
+        Some((a, b)) => {
+            mix(1);
+            mix(a as u32 as u64);
+            mix(b as u32 as u64);
+        }
+        None => mix(0),
+    }
+    for c in uuid.chunks(8) {
+        mix(u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]));
+    }
+    h
+}
+
 fn use_duration(name: &str) -> Option<u32> {
     const FOOD: &[&str] = &[
         "apple", "bread", "carrot", "potato", "baked_potato", "poisonous_potato", "beetroot", "melon_slice", "cookie",
@@ -425,6 +450,9 @@ impl App {
         e.data.insert(0, flags);
         e.data.insert(6, self.own_pose);
         e.equipment[0] = g.held();
+        // The looks cache keys on the version: derive it from what the looks depend on, so an
+        // unchanged own model hits the cache instead of rebuilding its draws every frame.
+        e.version = own_looks_key(flags, self.own_pose, e.equipment[0], g.uuid);
         e
     }
 
@@ -2966,6 +2994,17 @@ fn ray_box(o: [f64; 3], d: [f64; 3], lo: [f64; 3], hi: [f64; 3]) -> Option<(f64,
 pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     let mut v = Vec::new();
     let yn = |b: bool| if b { "yes" } else { "no" };
+    let (u0, u1) = ([0u8; 16], [1u8; 16]);
+    v.push(("own model key is stable", yn(own_looks_key(2, 0, Some((5, 1)), u0) == own_looks_key(2, 0, Some((5, 1)), u0)).into(), "yes"));
+    v.push((
+        "own model key follows flags, pose, item, player",
+        yn(own_looks_key(2, 0, None, u0) != own_looks_key(0, 0, None, u0)
+            && own_looks_key(0, 0, None, u0) != own_looks_key(0, 1, None, u0)
+            && own_looks_key(0, 0, None, u0) != own_looks_key(0, 0, Some((5, 1)), u0)
+            && own_looks_key(0, 0, None, u0) != own_looks_key(0, 0, None, u1))
+        .into(),
+        "yes",
+    ));
     // On the ground (a grass block): a bucket, a pearl and a sword do not act on it, so UseItem follows.
     v.push(("water bucket on ground sends UseItem", yn(!use_on_consumes(false, "water_bucket", "grass_block")).into(), "yes"));
     v.push(("ender pearl on ground sends UseItem", yn(!use_on_consumes(false, "ender_pearl", "stone")).into(), "yes"));
