@@ -858,7 +858,8 @@ impl App {
                 self.save_screenshot(g);
             }
             if let (Some(secs), Some(shot)) = (self.shot_ingame, self.test_shot.as_mut()) {
-                if shot.1 == u64::MAX {
+                // Only once the player is in the world (the pack screens are drawn by this loop too).
+                if shot.1 == u64::MAX && g.loaded_sent && self.screen == Screen::Play {
                     shot.1 = now + secs * 1000;
                 }
             }
@@ -869,7 +870,8 @@ impl App {
                     let png = sdl::screenshot_png(&self.v.gl, w, h);
                     sys::write_file_private(&shot.0, &png);
                     say!("screenshot: {}", shot.0);
-                    return Ok(());
+                    // Not back to the menus: they would take their own shot of the next screen over this one.
+                    unsafe { sys::exit(0) };
                 }
             }
             self.frames += 1;
