@@ -8,6 +8,7 @@ use crate::lang;
 use crate::screens::{self, Button, WHITE};
 use crate::servers::{self, Pack, Ping, Server};
 use crate::task::{self, Task};
+use crate::textedit::{self, Edit, Filter};
 use crate::title::{self, Assets};
 use alloc::format;
 use alloc::string::String;
@@ -27,21 +28,31 @@ pub fn fl(x: f32) -> f32 {
 
 // ------------------------------------------------------------------ EditBox
 
-/// EditBox: a bordered text field with a caret, scrolled to keep the caret in view.
+/// EditBox: a bordered text field with a caret and a selection, scrolled to keep the caret in view. The editing itself
+/// (selection, word moves, clipboard) is textedit::Edit.
 pub struct EditBox {
-    pub text: String,
-    /// The caret, in characters.
-    pub caret: usize,
-    pub max: usize,
+    pub ed: Edit,
     pub focused: bool,
     focused_at: u64,
     pub hint: Option<String>,
+    /// A mouse drag that started in this field is selecting.
+    drag: bool,
+    /// When and where (byte offset) the last click was, for the double click.
+    last_click: (u64, usize),
 }
+
+/// The selection highlight behind the text.
+const SELECT: u32 = 0xFF33_99FF;
 
 impl EditBox {
     pub fn new(text: &str, max: usize) -> EditBox {
-        let text: String = text.chars().take(max).collect();
-        EditBox { caret: text.chars().count(), text, max, focused: false, focused_at: 0, hint: None }
+        let mut ed = Edit::new(max, Filter::Line);
+        ed.set(text);
+        EditBox { ed, focused: false, focused_at: 0, hint: None, drag: false, last_click: (0, usize::MAX) }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.ed.text
     }
 
     pub fn focus(&mut self, on: bool) {
@@ -49,98 +60,67 @@ impl EditBox {
             self.focused_at = crate::sys::now_ms();
         }
         self.focused = on;
+        if !on {
+            self.drag = false;
+        }
     }
 
-    fn byte_at(&self, ch: usize) -> usize {
-        self.text.char_indices().nth(ch).map_or(self.text.len(), |(i, _)| i)
-    }
-
-    /// Typed text (SharedConstants.isAllowedChatCharacter: no control characters, no §).
+    /// Typed text (SharedConstants.isAllowedChatCharacter: no control characters, no section sign).
     pub fn insert(&mut self, s: &str) {
-        for c in s.chars() {
-            if c < ' ' || c == '\u{7f}' || c == '\u{a7}' || self.text.chars().count() >= self.max {
-                continue;
-            }
-            let at = self.byte_at(self.caret);
-            self.text.insert(at, c);
-            self.caret += 1;
-        }
+        self.ed.insert(s);
         self.focused_at = crate::sys::now_ms();
     }
 
-    /// A key: true when it changed the text.
-    pub fn key(&mut self, sc: usize, ctrl: bool, clipboard: impl FnOnce() -> String) -> bool {
-        let n = self.text.chars().count();
+    /// A key: true when it was an editing key.
+    pub fn key(&mut self, sc: usize, command: bool, shift: bool, clip: &mut dyn FnMut() -> String, put: &mut dyn FnMut(&str)) -> bool {
         self.focused_at = crate::sys::now_ms();
-        match sc {
-            42 if self.caret > 0 => {
-                // Backspace; with Ctrl the word before the caret.
-                let mut from = self.caret - 1;
-                if ctrl {
-                    let cs: Vec<char> = self.text.chars().collect();
-                    while from > 0 && cs[from - 1] == ' ' {
-                        from -= 1;
-                    }
-                    while from > 0 && cs[from - 1] != ' ' {
-                        from -= 1;
-                    }
-                }
-                let (a, b) = (self.byte_at(from), self.byte_at(self.caret));
-                self.text.replace_range(a..b, "");
-                self.caret = from;
-                true
-            }
-            76 if self.caret < n => {
-                let (a, b) = (self.byte_at(self.caret), self.byte_at(self.caret + 1));
-                self.text.replace_range(a..b, "");
-                true
-            }
-            80 => {
-                self.caret = self.caret.saturating_sub(1);
-                false
-            }
-            79 => {
-                self.caret = (self.caret + 1).min(n);
-                false
-            }
-            74 => {
-                self.caret = 0;
-                false
-            }
-            77 => {
-                self.caret = n;
-                false
-            }
-            25 if ctrl => {
-                let t = clipboard();
-                self.insert(&t);
-                true
-            }
-            _ => false,
-        }
+        self.ed.key(sc, command, shift, clip, put)
     }
 
-    /// The caret goes where the field was clicked.
-    pub fn click(&mut self, gui: &Gui, x: f32, mx: f32) {
+    /// The byte offset nearest to the mouse.
+    fn at(&self, gui: &Gui, x: f32, mx: f32) -> usize {
         let (start, _) = self.window(gui, 192.0);
-        let mut pos = x + 4.0;
-        let cs: Vec<char> = self.text.chars().collect();
-        let mut i = start;
-        let mut buf = [0u8; 4];
-        while i < cs.len() {
-            let cw = gui.text_width(cs[i].encode_utf8(&mut buf));
-            if mx < pos + cw / 2.0 {
-                break;
-            }
-            pos += cw;
-            i += 1;
+        let sb = self.byte_of(start);
+        sb + textedit::index_at(&self.ed.text[sb..], mx - (x + 4.0), &|s: &str| gui.text_width(s))
+    }
+
+    fn byte_of(&self, ch: usize) -> usize {
+        self.ed.text.char_indices().nth(ch).map_or(self.ed.text.len(), |(i, _)| i)
+    }
+
+    /// A press in the field: the caret goes there (Shift extends the selection), a double click selects the word, and
+    /// the drag that follows selects.
+    pub fn press(&mut self, gui: &Gui, x: f32, mx: f32, shift: bool) {
+        let at = self.at(gui, x, mx);
+        let now = crate::sys::now_ms();
+        self.focused_at = now;
+        if self.last_click.1 == at && now.saturating_sub(self.last_click.0) < 250 {
+            self.ed.select_word(at);
+            self.last_click = (0, usize::MAX);
+            self.drag = false;
+            return;
         }
-        self.caret = i;
+        self.last_click = (now, at);
+        self.ed.click(at, shift);
+        self.drag = true;
+    }
+
+    /// The mouse moved with the button down.
+    pub fn drag_to(&mut self, gui: &Gui, x: f32, mx: f32) {
+        if self.drag {
+            let at = self.at(gui, x, mx);
+            self.ed.click(at, true);
+        }
+    }
+
+    pub fn release(&mut self) {
+        self.drag = false;
     }
 
     /// The characters shown: from where, and how many fit in `room`.
     fn window(&self, gui: &Gui, room: f32) -> (usize, usize) {
-        let cs: Vec<char> = self.text.chars().collect();
+        let cs: Vec<char> = self.ed.text.chars().collect();
+        let caret = self.ed.text[..self.ed.cursor].chars().count();
         let mut buf = [0u8; 4];
         let w = |c: char, b: &mut [u8; 4]| gui.text_width(c.encode_utf8(b));
         // Scroll so the caret is in view.
@@ -152,7 +132,7 @@ impl EditBox {
                 used += w(cs[end], &mut buf);
                 end += 1;
             }
-            if self.caret <= end || start >= cs.len() {
+            if caret <= end || start >= cs.len() {
                 return (start, end - start);
             }
             start += 1;
@@ -162,20 +142,29 @@ impl EditBox {
     pub fn draw(&self, gui: &mut Gui, x: f32, y: f32, w: f32, h: f32) {
         gui.blit_nine(if self.focused { "widget/text_field_highlighted" } else { "widget/text_field" }, x, y, w, h);
         let (tx, ty) = (x + 4.0, y + fl((h - 8.0) / 2.0));
-        if self.text.is_empty() && !self.focused {
+        if self.ed.text.is_empty() && !self.focused {
             if let Some(hint) = &self.hint {
                 gui.text(hint, tx, ty, GREY);
             }
             return;
         }
         let (start, count) = self.window(gui, w - 8.0);
-        let shown: String = self.text.chars().skip(start).take(count).collect();
-        let before: String = self.text.chars().skip(start).take(self.caret.saturating_sub(start)).collect();
+        let (sb, eb) = (self.byte_of(start), self.byte_of(start + count));
+        let shown = String::from(&self.ed.text[sb..eb]);
+        let cur = self.ed.cursor.clamp(sb, eb);
+        if self.focused && self.ed.has_selection() {
+            let (a, b) = self.ed.selection();
+            let (a, b) = (a.clamp(sb, eb), b.clamp(sb, eb));
+            if a < b {
+                let (x0, x1) = (tx + gui.text_width(&self.ed.text[sb..a]), tx + gui.text_width(&self.ed.text[sb..b]));
+                gui.fill(x0, ty - 1.0, x1, ty + 10.0, SELECT);
+            }
+        }
         gui.text(&shown, tx, ty, 0xFFE0_E0E0);
         let blink = (crate::sys::now_ms().saturating_sub(self.focused_at) / 300) % 2 == 0;
         if self.focused && blink {
-            let cx = tx + gui.text_width(&before);
-            if self.caret >= self.text.chars().count() {
+            let cx = tx + gui.text_width(&self.ed.text[sb..cur]);
+            if self.ed.cursor >= self.ed.text.len() {
                 gui.text("_", cx, ty, 0xFFE0_E0E0);
             } else {
                 gui.fill(cx, ty - 1.0, cx + 1.0, ty + 10.0, 0xFFD0_D0D0);
@@ -575,19 +564,19 @@ impl Mp {
                 if inside(ny) {
                     name.focus(true);
                     ip.focus(false);
-                    name.click(gui, x, mx);
+                    name.press(gui, x, mx, shift);
                 } else if inside(iy) {
                     ip.focus(true);
                     name.focus(false);
-                    ip.click(gui, x, mx);
+                    ip.press(gui, x, mx, shift);
                 }
                 if pb.hit(mx, my) {
                     *pack = pack.next(shift);
                     return Act::Click;
                 }
-                if done.hit(mx, my) && servers::valid(&ip.text) {
-                    let shown = if name.text.is_empty() { lang::get("selectServer.defaultName") } else { name.text.clone() };
-                        let mut s = Server::new(&shown, &ip.text);
+                if done.hit(mx, my) && servers::valid(ip.text()) {
+                    let shown = if name.text().is_empty() { lang::get("selectServer.defaultName") } else { String::from(name.text()) };
+                        let mut s = Server::new(&shown, ip.text());
                     s.pack = *pack;
                     let edit = *edit;
                     self.finish_manage(edit, s);
@@ -603,9 +592,9 @@ impl Mp {
                 let (x, iy, join, cancel) = direct_layout(gw, gh);
                 if mx >= x && mx < x + 200.0 && my >= iy && my < iy + 20.0 {
                     ip.focus(true);
-                    ip.click(gui, x, mx);
+                    ip.press(gui, x, mx, shift);
                 }
-                if join.hit(mx, my) && servers::valid(&ip.text) {
+                if join.hit(mx, my) && servers::valid(ip.text()) {
                     return self.direct_join();
                 }
                 if cancel.hit(mx, my) {
@@ -680,7 +669,7 @@ impl Mp {
     /// directJoinCallback: remember the address (hidden) unless it is listed, then join.
     fn direct_join(&mut self) -> Act {
         let Sub::Direct { ip } = &self.sub else { return Act::None };
-        let addr = String::from(ip.text.trim());
+        let addr = String::from(ip.text().trim());
         self.last_direct = addr.clone();
         if !self.list.find(&addr) {
             self.list.add_hidden(Server::new(&lang::get("selectServer.defaultName"), &addr));
@@ -691,7 +680,7 @@ impl Mp {
     }
 
     /// Escape, Enter, Tab and the text keys.
-    pub fn key(&mut self, sc: usize, ctrl: bool, shift: bool, clipboard: impl FnOnce() -> String) -> Act {
+    pub fn key(&mut self, sc: usize, ctrl: bool, shift: bool, clipboard: &mut dyn FnMut() -> String, put: &mut dyn FnMut(&str)) -> Act {
         match &mut self.sub {
             Sub::List => match sc {
                 41 => Act::Back,
@@ -745,9 +734,9 @@ impl Mp {
                     Act::None
                 }
                 40 | 88 => {
-                    if servers::valid(&ip.text) {
-                        let shown = if name.text.is_empty() { lang::get("selectServer.defaultName") } else { name.text.clone() };
-                        let mut s = Server::new(&shown, &ip.text);
+                    if servers::valid(ip.text()) {
+                        let shown = if name.text().is_empty() { lang::get("selectServer.defaultName") } else { String::from(name.text()) };
+                        let mut s = Server::new(&shown, ip.text());
                         s.pack = *pack;
                         let edit = *edit;
                         self.finish_manage(edit, s);
@@ -756,9 +745,9 @@ impl Mp {
                 }
                 _ => {
                     if name.focused {
-                        name.key(sc, ctrl, clipboard);
+                        name.key(sc, ctrl, shift, clipboard, put);
                     } else if ip.focused {
-                        ip.key(sc, ctrl, clipboard);
+                        ip.key(sc, ctrl, shift, clipboard, put);
                     }
                     Act::None
                 }
@@ -768,9 +757,9 @@ impl Mp {
                     self.sub = Sub::List;
                     Act::None
                 }
-                40 | 88 if servers::valid(&ip.text) => self.direct_join(),
+                40 | 88 if servers::valid(ip.text()) => self.direct_join(),
                 _ => {
-                    ip.key(sc, ctrl, clipboard);
+                    ip.key(sc, ctrl, shift, clipboard, put);
                     Act::None
                 }
             },
@@ -780,6 +769,31 @@ impl Mp {
                 }
                 Act::None
             }
+        }
+    }
+
+    /// The mouse moved with the left button down: a drag in a text field selects.
+    pub fn drag(&mut self, gui: &Gui, mx: f32) {
+        let (gw, gh) = (gui.width, gui.height);
+        match &mut self.sub {
+            Sub::Manage { name, ip, .. } => {
+                let x = manage_layout(gw, gh).0;
+                name.drag_to(gui, x, mx);
+                ip.drag_to(gui, x, mx);
+            }
+            Sub::Direct { ip } => ip.drag_to(gui, direct_layout(gw, gh).0, mx),
+            _ => {}
+        }
+    }
+
+    pub fn release(&mut self) {
+        match &mut self.sub {
+            Sub::Manage { name, ip, .. } => {
+                name.release();
+                ip.release();
+            }
+            Sub::Direct { ip } => ip.release(),
+            _ => {}
         }
     }
 
@@ -811,7 +825,7 @@ impl Mp {
                 name.draw(gui, x, ny, 200.0, 20.0);
                 ip.draw(gui, x, iy, 200.0, 20.0);
                 pb.label = lang::format("options.generic_value", &[lang::get("manageServer.resourcePack"), lang::get(pack.key())]);
-                done.active = servers::valid(&ip.text);
+                done.active = servers::valid(ip.text());
                 pb.draw(gui, mx, my);
                 done.draw(gui, mx, my);
                 cancel.draw(gui, mx, my);
@@ -822,7 +836,7 @@ impl Mp {
                 gui.text_centered(&lang::get("selectServer.direct"), cx, 20.0, WHITE);
                 gui.text(&lang::get("manageServer.enterIp"), x + 1.0, 100.0, LABEL);
                 ip.draw(gui, x, iy, 200.0, 20.0);
-                join.active = servers::valid(&ip.text);
+                join.active = servers::valid(ip.text());
                 join.draw(gui, mx, my);
                 cancel.draw(gui, mx, my);
                 return;
@@ -969,8 +983,13 @@ pub fn selftest() -> Vec<(&'static str, String, &'static str)> {
     ));
     let mut e = EditBox::new("abc", 5);
     e.insert("de\u{a7}fg");
-    e.key(80, false, String::new);
-    e.key(42, false, String::new);
-    out.push(("edit box typing", format!("{} {}", e.text, e.caret), "abce 3"));
+    e.key(80, false, false, &mut String::new, &mut |_: &str| {});
+    e.key(42, false, false, &mut String::new, &mut |_: &str| {});
+    out.push(("edit box typing", format!("{} {}", e.text(), e.ed.cursor), "abce 3"));
+    // Selecting and replacing in a field; the caret stays on character boundaries.
+    let mut e = EditBox::new("h\u{e9}llo wor\u{f6}ld", 32);
+    e.ed.select_word(1);
+    e.insert("X");
+    out.push(("edit box replaces a double-clicked word", format!("{} {}", e.text(), e.ed.cursor), "X wor\u{f6}ld 1"));
     out
 }

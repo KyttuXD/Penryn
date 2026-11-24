@@ -725,7 +725,10 @@ pub struct Screen {
     pub tab: usize,
     scroll: f32,
     scrolling: bool,
-    search: String,
+    search: crate::textedit::Edit,
+    /// A drag that started in the search box is selecting; when and where (byte offset) the last click there was.
+    search_drag: bool,
+    search_click: (u64, usize),
     shown: Vec<Pick>,
     carried: Option<Stack>,
     visible_tags: Vec<u16>,
@@ -744,7 +747,9 @@ impl Screen {
             tab: usize::MAX,
             scroll: 0.0,
             scrolling: false,
-            search: String::new(),
+            search: crate::textedit::Edit::new(50, crate::textedit::Filter::Line),
+            search_drag: false,
+            search_click: (0, usize::MAX),
             shown: Vec::new(),
             carried: None,
             visible_tags: Vec::new(),
@@ -803,7 +808,7 @@ impl Screen {
             HOTBAR => self.fill_hotbars(),
             SEARCH => {
                 if changed {
-                    self.search.clear();
+                    self.search.set("");
                 }
                 self.refresh_search(d, g);
             }
@@ -813,14 +818,14 @@ impl Screen {
             }
         }
         if tab.kind != SEARCH {
-            self.search.clear();
+            self.search.set("");
             self.visible_tags.clear();
         }
         self.scroll = 0.0;
     }
 
     fn refresh_search(&mut self, d: &Data, g: &Game) {
-        let (items, tags) = d.search(&self.search, Self::op(g), &g.blocks.items);
+        let (items, tags) = d.search(&self.search.text, Self::op(g), &g.blocks.items);
         self.shown = items.into_iter().map(Pick::Entry).collect();
         self.visible_tags = tags;
         self.scroll = 0.0;
@@ -1077,7 +1082,7 @@ impl Screen {
     // ---- input
 
     /// A key (repeats included): what the screen does with it.
-    pub fn key(&mut self, d: &Data, gui: &Gui, g: &mut Game, sc: usize, repeat: bool, keys: &[bool; 512], mouse: (f32, f32)) -> Result<Action, String> {
+    pub fn key(&mut self, d: &Data, gui: &Gui, g: &mut Game, sc: usize, repeat: bool, keys: &[bool; 512], mouse: (f32, f32), v: &crate::sdl::Video) -> Result<Action, String> {
         const K_E: usize = 8;
         const K_F: usize = 9;
         const K_Q: usize = 20;
@@ -1090,11 +1095,16 @@ impl Screen {
         if sc == K_ESC && !repeat {
             return Ok(Action::Close);
         }
-        if search && sc == K_BACKSPACE {
-            if self.search.pop().is_some() {
-                self.refresh_search(d, g);
+        if search {
+            // The box's editing keys: arrows, Home, End, Backspace, Delete, and Ctrl (Command on macOS) with A, C, X, V.
+            let before = self.search.text.clone();
+            let (cmd, sh) = (crate::textedit::command(keys), crate::textedit::shift(keys));
+            if self.search.key(sc, cmd, sh, &mut || v.clipboard(), &mut |s: &str| v.set_clipboard(s)) {
+                if self.search.text != before {
+                    self.refresh_search(d, g);
+                }
+                return Ok(Action::None);
             }
-            return Ok(Action::None);
         }
         if repeat {
             return Ok(Action::None);
@@ -1156,22 +1166,62 @@ impl Screen {
         if self.tab_kind(d) != SEARCH {
             return;
         }
-        let before = self.search.len();
-        for ch in s.chars() {
-            if self.search.chars().count() < 50 && ch >= ' ' && ch != '\u{7f}' && ch != '§' {
-                self.search.push(ch);
-            }
-        }
-        if self.search.len() != before {
+        let before = self.search.text.clone();
+        self.search.insert(s);
+        if self.search.text != before {
             self.refresh_search(d, g);
         }
+    }
+
+    /// The part of the search text that is shown (byte offsets): scrolled to keep the cursor in view.
+    fn search_window(&self, gui: &Gui) -> (usize, usize) {
+        let room = 80.0 - gui.text_width("_");
+        let t = &self.search.text;
+        let cur = self.search.cursor;
+        let mut start = 0;
+        while start < cur && gui.text_width(&t[start..cur]) > room {
+            start += t[start..].chars().next().map_or(1, |c| c.len_utf8());
+        }
+        let mut end = start;
+        while end < t.len() {
+            let n = end + t[end..].chars().next().map_or(1, |c| c.len_utf8());
+            if gui.text_width(&t[start..n]) > room {
+                break;
+            }
+            end = n;
+        }
+        (start, end)
+    }
+
+    /// The byte offset in the search text nearest to the mouse.
+    fn search_at(&self, gui: &Gui, left: f32, mx: f32) -> usize {
+        let (sb, _) = self.search_window(gui);
+        sb + crate::textedit::index_at(&self.search.text[sb..], mx - (left + 82.0), &|s: &str| gui.text_width(s))
     }
 
     /// A mouse button (SDL: 1 left, 2 middle, 3 right) going down or up.
     pub fn mouse(&mut self, d: &Data, gui: &Gui, g: &mut Game, button: u8, down: bool, shift: bool, mx: f32, my: f32) -> Result<(), String> {
         self.op_cached = Self::op(g);
+        if down && button == 1 && self.tab_kind(d) == SEARCH {
+            let (left, top) = Self::origin(gui);
+            if mx >= left + 80.0 && mx < left + 170.0 && my >= top + 4.0 && my < top + 16.0 {
+                // A click in the search box: the caret goes there (Shift extends), a double click selects the word.
+                let at = self.search_at(gui, left, mx);
+                let now = crate::sys::now_ms();
+                if self.search_click.1 == at && now.saturating_sub(self.search_click.0) < 250 {
+                    self.search.select_word(at);
+                    self.search_click = (0, usize::MAX);
+                } else {
+                    self.search_click = (now, at);
+                    self.search.click(at, shift);
+                    self.search_drag = true;
+                }
+                return Ok(());
+            }
+        }
         if !down {
             if button == 1 {
+                self.search_drag = false;
                 self.scrolling = false;
                 // mouseReleased: the tab under the mouse is selected.
                 if let Some(t) = self.tab_at(d, gui, mx, my, false) {
@@ -1246,7 +1296,7 @@ impl Screen {
                 self.select(d, g, t);
             }
             "search" => {
-                self.search = String::from(v);
+                self.search.set(v);
                 self.refresh_search(d, g);
             }
             "scroll" => self.scroll = v.parse::<f32>().unwrap_or(0.0).clamp(0.0, 1.0),
@@ -1319,16 +1369,29 @@ impl Screen {
         let bg = d.tabs.get(self.tab).map_or("container/creative_inventory/tab_items", |t| t.bg.as_str());
         gui.blit(bg, left, top);
         if kind == SEARCH {
-            // EditBox without a border: the end of the text that fits, and the blinking cursor.
-            let mut shown: &str = &self.search;
-            while gui.text_width(shown) + gui.text_width("_") > 80.0 {
-                let mut cs = shown.chars();
-                cs.next();
-                shown = cs.as_str();
+            // EditBox without a border: scrolled to keep the cursor in view, the selection highlighted, the blinking cursor.
+            if self.search_drag {
+                let at = self.search_at(gui, left, mx);
+                self.search.click(at, true);
             }
-            let x = left + 82.0 + gui.text(shown, left + 82.0, top + 6.0, 0xFFFF_FFFF); // text() gives the width
+            let (sb, eb) = self.search_window(gui);
+            let cur = self.search.cursor.clamp(sb, eb);
+            if self.search.has_selection() {
+                let (a, b) = self.search.selection();
+                let (a, b) = (a.clamp(sb, eb), b.clamp(sb, eb));
+                if a < b {
+                    let (x0, x1) = (left + 82.0 + gui.text_width(&self.search.text[sb..a]), left + 82.0 + gui.text_width(&self.search.text[sb..b]));
+                    gui.fill(x0, top + 5.0, x1, top + 15.0, 0xFF33_99FF);
+                }
+            }
+            let x = left + 82.0 + gui.text(&self.search.text[sb..eb], left + 82.0, top + 6.0, 0xFFFF_FFFF); // text() gives the width
             if (crate::sys::now_ms() / 300) % 2 == 0 {
-                gui.text("_", x, top + 6.0, 0xFFFF_FFFF);
+                if self.search.cursor >= self.search.text.len() {
+                    gui.text("_", x, top + 6.0, 0xFFFF_FFFF);
+                } else {
+                    let cx = left + 82.0 + gui.text_width(&self.search.text[sb..cur]);
+                    gui.fill(cx, top + 5.0, cx + 1.0, top + 15.0, 0xFFD0_D0D0);
+                }
             }
         }
         if d.tabs.get(self.tab).map_or(false, |t| t.can_scroll()) {
