@@ -702,6 +702,12 @@ impl Game {
                         }
                     } else {
                         self.riding.on_attribute(id, attr, v);
+                        // generic.scale (Attributes.SCALE, clamped 0.0625..16 as its range).
+                        if attr == 30 {
+                            if let Some(e) = self.entities.get_mut(&id) {
+                                e.scale = v.clamp(0.0625, 16.0) as f32;
+                            }
+                        }
                     }
                 }
             }
@@ -1085,7 +1091,7 @@ impl Game {
             crate::mobs::C_SET_EQUIPMENT => {
                 let id = r.varint().unwrap_or(0);
                 if let Some(e) = self.entities.get_mut(&id) {
-                    crate::mobs::equipment(&mut r, e, slot);
+                    crate::mobs::equipment(&mut r, e, crate::creative::read_stack);
                 }
             }
             play::C_SOUND | play::C_SOUND_ENTITY => {
@@ -1549,6 +1555,7 @@ pub(crate) fn entity_data(r: &mut In, e: &mut crate::entities::Entity) -> Option
                 if index == 9 && e.item.is_none() {
                     e.health = Some(v);
                 }
+                e.floats.insert(index, v);
             }
             4 => {
                 r.string()?;

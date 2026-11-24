@@ -2343,6 +2343,7 @@ fn outline_offset(b: &blocks::Blocks, s: u16, p: [i32; 3]) -> [f64; 3] {
             below: &g.ui.below_names,
             game_time: g.game_time,
             icons,
+            overlays,
             blocks: &g.blocks,
             atlas,
             atlas_size,
