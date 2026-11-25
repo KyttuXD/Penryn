@@ -73,8 +73,8 @@ jobs:
         run: sh scripts/build-mac.sh
 
       - name: The tools are valid Python
-        run: python3 -m py_compile tools/make_assets.py tools/relay.py tools/make_icon.py tools/test_relay_update.py
+        run: python3 -m py_compile tools/make_assets.py tools/relay.py tools/make_icon.py tools/setup.py tools/test_relay_update.py tools/test_setup.py
 
       # The relay's update platform names (the old "macos" and "linux" are the x86_64 builds; arm64 is never given Intel).
       - name: The relay's update names
-        run: python3 -I tools/test_relay_update.py
+        run: python3 -I tools/test_relay_update.py && python3 -I tools/test_setup.py

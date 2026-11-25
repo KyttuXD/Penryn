@@ -152,10 +152,14 @@ pub unsafe fn sock_close(fd: c_int) -> c_int {
 }
 
 /// Runs a shell command and waits for it (its exit status, -1 when it could not start).
-/// Windows: only the self-update ran commands, and it does not exist there.
+/// Windows: the C runtime's system() (cmd.exe /c), which `penryn setup` uses.
 #[cfg(windows)]
-pub fn shell(_cmd: &str) -> i32 {
-    -1
+pub fn shell(cmd: &str) -> i32 {
+    extern "C" {
+        fn system(cmd: *const c_char) -> c_int;
+    }
+    let c = cstr(cmd);
+    unsafe { system(c.as_ptr() as *const c_char) }
 }
 
 /// Runs a shell command and waits for it (its exit status, -1 when it could not start).

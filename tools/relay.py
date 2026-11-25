@@ -61,7 +61,11 @@ JAR_PLACES = [
 ]
 PREPARED_PLACES = [
     os.path.join(HOME, ".local/share/horizon-launcher/versions"),
+    os.path.join(HOME, "Library/Application Support/horizon-launcher/versions"),
+    os.path.join(os.environ.get("APPDATA") or os.path.join(HOME, "AppData/Roaming"), "horizon-launcher/versions"),
 ]
+if os.environ.get("HORIZON_LAUNCHER_HOME"):
+    PREPARED_PLACES.insert(0, os.path.join(os.environ["HORIZON_LAUNCHER_HOME"], "versions"))
 
 
 def call(url, data=None, form=None, token=None, method=None):
@@ -440,7 +444,17 @@ class Relay:
             if os.path.isfile(p):
                 return p
         p = os.path.join(self.data_dir, "client-%s.jar" % VERSION)
-        return p if os.path.isfile(p) else None
+        if os.path.isfile(p):
+            return p
+        # Another launcher's copy (Prism, MultiMC, Modrinth, ATLauncher, GDLauncher, CurseForge...): tools/setup.py knows
+        # where each keeps it.
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import setup as _setup  # noqa: E402
+            found = _setup.scan()
+            return found[0]["jar"] if found else None
+        except Exception:  # noqa: BLE001 - a missing or broken helper only means no jar found here
+            return None
 
     def download_jar(self, token):
         """The 26.3 client from Mojang, for a signed-in account that owns the game."""

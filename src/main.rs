@@ -121,6 +121,10 @@ const USAGE: &str = "Penryn: a Minecraft Java Edition 26.3 client for old Macs
   penryn login RELAY[:PORT] [NAME] sign in with your Microsoft account, through penryn-relay
                                    (Horizon's launcher's account there, else a device code)
   penryn logout                    forget the saved sign-in
+  penryn setup [--list] [--minecraft DIR] [--download] [--yes]
+                                   make the game files from your own Minecraft 26.3: finds the official launcher,
+                                   Prism, MultiMC, Modrinth, ATLauncher, GDLauncher, CurseForge..., or downloads it
+                                   from Mojang for your Microsoft account (needs Python 3 and the Horizon launcher)
   penryn status HOST[:PORT]        the server-list ping
   --no-update                      (with the title screen or play) skip the check for a newer nightly build
   --offline                        (or PENRYN_OFFLINE=1) no relay at all: offline play as --name (else the user
@@ -226,6 +230,7 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("selftest") => selftest(),
+        Some("setup") => setup(&args),
         Some("add-server") => {
             let ip = args.get(2).ok_or(USAGE)?;
             servers::address(ip).ok_or(USAGE)?;
@@ -320,6 +325,51 @@ fn run(args: &[String]) -> Result<(), String> {
             play::run(server, &name, acc, fetch_from)
         }
     }
+}
+
+/// `penryn setup ...`: runs tools/setup.py with Python (tools/ is beside the program, in the Mac app's Resources, or
+/// named by PENRYN_TOOLS).
+fn setup(args: &[String]) -> Result<(), String> {
+    let mut dirs: Vec<String> = Vec::new();
+    if let Some(t) = sys::env("PENRYN_TOOLS") {
+        dirs.push(t);
+    }
+    if let Some(app) = sys::env("PENRYN_APP") {
+        dirs.push(alloc::format!("{}/Contents/Resources/tools", app.trim_end_matches('/')));
+    }
+    if let Some(exe) = sys::exe_path() {
+        if let Some((d, _)) = exe.rsplit_once('/') {
+            dirs.push(alloc::format!("{}/tools", d));
+        }
+    }
+    dirs.push(String::from("tools"));
+    let script = dirs
+        .iter()
+        .map(|d| alloc::format!("{}/setup.py", d))
+        .find(|p| sys::read_head(p, 1).is_some())
+        .ok_or("tools/setup.py not found (set PENRYN_TOOLS to the folder holding it)")?;
+    let quote = |s: &str| -> String {
+        if cfg!(windows) {
+            alloc::format!("\"{}\"", s)
+        } else {
+            update::shell_quote(s)
+        }
+    };
+    let mut rest = String::new();
+    for a in args.iter().skip(2) {
+        rest.push(' ');
+        rest.push_str(&quote(a));
+    }
+    // The first Python that starts: python3, then python (Windows: the py launcher too).
+    let pythons: &[&str] = if cfg!(windows) { &["python", "py -3", "python3"] } else { &["python3", "python"] };
+    for py in pythons {
+        let code = sys::shell(&alloc::format!("{} {}{}", py, quote(&script), rest));
+        // 127 (not found) or 9009 / 1 from cmd.exe for a missing program: try the next one.
+        if code != 127 && code != 9009 && code != -1 {
+            return if code == 0 { Ok(()) } else { Err(alloc::format!("setup ended with status {}", code)) };
+        }
+    }
+    Err(String::from("Python 3 was not found: install it (python.org, or your package manager) and run `penryn setup` again"))
 }
 
 fn hex(b: &[u8]) -> String {

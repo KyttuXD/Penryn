@@ -339,6 +339,26 @@ another one (for tests). Without a record the name is joined on port 25565.
 options screens have saved `options.txt` there, its render distance and fullscreen win over
 `PENRYN_VIEW` and `PENRYN_FULLSCREEN` (settings.txt's VIEW and FULLSCREEN).
 
+## Making the game files: `penryn setup`
+
+Penryn's game files are made on your computer from your own Minecraft 26.3; nothing from Mojang is kept in this
+repository. `penryn setup` does it in one step (it needs Python 3 and the [Horizon launcher](https://github.com/horizon-rust/horizon),
+which prepares the game's tables once):
+
+```sh
+penryn setup --list            # what it found: your launchers' copies of 26.3, the Horizon launcher, prepared data
+penryn setup                   # import from a launcher and make the files into the data folder
+penryn setup --minecraft DIR   # look in this launcher folder or instance first
+penryn setup --download        # no install anywhere: sign in with Microsoft and download 26.3 from Mojang
+```
+
+It looks for a copy of 26.3 in the usual folders of the official launcher, Prism Launcher, MultiMC and PolyMC, the Modrinth
+App, ATLauncher, GDLauncher, CurseForge, TLauncher and Lunar Client (Linux, including Flatpak, macOS and Windows), then has
+`horizon-launcher prepare --minecraft FOLDER` read it. With `--download` it signs you in through the launcher (a code to type at
+a web page; `horizon-launcher account sign-in`) and downloads the game from Mojang itself for an account that owns Minecraft:
+Java Edition (`horizon-launcher prepare --download`), then makes the files. Earlier Horizon installs' prepared data is used
+as it is. The relay (`tools/relay.py`) finds the same installs when it makes files for other computers.
+
 ## Offline, no relay
 
 The relay is optional. Without one Penryn plays offline-mode servers under a name: `penryn --offline [--name NAME]

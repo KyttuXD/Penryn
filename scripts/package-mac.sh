@@ -32,6 +32,9 @@ cp "$BIN" "$APP/Contents/MacOS/penryn-bin"
 # Copy the framework without the AppleDouble "._" files a non-Mac copy picks up.
 tar -C "$(dirname "$SDL")" --exclude='._*' -cf - "$(basename "$SDL")" | tar -C "$APP/Contents/Frameworks" -xf -
 python3 -I tools/make_icon.py "$APP/Contents/Resources/Penryn.icns"
+# The game-file tools: `penryn setup` (tools/setup.py) makes the game files from the player's own Minecraft.
+mkdir -p "$APP/Contents/Resources/tools"
+cp tools/setup.py tools/relay.py tools/make_assets.py "$APP/Contents/Resources/tools/"
 cp README.md LICENSE "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<EOF

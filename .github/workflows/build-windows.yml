@@ -139,7 +139,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/penryn.exe" "$out/"
           cp vendor/sdl2/SDL2.dll "$out/"
           cp vendor/sdl2/SDL2-README.txt "$out/"
-          cp tools/relay.py tools/make_assets.py tools/make_icon.py "$out/tools/"
+          cp tools/relay.py tools/make_assets.py tools/make_icon.py tools/setup.py "$out/tools/"
           cp README.md LICENSE "$out/"
           # Double-click to play offline (offline-mode servers; the game files must be in %APPDATA%\Penryn).
           printf '@echo off\r\ncd /d "%%~dp0"\r\npenryn.exe --offline %%*\r\n' > "$out/Penryn-offline.bat"

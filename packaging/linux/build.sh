@@ -18,7 +18,7 @@ OUT=dist/penryn-linux
 rm -rf "$OUT" "dist/$NAME" "dist/$NAME.sha256"
 mkdir -p "$OUT/tools"
 cp "${CARGO_TARGET_DIR:-target}/release/penryn" "$OUT/penryn"
-cp tools/relay.py tools/make_assets.py tools/make_icon.py "$OUT/tools/"
+cp tools/relay.py tools/make_assets.py tools/make_icon.py tools/setup.py "$OUT/tools/"
 cp README.md LICENSE "$OUT/"
 tar -C dist -czf "dist/$NAME" penryn-linux
 rm -rf "$OUT"

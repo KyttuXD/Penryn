@@ -185,7 +185,7 @@ pub fn ensure_game_files(relay: Option<&(String, u16)>) -> Result<(), String> {
     }
     let Some(relay) = relay else {
         return Err(format!(
-            "the game files (blocks.bin, atlas.bin, gui.bin, entities.bin) are not in {}: give a relay (--relay HOST) to fetch them",
+            "the game files (blocks.bin, atlas.bin, gui.bin, entities.bin) are not in {}: run `penryn setup` to make them from your own Minecraft (it finds Prism, the official launcher and others, or downloads from Mojang), or give a relay (--relay HOST) to fetch them",
             dir
         ));
     };
